@@ -20,7 +20,7 @@ Don't upgrade any of these without asking first.
     - Table saw: `feed.rs` (`TableSawStation`) and `table_saw.rs`.
     - Miter saw: `chop.rs` (`MiterSawStation`, including the parts pile and cut list) and `miter_saw.rs`.
   - `shop.rs`: what the stations share: layout helpers (`Block`, `inches`, `block_transform`), the shared cube mesh and wood materials (`ShopAssets`), the camera, the readout, and `ActiveStation`. Each station's coordinates start at its own `ORIGIN`; keyboard controls only run at the active station.
-  - No wood disappears at the miter saw: anything taken off the saw goes on the parts pile.
+  - No wood disappears: anything a carried piece displaces, at either saw, goes on the parts pile (which lives in `MiterSawStation`). The one exception is R at the table saw, which throws the leftovers in the scrap bin.
   - Put game logic that doesn't need a window into plain structs like the station states so `cargo test -p game` can cover it.
 
 ## Commands

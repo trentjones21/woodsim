@@ -3,10 +3,11 @@
 use std::f32::consts::{FRAC_PI_2, PI};
 
 use bevy::{picking::pointer::PointerButton, prelude::*};
-use woodsim::Length;
+use woodsim::{Board, Length};
 
 use crate::{
     chop::MiterSawStation,
+    feed::TableSawStation,
     shop::{
         ActiveStation, Block, Part, ShopAssets, block_transform, inches, place_parts,
         pointer_on_plane, set_material_on, snap_to_sixteenth,
@@ -23,6 +24,7 @@ pub const HELP: &str = "Left/Right: move the stop 1/16\"   Shift+Left/Right: 1\"
                         Click a cut piece: slide it back against the stop\n\
                         Click a part on the pile: put it back on the saw   \
                         S: set everything on the saw aside\n\
+                        Right-click a piece or press T: carry it to the table saw   \
                         Tab: back to the table saw";
 
 /// A 12" blade.
@@ -57,7 +59,7 @@ impl Plugin for MiterSawPlugin {
                 Update,
                 (
                     (
-                        (move_stop_with_keys, set_aside_with_key)
+                        (move_stop_with_keys, set_aside_with_key, carry_with_key)
                             .run_if(resource_equals(ActiveStation::MiterSaw)),
                         work_blade,
                     ),
@@ -206,16 +208,7 @@ fn spawn_miter_saw(
         .observe(grab_stop)
         .observe(drag_stop);
 
-    commands.spawn((
-        Mesh3d(cube.clone()),
-        MeshMaterial3d(wood.clone()),
-        Transform::default(),
-        Visibility::Hidden,
-        Pickable::IGNORE,
-        Part::Uncut,
-        AtMiterSaw,
-    ));
-    for part in [Part::Piece, Part::Offcut] {
+    for part in [Part::Uncut, Part::Piece, Part::Offcut] {
         commands
             .spawn((
                 Mesh3d(cube.clone()),
@@ -225,9 +218,9 @@ fn spawn_miter_saw(
                 part,
                 AtMiterSaw,
             ))
-            .observe(highlight_pickable)
+            .observe(highlight_takeable)
             .observe(set_material_on::<PointerOut>(wood.clone()))
-            .observe(pick_up_clicked);
+            .observe(saw_part_clicked);
     }
 }
 
@@ -237,32 +230,76 @@ fn set_aside_with_key(keys: Res<ButtonInput<KeyCode>>, mut station: ResMut<Miter
     }
 }
 
-/// Lights up a cut piece under the pointer when it can be picked up.
-fn highlight_pickable(
+/// T carries the board against the stop to the table saw: the uncut board, or the measured
+/// piece of the last cut.
+fn carry_with_key(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut miter_saw: ResMut<MiterSawStation>,
+    mut table_saw: ResMut<TableSawStation>,
+    mut active: ResMut<ActiveStation>,
+) {
+    if keys.just_pressed(KeyCode::KeyT)
+        && let Some(board) = miter_saw
+            .take(Part::Uncut)
+            .or_else(|| miter_saw.take(Part::Piece))
+    {
+        carry_to_table_saw(board, &mut table_saw, &mut miter_saw, &mut active);
+    }
+}
+
+/// Puts `board` on the table saw and goes there. Whatever was on the table saw goes on the pile.
+fn carry_to_table_saw(
+    board: Board,
+    table_saw: &mut TableSawStation,
+    miter_saw: &mut MiterSawStation,
+    active: &mut ActiveStation,
+) {
+    miter_saw.parts.extend(table_saw.load(board));
+    *active = ActiveStation::TableSaw;
+}
+
+/// Lights up a board on the saw under the pointer when it can be handled.
+fn highlight_takeable(
     over: On<PointerOver>,
+    parts: Query<&Part>,
     station: Res<MiterSawStation>,
     shop: Res<ShopAssets>,
     mut materials: Query<&mut MeshMaterial3d<StandardMaterial>>,
 ) {
-    if station.can_pick_up()
+    if let Ok(part) = parts.get(over.entity)
+        && station.can_take(*part)
         && let Ok(mut material) = materials.get_mut(over.entity)
     {
         material.0 = shop.wood_highlight.clone();
     }
 }
 
-fn pick_up_clicked(
+/// Click a cut piece to slide it back against the stop; right-click any board on the saw to
+/// carry it to the table saw.
+fn saw_part_clicked(
     click: On<PointerClick>,
     parts: Query<&Part>,
     shop: Res<ShopAssets>,
     mut materials: Query<&mut MeshMaterial3d<StandardMaterial>>,
-    mut station: ResMut<MiterSawStation>,
+    mut miter_saw: ResMut<MiterSawStation>,
+    mut table_saw: ResMut<TableSawStation>,
+    mut active: ResMut<ActiveStation>,
 ) {
-    if click.button == PointerButton::Primary
-        && let Ok(part) = parts.get(click.entity)
-        && station.pick_up(*part)
-        && let Ok(mut material) = materials.get_mut(click.entity)
-    {
+    let Ok(&part) = parts.get(click.entity) else {
+        return;
+    };
+    let handled = match click.button {
+        PointerButton::Primary => miter_saw.pick_up(part),
+        PointerButton::Secondary => match miter_saw.take(part) {
+            Some(board) => {
+                carry_to_table_saw(board, &mut table_saw, &mut miter_saw, &mut active);
+                true
+            }
+            None => false,
+        },
+        _ => false,
+    };
+    if handled && let Ok(mut material) = materials.get_mut(click.entity) {
         material.0 = shop.wood.clone();
     }
 }
@@ -395,7 +432,7 @@ fn draw_pile(
             ))
             .observe(highlight_on_pile)
             .observe(set_material_on::<PointerOut>(shop.wood.clone()))
-            .observe(take_clicked_from_pile);
+            .observe(pile_part_clicked);
     }
 }
 
@@ -413,19 +450,33 @@ fn highlight_on_pile(
     }
 }
 
-fn take_clicked_from_pile(
+/// Click a part on the pile to put it back on the miter saw; right-click it to carry it to the
+/// table saw.
+fn pile_part_clicked(
     click: On<PointerClick>,
     pile: Query<&PilePart>,
     shop: Res<ShopAssets>,
     mut materials: Query<&mut MeshMaterial3d<StandardMaterial>>,
-    mut station: ResMut<MiterSawStation>,
+    mut miter_saw: ResMut<MiterSawStation>,
+    mut table_saw: ResMut<TableSawStation>,
+    mut active: ResMut<ActiveStation>,
 ) {
+    let Ok(part) = pile.get(click.entity) else {
+        return;
+    };
+    let handled = match click.button {
+        PointerButton::Primary => miter_saw.take_from_pile(part.0),
+        PointerButton::Secondary => match miter_saw.remove_from_pile(part.0) {
+            Some(board) => {
+                carry_to_table_saw(board, &mut table_saw, &mut miter_saw, &mut active);
+                true
+            }
+            None => false,
+        },
+        _ => false,
+    };
     // The box clicked will show a different part once the pile shifts, so drop its highlight.
-    if click.button == PointerButton::Primary
-        && let Ok(part) = pile.get(click.entity)
-        && station.take_from_pile(part.0)
-        && let Ok(mut material) = materials.get_mut(click.entity)
-    {
+    if handled && let Ok(mut material) = materials.get_mut(click.entity) {
         material.0 = shop.wood.clone();
     }
 }

@@ -108,9 +108,34 @@ impl MiterSawStation {
         self.lowered = (self.lowered - amount).max(0.0);
     }
 
-    /// Whether a cut piece can be picked up: there are pieces, and the blade is up.
-    pub fn can_pick_up(&self) -> bool {
-        matches!(self.work, Work::Cut { .. }) && self.blade_up()
+    /// Whether `part` is on the saw and can be handled: only with the blade up.
+    pub fn can_take(&self, part: Part) -> bool {
+        self.blade_up()
+            && match (&self.work, part) {
+                (Work::Ready { .. }, Part::Uncut) | (Work::Cut { .. }, Part::Piece) => true,
+                (Work::Cut { cut, .. }, Part::Offcut) => cut.offcut.is_some(),
+                _ => false,
+            }
+    }
+
+    /// Lifts a board off the saw to carry it elsewhere: the board against the stop, or one side
+    /// of the last cut, with the other side set aside on the pile.
+    pub fn take(&mut self, part: Part) -> Option<Board> {
+        if !self.can_take(part) {
+            return None;
+        }
+        match std::mem::replace(&mut self.work, Work::Empty) {
+            Work::Empty => None,
+            Work::Ready { board, .. } => Some(board),
+            Work::Cut { cut, .. } => {
+                let (taken, other) = match (part, cut.offcut) {
+                    (Part::Offcut, Some(offcut)) => (offcut, Some(cut.piece)),
+                    (_, offcut) => (cut.piece, offcut),
+                };
+                self.parts.extend(other);
+                Some(taken)
+            }
+        }
     }
 
     /// Slides one side of the last cut back against the stop for another cut, and sets the other
@@ -158,6 +183,11 @@ impl MiterSawStation {
         let board = self.parts.remove(index);
         self.load(board);
         true
+    }
+
+    /// Lifts the part at `index` off the pile to carry it elsewhere.
+    pub fn remove_from_pile(&mut self, index: usize) -> Option<Board> {
+        (index < self.parts.len()).then(|| self.parts.remove(index))
     }
 
     fn clear_saw(&mut self) {
@@ -394,9 +424,43 @@ mod tests {
     fn nothing_can_be_picked_up_with_the_blade_down() {
         let mut station = loaded();
         station.lower(1.0);
-        assert!(!station.can_pick_up());
+        assert!(!station.can_take(Part::Piece));
         assert!(!station.pick_up(Part::Piece));
+        assert_eq!(station.take(Part::Piece), None);
         assert!(!station.set_aside());
+        assert!(station.parts.is_empty());
+        assert!(matches!(station.work, Work::Cut { .. }));
+    }
+
+    #[test]
+    fn taking_the_board_against_the_stop_empties_the_saw() {
+        let mut station = loaded();
+
+        assert_eq!(station.take(Part::Piece), None);
+        assert_eq!(station.take(Part::Uncut), Some(ripped_piece()));
+        assert!(matches!(station.work, Work::Empty));
+        assert!(station.parts.is_empty());
+    }
+
+    #[test]
+    fn taking_one_side_of_a_cut_sets_the_other_aside() {
+        let mut station = loaded();
+        chop(&mut station);
+        let taken = station.take(Part::Piece).unwrap();
+
+        assert_eq!(taken.length(), Length::from_inches(12));
+        assert!(matches!(station.work, Work::Empty));
+        assert_eq!(station.parts.len(), 1);
+        assert_eq!(station.parts[0].length(), Length::from_inch_fraction(95, 8));
+    }
+
+    #[test]
+    fn parts_can_be_lifted_off_the_pile() {
+        let mut station = loaded();
+        station.set_aside();
+
+        assert_eq!(station.remove_from_pile(1), None);
+        assert_eq!(station.remove_from_pile(0), Some(ripped_piece()));
         assert!(station.parts.is_empty());
     }
 

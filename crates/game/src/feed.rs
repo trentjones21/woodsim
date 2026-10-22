@@ -110,11 +110,32 @@ impl TableSawStation {
         Some(board)
     }
 
-    /// Clears the saw and puts a fresh board against the fence.
+    /// Puts a fresh 1x8 against the fence. Whatever was on the saw goes in the scrap bin.
     pub fn new_board(&mut self) {
-        self.stock = new_stock();
+        self.load(new_stock());
+    }
+
+    /// Puts `board` against the fence, ready to rip, and hands back whatever was on the saw: the
+    /// pieces of the last rip that weren't carried off, or the board that was waiting. A board
+    /// left partway through the blade counts as cut.
+    pub fn load(&mut self, board: Board) -> Vec<Board> {
+        let leftovers = match &self.feed {
+            Feed::Pushing {
+                result: Ok(cut), ..
+            } => [
+                (Part::Piece, Some(&cut.piece)),
+                (Part::Offcut, cut.offcut.as_ref()),
+            ]
+            .into_iter()
+            .filter(|(part, _)| !self.taken.contains(part))
+            .filter_map(|(_, board)| board.cloned())
+            .collect(),
+            _ => vec![self.stock.clone()],
+        };
+        self.stock = board;
         self.feed = Feed::Ready;
         self.taken.clear();
+        leftovers
     }
 
     /// Whether a board is partway past the blade.
@@ -316,5 +337,49 @@ mod tests {
         assert!(matches!(station.feed, Feed::Ready));
         assert!(station.board_blocks().uncut.is_some());
         assert!(station.taken.is_empty());
+    }
+
+    /// A 3/4" x 6" x 12" piece, as if carried over from the miter saw.
+    fn crosscut_piece() -> Board {
+        Board::new(
+            Length::from_inches(12),
+            Length::from_inches(6),
+            Length::from_inch_fraction(3, 4),
+        )
+    }
+
+    #[test]
+    fn loading_a_board_hands_back_the_board_that_was_waiting() {
+        let mut station = TableSawStation::default();
+        let leftovers = station.load(crosscut_piece());
+
+        assert_eq!(leftovers, [new_stock()]);
+        assert_eq!(station.stock, crosscut_piece());
+        assert_eq!(
+            station.status(),
+            "Board on the saw: 3/4\" x 6\" x 12\". Hold Space to push it through."
+        );
+    }
+
+    #[test]
+    fn loading_a_board_hands_back_the_pieces_not_carried_off() {
+        let mut station = TableSawStation::default();
+        station.push(10.0);
+        station.take(Part::Piece);
+        let leftovers = station.load(crosscut_piece());
+
+        let widths: Vec<Length> = leftovers.iter().map(Board::width).collect();
+        assert_eq!(widths, [Length::from_inch_fraction(9, 8)]);
+        assert!(matches!(station.feed, Feed::Ready));
+        assert!(station.taken.is_empty());
+    }
+
+    #[test]
+    fn loading_after_a_miss_hands_back_the_whole_board() {
+        let mut station = TableSawStation::default();
+        station.set_fence(Length::from_inches(8));
+        station.push(10.0);
+
+        assert_eq!(station.load(crosscut_piece()), [new_stock()]);
     }
 }
