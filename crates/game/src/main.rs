@@ -1,6 +1,9 @@
 //! Woodshop Simulator. Bevy draws the shop; `woodsim` owns every board's real dimensions.
 
+mod chop;
 mod feed;
+mod miter_saw;
+mod shop;
 mod table_saw;
 
 use std::path::PathBuf;
@@ -11,6 +14,8 @@ use bevy::{
     render::view::screenshot::{Screenshot, save_to_disk},
 };
 
+use miter_saw::MiterSawPlugin;
+use shop::ShopPlugin;
 use table_saw::TableSawPlugin;
 
 fn main() {
@@ -24,9 +29,10 @@ fn main() {
             ..default()
         }),
         MeshPickingPlugin,
+        ShopPlugin,
         TableSawPlugin,
-    ))
-    .add_systems(Startup, spawn_shop);
+        MiterSawPlugin,
+    ));
 
     // `WOODSHOP_SCREENSHOT=screenshots/shop.png cargo run -p game` renders a few frames,
     // saves one to that path, and quits, so changes can be checked without anyone watching.
@@ -39,31 +45,6 @@ fn main() {
     }
 
     app.run();
-}
-
-/// The garage around the saw: a floor, a light, and the operator's view from the infeed side.
-fn spawn_shop(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-) {
-    commands.spawn((
-        Mesh3d(meshes.add(Plane3d::default().mesh().size(6.0, 6.0))),
-        MeshMaterial3d(materials.add(Color::srgb(0.55, 0.55, 0.52))),
-        Pickable::IGNORE,
-    ));
-    commands.spawn((
-        DirectionalLight {
-            shadow_maps_enabled: true,
-            ..default()
-        },
-        Transform::from_xyz(1.0, 4.0, 2.0).looking_at(Vec3::ZERO, Vec3::Y),
-    ));
-    // Standing at the front of the saw, a little left of the blade, looking down at the table.
-    commands.spawn((
-        Camera3d::default(),
-        Transform::from_xyz(-0.3, 1.65, 1.35).looking_at(Vec3::new(0.1, 0.86, -0.05), Vec3::Y),
-    ));
 }
 
 #[derive(Resource)]

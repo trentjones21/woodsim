@@ -1,13 +1,29 @@
-//! The table saw station: the saw, its fence, the board, the controls, and the readout.
+//! The table saw station: the saw, its fence, the board, and the controls.
 
 use std::f32::consts::FRAC_PI_2;
 
 use bevy::{picking::pointer::PointerButton, prelude::*};
 use woodsim::Length;
 
-use crate::feed::{BLADE_DROP, BLADE_RADIUS, Bench, Block, inches};
+use crate::{
+    chop::MiterSawStation,
+    feed::{BLADE_DROP, BLADE_RADIUS, TableSawStation},
+    shop::{
+        ActiveStation, Block, Part, block_transform, inches, place_parts, pointer_on_plane,
+        set_material_on, snap_to_sixteenth,
+    },
+};
 
-const TABLE_TOP: f32 = inches(34.0);
+/// Where the station's coordinates start in the shop: the blade's fence-side face, at the
+/// table top.
+pub const ORIGIN: Vec3 = Vec3::new(0.0, inches(34.0), 0.0);
+
+pub const HELP: &str = "Left/Right: move the fence 1/16\"   Shift+Left/Right: 1\"   \
+                        Or drag the fence\n\
+                        Hold Space: push the board   R: new board\n\
+                        Click a cut piece or press C: carry it to the miter saw   \
+                        Tab: go to the miter saw";
+
 /// The cast-iron top, in table space.
 const TABLE_LEFT: f32 = inches(-14.0);
 const TABLE_RIGHT: f32 = inches(28.0);
@@ -31,13 +47,14 @@ pub struct TableSawPlugin;
 
 impl Plugin for TableSawPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<Bench>()
-            .add_systems(Startup, (spawn_saw, spawn_readout))
+        app.init_resource::<TableSawStation>()
+            .add_systems(Startup, spawn_saw)
             .add_systems(
                 Update,
                 (
-                    (move_fence_with_keys, push_board, new_board),
-                    (draw_fence, draw_board, update_readout),
+                    (move_fence_with_keys, push_board, new_board, carry_with_key)
+                        .run_if(resource_equals(ActiveStation::TableSaw)),
+                    (draw_fence, draw_board),
                 )
                     .chain(),
             );
@@ -50,24 +67,21 @@ struct Fence {
     grab_offset: f32,
 }
 
-#[derive(Component, Clone, Copy)]
-enum BoardPart {
-    Uncut,
-    Piece,
-    Offcut,
+#[derive(Component)]
+struct AtTableSaw;
+
+/// The board's look, and how a cut piece looks when the pointer is over it and it can be carried.
+#[derive(Resource)]
+struct PieceMaterials {
+    wood: Handle<StandardMaterial>,
+    highlight: Handle<StandardMaterial>,
 }
-
-#[derive(Component)]
-struct FenceReading;
-
-#[derive(Component)]
-struct CutStatus;
 
 fn spawn_saw(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    bench: Res<Bench>,
+    station: Res<TableSawStation>,
 ) {
     let cube = meshes.add(Cuboid::new(1.0, 1.0, 1.0));
     let cast_iron = materials.add(StandardMaterial {
@@ -79,12 +93,13 @@ fn spawn_saw(
     let cabinet = materials.add(Color::srgb(0.2, 0.3, 0.45));
     let outfeed = materials.add(Color::srgb(0.32, 0.32, 0.34));
     let wood = materials.add(Color::srgb(0.87, 0.72, 0.53));
+    let highlight = materials.add(Color::srgb(1.0, 0.86, 0.62));
 
     let mut spawn_box = |material: &Handle<StandardMaterial>, min: Vec3, max: Vec3| {
         commands.spawn((
             Mesh3d(cube.clone()),
             MeshMaterial3d(material.clone()),
-            block_transform(Block { min, max }),
+            block_transform(Block { min, max }, ORIGIN),
             Pickable::IGNORE,
         ));
     };
@@ -101,7 +116,7 @@ fn spawn_saw(
     );
     spawn_box(
         &cabinet,
-        Vec3::new(inches(-10.0), -TABLE_TOP, inches(-10.0)),
+        Vec3::new(inches(-10.0), -ORIGIN.y, inches(-10.0)),
         Vec3::new(inches(10.0), inches(-1.5), inches(10.0)),
     );
     // Outfeed table and the panel holding up its far end.
@@ -112,11 +127,11 @@ fn spawn_saw(
     );
     spawn_box(
         &outfeed,
-        Vec3::new(inches(-9.0), -TABLE_TOP, OUTFEED_END),
+        Vec3::new(inches(-9.0), -ORIGIN.y, OUTFEED_END),
         Vec3::new(inches(19.0), inches(-0.75), OUTFEED_END + inches(0.75)),
     );
 
-    let kerf = bench.saw.blade.kerf.as_meters_f32();
+    let kerf = station.saw.blade.kerf.as_meters_f32();
     commands.spawn((
         Mesh3d(meshes.add(Cylinder::new(BLADE_RADIUS, kerf))),
         MeshMaterial3d(materials.add(StandardMaterial {
@@ -126,7 +141,7 @@ fn spawn_saw(
             ..default()
         })),
         // A cylinder's axis starts along Y; turn it to X so the blade spins toward the operator.
-        Transform::from_xyz(-kerf / 2.0, TABLE_TOP - BLADE_DROP, 0.0)
+        Transform::from_translation(ORIGIN + Vec3::new(-kerf / 2.0, -BLADE_DROP, 0.0))
             .with_rotation(Quat::from_rotation_z(FRAC_PI_2)),
         Pickable::IGNORE,
     ));
@@ -145,81 +160,44 @@ fn spawn_saw(
         .observe(grab_fence)
         .observe(drag_fence);
 
-    for part in [BoardPart::Uncut, BoardPart::Piece, BoardPart::Offcut] {
-        commands.spawn((
-            Mesh3d(cube.clone()),
-            MeshMaterial3d(wood.clone()),
-            Transform::default(),
-            Visibility::Hidden,
-            Pickable::IGNORE,
-            part,
-        ));
+    commands.spawn((
+        Mesh3d(cube.clone()),
+        MeshMaterial3d(wood.clone()),
+        Transform::default(),
+        Visibility::Hidden,
+        Pickable::IGNORE,
+        Part::Uncut,
+        AtTableSaw,
+    ));
+    for part in [Part::Piece, Part::Offcut] {
+        commands
+            .spawn((
+                Mesh3d(cube.clone()),
+                MeshMaterial3d(wood.clone()),
+                Transform::default(),
+                Visibility::Hidden,
+                part,
+                AtTableSaw,
+            ))
+            .observe(highlight_carryable)
+            .observe(set_material_on::<PointerOut>(wood.clone()))
+            .observe(carry_clicked);
     }
+    commands.insert_resource(PieceMaterials { wood, highlight });
 }
 
-fn spawn_readout(mut commands: Commands) {
-    let panel = |top_or_bottom: Node| Node {
-        position_type: PositionType::Absolute,
-        left: px(12),
-        padding: UiRect::axes(px(10), px(6)),
-        ..top_or_bottom
-    };
-    let backdrop = BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.6));
-    commands.spawn((
-        Text::default(),
-        TextFont {
-            font_size: FontSize::Px(36.0),
-            ..default()
-        },
-        panel(Node {
-            top: px(12),
-            ..default()
-        }),
-        backdrop,
-        FenceReading,
-    ));
-    commands.spawn((
-        Text::default(),
-        TextFont {
-            font_size: FontSize::Px(18.0),
-            ..default()
-        },
-        panel(Node {
-            top: px(76),
-            ..default()
-        }),
-        backdrop,
-        CutStatus,
-    ));
-    commands.spawn((
-        Text::new(
-            "Left/Right: move the fence 1/16\"   Shift+Left/Right: 1\"   Or drag the fence\n\
-             Hold Space: push the board   R: new board",
-        ),
-        TextFont {
-            font_size: FontSize::Px(16.0),
-            ..default()
-        },
-        panel(Node {
-            bottom: px(12),
-            ..default()
-        }),
-        backdrop,
-    ));
-}
-
-fn move_fence_with_keys(keys: Res<ButtonInput<KeyCode>>, mut bench: ResMut<Bench>) {
+fn move_fence_with_keys(keys: Res<ButtonInput<KeyCode>>, mut station: ResMut<TableSawStation>) {
     let step = if keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]) {
         FENCE_BIG_STEP
     } else {
         FENCE_STEP
     };
-    let fence = bench.saw.fence;
+    let fence = station.saw.fence;
     if keys.just_pressed(KeyCode::ArrowRight) {
-        bench.set_fence(fence + step);
+        station.set_fence(fence + step);
     }
     if keys.just_pressed(KeyCode::ArrowLeft) {
-        bench.set_fence(fence - step);
+        station.set_fence(fence - step);
     }
 }
 
@@ -228,14 +206,19 @@ fn grab_fence(
     drag: On<PointerDragStart>,
     camera: Single<(&Camera, &GlobalTransform)>,
     mut fences: Query<&mut Fence>,
-    bench: Res<Bench>,
+    station: Res<TableSawStation>,
 ) {
     let (camera, camera_transform) = *camera;
     if drag.button == PointerButton::Primary
-        && let Some(x) = pointer_x(camera, camera_transform, drag.pointer.position)
+        && let Some(point) = pointer_on_plane(
+            camera,
+            camera_transform,
+            drag.pointer.position,
+            ORIGIN.y + FENCE_HEIGHT,
+        )
         && let Ok(mut fence) = fences.get_mut(drag.entity)
     {
-        fence.grab_offset = x - bench.saw.fence.as_meters_f32();
+        fence.grab_offset = point.x - ORIGIN.x - station.saw.fence.as_meters_f32();
     }
 }
 
@@ -243,95 +226,112 @@ fn drag_fence(
     drag: On<PointerDrag>,
     camera: Single<(&Camera, &GlobalTransform)>,
     fences: Query<&Fence>,
-    mut bench: ResMut<Bench>,
+    mut station: ResMut<TableSawStation>,
 ) {
     let (camera, camera_transform) = *camera;
     if drag.button == PointerButton::Primary
-        && let Some(x) = pointer_x(camera, camera_transform, drag.pointer.position)
+        && let Some(point) = pointer_on_plane(
+            camera,
+            camera_transform,
+            drag.pointer.position,
+            ORIGIN.y + FENCE_HEIGHT,
+        )
         && let Ok(fence) = fences.get(drag.entity)
     {
-        bench.set_fence(snap_to_sixteenth(x - fence.grab_offset));
+        station.set_fence(snap_to_sixteenth(point.x - ORIGIN.x - fence.grab_offset));
     }
 }
 
-/// Where the pointer is across the table (x, in meters), on a level plane at the fence's top.
-fn pointer_x(camera: &Camera, camera_transform: &GlobalTransform, position: Vec2) -> Option<f32> {
-    let ray = camera.viewport_to_world(camera_transform, position).ok()?;
-    let fence_top = Vec3::Y * (TABLE_TOP + FENCE_HEIGHT);
-    let point = ray.plane_intersection_point(fence_top, InfinitePlane3d::new(Vec3::Y))?;
-    Some(point.x)
-}
-
-/// Rounds a fence position in meters to the nearest 1/16", the finest mark on the fence scale.
-fn snap_to_sixteenth(meters: f32) -> Length {
-    let sixteenths = (meters / inches(1.0) * 16.0).round() as i64;
-    Length::from_inch_fraction(sixteenths, 16)
-}
-
-fn push_board(keys: Res<ButtonInput<KeyCode>>, time: Res<Time>, mut bench: ResMut<Bench>) {
-    if keys.pressed(KeyCode::Space) && !bench.is_through() {
-        bench.push(FEED_SPEED * time.delta_secs());
-    }
-}
-
-fn new_board(keys: Res<ButtonInput<KeyCode>>, mut bench: ResMut<Bench>) {
-    if keys.just_pressed(KeyCode::KeyR) {
-        bench.new_board();
-    }
-}
-
-fn draw_fence(bench: Res<Bench>, mut fence: Single<&mut Transform, With<Fence>>) {
-    if bench.is_changed() {
-        let x = bench.saw.fence.as_meters_f32() + FENCE_WIDTH / 2.0;
-        fence.translation = Vec3::new(x, TABLE_TOP + FENCE_HEIGHT / 2.0, FENCE_Z);
-    }
-}
-
-fn draw_board(bench: Res<Bench>, mut parts: Query<(&BoardPart, &mut Transform, &mut Visibility)>) {
-    if !bench.is_changed() {
-        return;
-    }
-    let blocks = bench.board_blocks();
-    for (part, mut transform, mut visibility) in &mut parts {
-        let block = match part {
-            BoardPart::Uncut => blocks.uncut,
-            BoardPart::Piece => blocks.piece,
-            BoardPart::Offcut => blocks.offcut,
-        };
-        match block {
-            Some(block) => {
-                *transform = block_transform(block);
-                *visibility = Visibility::Inherited;
-            }
-            None => *visibility = Visibility::Hidden,
-        }
-    }
-}
-
-fn update_readout(
-    bench: Res<Bench>,
-    mut fence_reading: Single<&mut Text, With<FenceReading>>,
-    mut status: Single<&mut Text, (With<CutStatus>, Without<FenceReading>)>,
+fn push_board(
+    keys: Res<ButtonInput<KeyCode>>,
+    time: Res<Time>,
+    mut station: ResMut<TableSawStation>,
 ) {
-    if bench.is_changed() {
-        fence_reading.0 = format!("Fence: {}", bench.saw.fence);
-        status.0 = bench.status();
+    if keys.pressed(KeyCode::Space) && !station.is_through() {
+        station.push(FEED_SPEED * time.delta_secs());
     }
 }
 
-/// Places a unit cube so it fills `block`, which is in table space.
-fn block_transform(block: Block) -> Transform {
-    let center = (block.min + block.max) / 2.0 + Vec3::Y * TABLE_TOP;
-    Transform::from_translation(center).with_scale(block.max - block.min)
+fn new_board(keys: Res<ButtonInput<KeyCode>>, mut station: ResMut<TableSawStation>) {
+    if keys.just_pressed(KeyCode::KeyR) {
+        station.new_board();
+    }
 }
 
-/// Returns an observer that swaps the entity's material when event `E` happens to it.
-fn set_material_on<E: EntityEvent>(
-    material: Handle<StandardMaterial>,
-) -> impl Fn(On<E>, Query<&mut MeshMaterial3d<StandardMaterial>>) {
-    move |event, mut materials| {
-        if let Ok(mut current) = materials.get_mut(event.event_target()) {
-            current.0 = material.clone();
-        }
+/// Carries a piece off the outfeed side to the miter saw and goes there. Returns false if
+/// that piece isn't there to take.
+fn carry(
+    part: Part,
+    table_saw: &mut TableSawStation,
+    miter_saw: &mut MiterSawStation,
+    active: &mut ActiveStation,
+) -> bool {
+    let Some(board) = table_saw.take(part) else {
+        return false;
+    };
+    miter_saw.load(board);
+    *active = ActiveStation::MiterSaw;
+    true
+}
+
+/// C carries the piece cut against the fence, or the offcut once that piece is gone.
+fn carry_with_key(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut table_saw: ResMut<TableSawStation>,
+    mut miter_saw: ResMut<MiterSawStation>,
+    mut active: ResMut<ActiveStation>,
+) {
+    if keys.just_pressed(KeyCode::KeyC)
+        && !carry(Part::Piece, &mut table_saw, &mut miter_saw, &mut active)
+    {
+        carry(Part::Offcut, &mut table_saw, &mut miter_saw, &mut active);
+    }
+}
+
+fn carry_clicked(
+    click: On<PointerClick>,
+    parts: Query<&Part>,
+    look: Res<PieceMaterials>,
+    mut materials: Query<&mut MeshMaterial3d<StandardMaterial>>,
+    mut table_saw: ResMut<TableSawStation>,
+    mut miter_saw: ResMut<MiterSawStation>,
+    mut active: ResMut<ActiveStation>,
+) {
+    if click.button == PointerButton::Primary
+        && let Ok(part) = parts.get(click.entity)
+        && carry(*part, &mut table_saw, &mut miter_saw, &mut active)
+        && let Ok(mut material) = materials.get_mut(click.entity)
+    {
+        material.0 = look.wood.clone();
+    }
+}
+
+/// Lights up a cut piece under the pointer when it can be carried off.
+fn highlight_carryable(
+    over: On<PointerOver>,
+    station: Res<TableSawStation>,
+    look: Res<PieceMaterials>,
+    mut materials: Query<&mut MeshMaterial3d<StandardMaterial>>,
+) {
+    if station.is_through()
+        && let Ok(mut material) = materials.get_mut(over.entity)
+    {
+        material.0 = look.highlight.clone();
+    }
+}
+
+fn draw_fence(station: Res<TableSawStation>, mut fence: Single<&mut Transform, With<Fence>>) {
+    if station.is_changed() {
+        let x = station.saw.fence.as_meters_f32() + FENCE_WIDTH / 2.0;
+        fence.translation = ORIGIN + Vec3::new(x, FENCE_HEIGHT / 2.0, FENCE_Z);
+    }
+}
+
+fn draw_board(
+    station: Res<TableSawStation>,
+    mut parts: Query<(&Part, &mut Transform, &mut Visibility), With<AtTableSaw>>,
+) {
+    if station.is_changed() {
+        place_parts(&station.board_blocks(), ORIGIN, &mut parts);
     }
 }

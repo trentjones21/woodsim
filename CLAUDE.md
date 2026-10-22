@@ -16,9 +16,11 @@ Don't upgrade any of these without asking first.
 
 - `crates/woodsim`: the woodworking simulation. Boards, `Length`, saws, cuts. **No Bevy dependency, ever.** Every rule about wood lives here and is tested here.
 - `crates/game`: the Bevy app. It draws boards and turns input into `woodsim` calls. It never changes board dimensions itself.
-  - `feed.rs`: the table saw station's state (`Bench`) and where to draw the board as it's pushed. Plain Rust, no systems, unit tested.
-  - `table_saw.rs`: the Bevy side of the station: spawning, input, drawing, and the readout.
-  - Put game logic that doesn't need a window into plain structs like `Bench` so `cargo test -p game` can cover it.
+  - Each station is a pair of modules: its state and where to draw the board (plain Rust, no systems, unit tested), and its Bevy side (spawning, input, drawing).
+    - Table saw: `feed.rs` (`TableSawStation`) and `table_saw.rs`.
+    - Miter saw: `chop.rs` (`MiterSawStation`) and `miter_saw.rs`.
+  - `shop.rs`: what the stations share: layout helpers (`Block`, `inches`, `block_transform`), the camera, the readout, and `ActiveStation`. Each station's coordinates start at its own `ORIGIN`; keyboard controls only run at the active station.
+  - Put game logic that doesn't need a window into plain structs like the station states so `cargo test -p game` can cover it.
 
 ## Commands
 
