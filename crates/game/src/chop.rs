@@ -144,6 +144,22 @@ impl MiterSawStation {
         true
     }
 
+    /// Whether parts can come off the pile: only with the blade up.
+    pub fn can_take_from_pile(&self) -> bool {
+        self.blade_up()
+    }
+
+    /// Puts the part at `index` on the pile back against the stop, setting aside whatever was on
+    /// the saw. Returns false if there's no such part or the blade is down.
+    pub fn take_from_pile(&mut self, index: usize) -> bool {
+        if !self.can_take_from_pile() || index >= self.parts.len() {
+            return false;
+        }
+        let board = self.parts.remove(index);
+        self.load(board);
+        true
+    }
+
     fn clear_saw(&mut self) {
         match std::mem::replace(&mut self.work, Work::Empty) {
             Work::Empty => {}
@@ -434,6 +450,34 @@ mod tests {
         }
         assert_close(blocks[0].min.y, 0.0);
         assert_close(blocks[1].min.y, blocks[0].max.y + PILE_GAP);
+    }
+
+    #[test]
+    fn taking_a_part_off_the_pile_swaps_it_with_whatever_is_on_the_saw() {
+        let mut station = loaded();
+        chop(&mut station);
+        station.set_aside();
+        station.load(ripped_piece());
+        // The pile is now the 12" piece, then the 11-7/8" offcut; the 24" board is on the saw.
+
+        assert!(station.take_from_pile(1));
+        let Work::Ready { board, .. } = &station.work else {
+            panic!("the offcut should be against the stop");
+        };
+        assert_eq!(board.length(), Length::from_inch_fraction(95, 8));
+        let lengths: Vec<Length> = station.parts.iter().map(Board::length).collect();
+        assert_eq!(lengths, [Length::from_inches(12), Length::from_inches(24)]);
+    }
+
+    #[test]
+    fn nothing_comes_off_the_pile_with_the_blade_down_or_past_its_end() {
+        let mut station = loaded();
+        station.set_aside();
+        assert!(!station.take_from_pile(1));
+
+        station.lower(0.5);
+        assert!(!station.take_from_pile(0));
+        assert_eq!(station.parts.len(), 1);
     }
 
     #[test]

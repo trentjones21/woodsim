@@ -29,6 +29,7 @@ Don't upgrade any of these without asking first.
 - `cargo run -p game`: run the game.
 - `cargo run -p game --features dev`: same, with Bevy dynamic linking for faster rebuilds.
 - `WOODSHOP_SCREENSHOT=screenshots/shop.png cargo run -p game`: render a few frames, save a screenshot, quit. Use this to check visual changes yourself, then look at the image.
+  - Now and then a screenshot comes back all black. Retake it before assuming a rendering bug; so far every retake has been fine.
   - To check an interaction, temporarily add a `PreUpdate` system that calls `ButtonInput::<KeyCode>::press`, ordered `.after(bevy::input::InputSystems)`. Without that ordering, Bevy clears `just_pressed` before the game sees it. Remove the system afterward.
 - `cargo clippy --workspace --all-targets` and `cargo fmt --all` before finishing.
 

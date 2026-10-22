@@ -21,7 +21,9 @@ pub const HELP: &str = "Left/Right: move the stop 1/16\"   Shift+Left/Right: 1\"
                         Or drag the stop block\n\
                         Hold Space: lower the blade   \
                         Click a cut piece: slide it back against the stop\n\
-                        S: set everything on the saw aside   Tab: back to the table saw";
+                        Click a part on the pile: put it back on the saw   \
+                        S: set everything on the saw aside\n\
+                        Tab: back to the table saw";
 
 /// A 12" blade.
 const BLADE_RADIUS: f32 = inches(6.0);
@@ -384,12 +386,46 @@ fn draw_pile(
         }
     }
     for (index, block) in blocks.iter().enumerate().skip(drawn) {
-        commands.spawn((
-            Mesh3d(shop.cube.clone()),
-            MeshMaterial3d(shop.wood.clone()),
-            block_transform(*block, ORIGIN),
-            Pickable::IGNORE,
-            PilePart(index),
-        ));
+        commands
+            .spawn((
+                Mesh3d(shop.cube.clone()),
+                MeshMaterial3d(shop.wood.clone()),
+                block_transform(*block, ORIGIN),
+                PilePart(index),
+            ))
+            .observe(highlight_on_pile)
+            .observe(set_material_on::<PointerOut>(shop.wood.clone()))
+            .observe(take_clicked_from_pile);
+    }
+}
+
+/// Lights up a part on the pile under the pointer when it can go back on the saw.
+fn highlight_on_pile(
+    over: On<PointerOver>,
+    station: Res<MiterSawStation>,
+    shop: Res<ShopAssets>,
+    mut materials: Query<&mut MeshMaterial3d<StandardMaterial>>,
+) {
+    if station.can_take_from_pile()
+        && let Ok(mut material) = materials.get_mut(over.entity)
+    {
+        material.0 = shop.wood_highlight.clone();
+    }
+}
+
+fn take_clicked_from_pile(
+    click: On<PointerClick>,
+    pile: Query<&PilePart>,
+    shop: Res<ShopAssets>,
+    mut materials: Query<&mut MeshMaterial3d<StandardMaterial>>,
+    mut station: ResMut<MiterSawStation>,
+) {
+    // The box clicked will show a different part once the pile shifts, so drop its highlight.
+    if click.button == PointerButton::Primary
+        && let Ok(part) = pile.get(click.entity)
+        && station.take_from_pile(part.0)
+        && let Ok(mut material) = materials.get_mut(click.entity)
+    {
+        material.0 = shop.wood.clone();
     }
 }
