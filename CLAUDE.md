@@ -16,6 +16,9 @@ Don't upgrade any of these without asking first.
 
 - `crates/woodsim`: the woodworking simulation. Boards, `Length`, saws, cuts. **No Bevy dependency, ever.** Every rule about wood lives here and is tested here.
 - `crates/game`: the Bevy app. It draws boards and turns input into `woodsim` calls. It never changes board dimensions itself.
+  - `feed.rs`: the table saw station's state (`Bench`) and where to draw the board as it's pushed. Plain Rust, no systems, unit tested.
+  - `table_saw.rs`: the Bevy side of the station: spawning, input, drawing, and the readout.
+  - Put game logic that doesn't need a window into plain structs like `Bench` so `cargo test -p game` can cover it.
 
 ## Commands
 
@@ -23,6 +26,7 @@ Don't upgrade any of these without asking first.
 - `cargo run -p game`: run the game.
 - `cargo run -p game --features dev`: same, with Bevy dynamic linking for faster rebuilds.
 - `WOODSHOP_SCREENSHOT=screenshots/shop.png cargo run -p game`: render a few frames, save a screenshot, quit. Use this to check visual changes yourself, then look at the image.
+  - To check an interaction, temporarily add a `PreUpdate` system that calls `ButtonInput::<KeyCode>::press`, ordered `.after(bevy::input::InputSystems)`. Without that ordering, Bevy clears `just_pressed` before the game sees it. Remove the system afterward.
 - `cargo clippy --workspace --all-targets` and `cargo fmt --all` before finishing.
 
 ## Writing Bevy code
@@ -32,7 +36,12 @@ Bevy breaks its API every release, and much of what you remember is from older v
 - Examples: `~/.cargo/registry/src/*/bevy-0.20.0/examples/` (e.g. `3d/3d_scene.rs`, `window/screenshot.rs`)
 - Sub-crate source: `~/.cargo/registry/src/*/bevy_<name>-0.20.0/src/`
 
-Examples of things that differ from older Bevy: events are now "messages" (`MessageWriter`, `commands.write_message`), and 0.20 has a new scene macro (`bsn!` / `bsn_list!`). This project uses plain `commands.spawn((...))`; don't mix in BSN without asking.
+Examples of things that differ from older Bevy:
+
+- Events are now "messages" (`MessageWriter`, `commands.write_message`).
+- Picking events are their own types (`PointerDrag`, `PointerDragStart`, `PointerOver`), not `Pointer<Drag>`. Observers take `On<E>`, and `MeshPickingPlugin` isn't part of `DefaultPlugins`.
+- Text size is `TextFont { font_size: FontSize::Px(18.0), .. }`.
+- 0.20 has a new scene macro (`bsn!` / `bsn_list!`). This project uses plain `commands.spawn((...))`; don't mix in BSN without asking.
 
 ## Simulation rules
 
