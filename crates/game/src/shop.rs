@@ -60,6 +60,31 @@ enum ReadoutLine {
     Reading,
     Status,
     Help,
+    CutList,
+}
+
+/// Meshes and materials more than one station uses.
+#[derive(Resource)]
+pub struct ShopAssets {
+    /// A 1 m cube, scaled to fill each box in the scene.
+    pub cube: Handle<Mesh>,
+    pub wood: Handle<StandardMaterial>,
+    /// How a piece of wood looks under the pointer when it can be picked up.
+    pub wood_highlight: Handle<StandardMaterial>,
+}
+
+impl FromWorld for ShopAssets {
+    fn from_world(world: &mut World) -> ShopAssets {
+        let cube = world
+            .resource_mut::<Assets<Mesh>>()
+            .add(Cuboid::new(1.0, 1.0, 1.0));
+        let mut materials = world.resource_mut::<Assets<StandardMaterial>>();
+        ShopAssets {
+            cube,
+            wood: materials.add(Color::srgb(0.87, 0.72, 0.53)),
+            wood_highlight: materials.add(Color::srgb(1.0, 0.86, 0.62)),
+        }
+    }
 }
 
 pub struct ShopPlugin;
@@ -67,6 +92,7 @@ pub struct ShopPlugin;
 impl Plugin for ShopPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ActiveStation>()
+            .init_resource::<ShopAssets>()
             .add_systems(Startup, (spawn_shop, spawn_readout))
             .add_systems(Update, (switch_station, follow_station, update_readout));
     }
@@ -136,26 +162,59 @@ fn follow_station(
 }
 
 fn spawn_readout(mut commands: Commands) {
+    let panel = Node {
+        position_type: PositionType::Absolute,
+        padding: UiRect::axes(px(10), px(6)),
+        ..default()
+    };
     let lines = [
-        (ReadoutLine::Reading, 36.0, Val::Px(12.0), Val::Auto),
-        (ReadoutLine::Status, 18.0, Val::Px(76.0), Val::Auto),
-        (ReadoutLine::Help, 16.0, Val::Auto, Val::Px(12.0)),
+        (
+            ReadoutLine::Reading,
+            36.0,
+            Node {
+                top: px(12),
+                left: px(12),
+                ..panel.clone()
+            },
+        ),
+        // Narrow enough to wrap before it runs into the cut list.
+        (
+            ReadoutLine::Status,
+            18.0,
+            Node {
+                top: px(76),
+                left: px(12),
+                max_width: percent(60),
+                ..panel.clone()
+            },
+        ),
+        (
+            ReadoutLine::Help,
+            16.0,
+            Node {
+                bottom: px(12),
+                left: px(12),
+                ..panel.clone()
+            },
+        ),
+        (
+            ReadoutLine::CutList,
+            18.0,
+            Node {
+                top: px(12),
+                right: px(12),
+                ..panel
+            },
+        ),
     ];
-    for (line, size, top, bottom) in lines {
+    for (line, size, node) in lines {
         commands.spawn((
             Text::default(),
             TextFont {
                 font_size: FontSize::Px(size),
                 ..default()
             },
-            Node {
-                position_type: PositionType::Absolute,
-                top,
-                bottom,
-                left: px(12),
-                padding: UiRect::axes(px(10), px(6)),
-                ..default()
-            },
+            node,
             BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.6)),
             line,
         ));
@@ -188,6 +247,7 @@ fn update_readout(
             ReadoutLine::Reading => reading.clone(),
             ReadoutLine::Status => status.clone(),
             ReadoutLine::Help => help.to_string(),
+            ReadoutLine::CutList => miter_saw.cut_list(),
         };
     }
 }

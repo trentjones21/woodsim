@@ -9,8 +9,8 @@ use crate::{
     chop::MiterSawStation,
     feed::{BLADE_DROP, BLADE_RADIUS, TableSawStation},
     shop::{
-        ActiveStation, Block, Part, block_transform, inches, place_parts, pointer_on_plane,
-        set_material_on, snap_to_sixteenth,
+        ActiveStation, Block, Part, ShopAssets, block_transform, inches, place_parts,
+        pointer_on_plane, set_material_on, snap_to_sixteenth,
     },
 };
 
@@ -70,20 +70,14 @@ struct Fence {
 #[derive(Component)]
 struct AtTableSaw;
 
-/// The board's look, and how a cut piece looks when the pointer is over it and it can be carried.
-#[derive(Resource)]
-struct PieceMaterials {
-    wood: Handle<StandardMaterial>,
-    highlight: Handle<StandardMaterial>,
-}
-
 fn spawn_saw(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    shop: Res<ShopAssets>,
     station: Res<TableSawStation>,
 ) {
-    let cube = meshes.add(Cuboid::new(1.0, 1.0, 1.0));
+    let cube = shop.cube.clone();
     let cast_iron = materials.add(StandardMaterial {
         base_color: Color::srgb(0.6, 0.62, 0.65),
         metallic: 0.8,
@@ -92,8 +86,7 @@ fn spawn_saw(
     });
     let cabinet = materials.add(Color::srgb(0.2, 0.3, 0.45));
     let outfeed = materials.add(Color::srgb(0.32, 0.32, 0.34));
-    let wood = materials.add(Color::srgb(0.87, 0.72, 0.53));
-    let highlight = materials.add(Color::srgb(1.0, 0.86, 0.62));
+    let wood = shop.wood.clone();
 
     let mut spawn_box = |material: &Handle<StandardMaterial>, min: Vec3, max: Vec3| {
         commands.spawn((
@@ -183,7 +176,6 @@ fn spawn_saw(
             .observe(set_material_on::<PointerOut>(wood.clone()))
             .observe(carry_clicked);
     }
-    commands.insert_resource(PieceMaterials { wood, highlight });
 }
 
 fn move_fence_with_keys(keys: Res<ButtonInput<KeyCode>>, mut station: ResMut<TableSawStation>) {
@@ -291,7 +283,7 @@ fn carry_with_key(
 fn carry_clicked(
     click: On<PointerClick>,
     parts: Query<&Part>,
-    look: Res<PieceMaterials>,
+    shop: Res<ShopAssets>,
     mut materials: Query<&mut MeshMaterial3d<StandardMaterial>>,
     mut table_saw: ResMut<TableSawStation>,
     mut miter_saw: ResMut<MiterSawStation>,
@@ -302,7 +294,7 @@ fn carry_clicked(
         && carry(*part, &mut table_saw, &mut miter_saw, &mut active)
         && let Ok(mut material) = materials.get_mut(click.entity)
     {
-        material.0 = look.wood.clone();
+        material.0 = shop.wood.clone();
     }
 }
 
@@ -310,13 +302,13 @@ fn carry_clicked(
 fn highlight_carryable(
     over: On<PointerOver>,
     station: Res<TableSawStation>,
-    look: Res<PieceMaterials>,
+    shop: Res<ShopAssets>,
     mut materials: Query<&mut MeshMaterial3d<StandardMaterial>>,
 ) {
     if station.is_through()
         && let Ok(mut material) = materials.get_mut(over.entity)
     {
-        material.0 = look.highlight.clone();
+        material.0 = shop.wood_highlight.clone();
     }
 }
 

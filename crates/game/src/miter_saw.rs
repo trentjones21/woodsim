@@ -8,8 +8,8 @@ use woodsim::Length;
 use crate::{
     chop::MiterSawStation,
     shop::{
-        ActiveStation, Block, Part, block_transform, inches, place_parts, pointer_on_plane,
-        set_material_on, snap_to_sixteenth,
+        ActiveStation, Block, Part, ShopAssets, block_transform, inches, place_parts,
+        pointer_on_plane, set_material_on, snap_to_sixteenth,
     },
 };
 
@@ -19,7 +19,9 @@ pub const ORIGIN: Vec3 = Vec3::new(-1.6, inches(36.0), -0.1);
 
 pub const HELP: &str = "Left/Right: move the stop 1/16\"   Shift+Left/Right: 1\"   \
                         Or drag the stop block\n\
-                        Hold Space: lower the blade   Tab: back to the table saw";
+                        Hold Space: lower the blade   \
+                        Click a cut piece: slide it back against the stop\n\
+                        S: set everything on the saw aside   Tab: back to the table saw";
 
 /// A 12" blade.
 const BLADE_RADIUS: f32 = inches(6.0);
@@ -53,10 +55,11 @@ impl Plugin for MiterSawPlugin {
                 Update,
                 (
                     (
-                        move_stop_with_keys.run_if(resource_equals(ActiveStation::MiterSaw)),
+                        (move_stop_with_keys, set_aside_with_key)
+                            .run_if(resource_equals(ActiveStation::MiterSaw)),
                         work_blade,
                     ),
-                    (draw_stop, draw_head, draw_board),
+                    (draw_stop, draw_head, draw_board, draw_pile),
                 )
                     .chain(),
             );
@@ -76,13 +79,18 @@ struct Head;
 #[derive(Component)]
 struct AtMiterSaw;
 
+/// A part on the pile behind the fence, by its place in `MiterSawStation::parts`.
+#[derive(Component)]
+struct PilePart(usize);
+
 fn spawn_miter_saw(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    shop: Res<ShopAssets>,
     station: Res<MiterSawStation>,
 ) {
-    let cube = meshes.add(Cuboid::new(1.0, 1.0, 1.0));
+    let cube = shop.cube.clone();
     let bench = materials.add(Color::srgb(0.5, 0.38, 0.25));
     let metal = materials.add(StandardMaterial {
         base_color: Color::srgb(0.6, 0.62, 0.65),
@@ -91,7 +99,7 @@ fn spawn_miter_saw(
         ..default()
     });
     let body = materials.add(Color::srgb(0.15, 0.35, 0.6));
-    let wood = materials.add(Color::srgb(0.87, 0.72, 0.53));
+    let wood = shop.wood.clone();
 
     let mut spawn_box = |material: &Handle<StandardMaterial>, min: Vec3, max: Vec3| {
         commands.spawn((
@@ -196,16 +204,64 @@ fn spawn_miter_saw(
         .observe(grab_stop)
         .observe(drag_stop);
 
-    for part in [Part::Uncut, Part::Piece, Part::Offcut] {
-        commands.spawn((
-            Mesh3d(cube.clone()),
-            MeshMaterial3d(wood.clone()),
-            Transform::default(),
-            Visibility::Hidden,
-            Pickable::IGNORE,
-            part,
-            AtMiterSaw,
-        ));
+    commands.spawn((
+        Mesh3d(cube.clone()),
+        MeshMaterial3d(wood.clone()),
+        Transform::default(),
+        Visibility::Hidden,
+        Pickable::IGNORE,
+        Part::Uncut,
+        AtMiterSaw,
+    ));
+    for part in [Part::Piece, Part::Offcut] {
+        commands
+            .spawn((
+                Mesh3d(cube.clone()),
+                MeshMaterial3d(wood.clone()),
+                Transform::default(),
+                Visibility::Hidden,
+                part,
+                AtMiterSaw,
+            ))
+            .observe(highlight_pickable)
+            .observe(set_material_on::<PointerOut>(wood.clone()))
+            .observe(pick_up_clicked);
+    }
+}
+
+fn set_aside_with_key(keys: Res<ButtonInput<KeyCode>>, mut station: ResMut<MiterSawStation>) {
+    if keys.just_pressed(KeyCode::KeyS) {
+        station.set_aside();
+    }
+}
+
+/// Lights up a cut piece under the pointer when it can be picked up.
+fn highlight_pickable(
+    over: On<PointerOver>,
+    station: Res<MiterSawStation>,
+    shop: Res<ShopAssets>,
+    mut materials: Query<&mut MeshMaterial3d<StandardMaterial>>,
+) {
+    if station.can_pick_up()
+        && let Ok(mut material) = materials.get_mut(over.entity)
+    {
+        material.0 = shop.wood_highlight.clone();
+    }
+}
+
+fn pick_up_clicked(
+    click: On<PointerClick>,
+    parts: Query<&Part>,
+    shop: Res<ShopAssets>,
+    mut materials: Query<&mut MeshMaterial3d<StandardMaterial>>,
+    mut station: ResMut<MiterSawStation>,
+) {
+    if click.button == PointerButton::Primary
+        && let Ok(part) = parts.get(click.entity)
+        && station.pick_up(*part)
+        && let Ok(mut material) = materials.get_mut(click.entity)
+    {
+        material.0 = shop.wood.clone();
     }
 }
 
@@ -303,5 +359,37 @@ fn draw_board(
 ) {
     if station.is_changed() {
         place_parts(&station.board_blocks(), ORIGIN, &mut parts);
+    }
+}
+
+/// Keeps one box on the pile for each part set aside.
+fn draw_pile(
+    mut commands: Commands,
+    station: Res<MiterSawStation>,
+    shop: Res<ShopAssets>,
+    mut pile: Query<(Entity, &PilePart, &mut Transform)>,
+) {
+    if !station.is_changed() {
+        return;
+    }
+    let blocks = station.pile_blocks();
+    let mut drawn = 0;
+    for (entity, part, mut transform) in &mut pile {
+        match blocks.get(part.0) {
+            Some(block) => {
+                *transform = block_transform(*block, ORIGIN);
+                drawn += 1;
+            }
+            None => commands.entity(entity).despawn(),
+        }
+    }
+    for (index, block) in blocks.iter().enumerate().skip(drawn) {
+        commands.spawn((
+            Mesh3d(shop.cube.clone()),
+            MeshMaterial3d(shop.wood.clone()),
+            block_transform(*block, ORIGIN),
+            Pickable::IGNORE,
+            PilePart(index),
+        ));
     }
 }
