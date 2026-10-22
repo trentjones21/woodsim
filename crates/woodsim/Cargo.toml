@@ -1,0 +1,9 @@
+[package]
+name = "woodsim"
+version = "0.1.0"
+description = "Engine-independent woodworking simulation: boards, measurements, and cuts."
+edition.workspace = true
+rust-version.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

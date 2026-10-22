@@ -1,0 +1,15 @@
+[package]
+name = "game"
+version = "0.1.0"
+description = "Woodshop Simulator: the Bevy game built on woodsim."
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+bevy.workspace = true
+woodsim.workspace = true
+
+[features]
+# Faster incremental builds while developing: `cargo run -p game --features dev`.
+# Never ship with this on.
+dev = ["bevy/dynamic_linking"]

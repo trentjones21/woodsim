@@ -1,0 +1,11 @@
+# Build output
+/target
+
+# Saved by `WOODSHOP_SCREENSHOT=... cargo run -p game`
+/screenshots
+
+# Personal Claude Code settings; shared ones in .claude/settings.json are committed
+.claude/settings.local.json
+
+# macOS
+.DS_Store
