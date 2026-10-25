@@ -9,8 +9,8 @@ use crate::{
     chop::MiterSawStation,
     feed::TableSawStation,
     shop::{
-        ActiveStation, Block, Part, ShopAssets, block_transform, inches, place_parts,
-        pointer_on_plane, set_material_on, snap_to_sixteenth,
+        Block, Part, ShopAssets, ShopView, block_transform, inches, place_parts, pointer_on_plane,
+        set_material_on, snap_to_sixteenth, station_part,
     },
 };
 
@@ -18,14 +18,20 @@ use crate::{
 /// face, level with the saw table. It sits to the left of the table saw.
 pub const ORIGIN: Vec3 = Vec3::new(-1.6, inches(36.0), -0.1);
 
+/// The space the bench and saw take up, raised arm included, for outlining it in the overview.
+pub const BOUNDS: Block = Block {
+    min: Vec3::new(-BENCH_HALF_LENGTH, -ORIGIN.y, inches(-8.0)),
+    max: Vec3::new(BENCH_HALF_LENGTH, inches(16.0), inches(14.0)),
+};
+
 pub const HELP: &str = "Left/Right: move the stop 1/16\"   Shift+Left/Right: 1\"   \
                         Or drag the stop block\n\
                         Hold Space: lower the blade   \
                         Click a cut piece: slide it back against the stop\n\
                         Click a part on the pile: put it back on the saw   \
                         S: set everything on the saw aside\n\
-                        Right-click a piece or press T: carry it to the table saw   \
-                        Tab: back to the table saw";
+                        Right-click a piece or press T: carry it to the table saw\n\
+                        Tab: go to the table saw   Esc: back to the shop";
 
 /// A 12" blade.
 const BLADE_RADIUS: f32 = inches(6.0);
@@ -60,7 +66,7 @@ impl Plugin for MiterSawPlugin {
                 (
                     (
                         (move_stop_with_keys, set_aside_with_key, carry_with_key)
-                            .run_if(resource_equals(ActiveStation::MiterSaw)),
+                            .run_if(resource_equals(ShopView::MiterSaw)),
                         work_blade,
                     ),
                     (draw_stop, draw_head, draw_board, draw_pile),
@@ -106,12 +112,12 @@ fn spawn_miter_saw(
     let wood = shop.wood.clone();
 
     let mut spawn_box = |material: &Handle<StandardMaterial>, min: Vec3, max: Vec3| {
-        commands.spawn((
+        let entity = commands.spawn((
             Mesh3d(cube.clone()),
             MeshMaterial3d(material.clone()),
             block_transform(Block { min, max }, ORIGIN),
-            Pickable::IGNORE,
         ));
+        station_part(entity, ShopView::MiterSaw);
     };
     // The bench top sits a hair below the saw table so the two don't flicker against each other.
     spawn_box(
@@ -236,26 +242,29 @@ fn carry_with_key(
     keys: Res<ButtonInput<KeyCode>>,
     mut miter_saw: ResMut<MiterSawStation>,
     mut table_saw: ResMut<TableSawStation>,
-    mut active: ResMut<ActiveStation>,
+    mut view: ResMut<ShopView>,
 ) {
     if keys.just_pressed(KeyCode::KeyT)
         && let Some(board) = miter_saw
             .take(Part::Uncut)
             .or_else(|| miter_saw.take(Part::Piece))
     {
-        carry_to_table_saw(board, &mut table_saw, &mut miter_saw, &mut active);
+        carry_to_table_saw(board, &mut table_saw, &mut miter_saw, &mut view);
     }
 }
 
-/// Puts `board` on the table saw and goes there. Whatever was on the table saw goes on the pile.
+/// Puts `board` on the table saw. Whatever was on the table saw goes on the pile. Up close, the
+/// camera follows the board; in the overview, it stays put.
 fn carry_to_table_saw(
     board: Board,
     table_saw: &mut TableSawStation,
     miter_saw: &mut MiterSawStation,
-    active: &mut ActiveStation,
+    view: &mut ShopView,
 ) {
     miter_saw.parts.extend(table_saw.load(board));
-    *active = ActiveStation::TableSaw;
+    if *view != ShopView::Overview {
+        *view = ShopView::TableSaw;
+    }
 }
 
 /// Lights up a board on the saw under the pointer when it can be handled.
@@ -283,7 +292,7 @@ fn saw_part_clicked(
     mut materials: Query<&mut MeshMaterial3d<StandardMaterial>>,
     mut miter_saw: ResMut<MiterSawStation>,
     mut table_saw: ResMut<TableSawStation>,
-    mut active: ResMut<ActiveStation>,
+    mut view: ResMut<ShopView>,
 ) {
     let Ok(&part) = parts.get(click.entity) else {
         return;
@@ -292,7 +301,7 @@ fn saw_part_clicked(
         PointerButton::Primary => miter_saw.pick_up(part),
         PointerButton::Secondary => match miter_saw.take(part) {
             Some(board) => {
-                carry_to_table_saw(board, &mut table_saw, &mut miter_saw, &mut active);
+                carry_to_table_saw(board, &mut table_saw, &mut miter_saw, &mut view);
                 true
             }
             None => false,
@@ -322,11 +331,11 @@ fn move_stop_with_keys(keys: Res<ButtonInput<KeyCode>>, mut station: ResMut<Mite
 /// Holding Space at this station brings the blade down; letting go lets it spring back up.
 fn work_blade(
     keys: Res<ButtonInput<KeyCode>>,
-    active: Res<ActiveStation>,
+    view: Res<ShopView>,
     time: Res<Time>,
     mut station: ResMut<MiterSawStation>,
 ) {
-    let pressing = *active == ActiveStation::MiterSaw && keys.pressed(KeyCode::Space);
+    let pressing = *view == ShopView::MiterSaw && keys.pressed(KeyCode::Space);
     if pressing && station.lowered < 1.0 {
         station.lower(LOWER_SPEED * time.delta_secs());
     } else if !pressing && station.lowered > 0.0 {
@@ -459,7 +468,7 @@ fn pile_part_clicked(
     mut materials: Query<&mut MeshMaterial3d<StandardMaterial>>,
     mut miter_saw: ResMut<MiterSawStation>,
     mut table_saw: ResMut<TableSawStation>,
-    mut active: ResMut<ActiveStation>,
+    mut view: ResMut<ShopView>,
 ) {
     let Ok(part) = pile.get(click.entity) else {
         return;
@@ -468,7 +477,7 @@ fn pile_part_clicked(
         PointerButton::Primary => miter_saw.take_from_pile(part.0),
         PointerButton::Secondary => match miter_saw.remove_from_pile(part.0) {
             Some(board) => {
-                carry_to_table_saw(board, &mut table_saw, &mut miter_saw, &mut active);
+                carry_to_table_saw(board, &mut table_saw, &mut miter_saw, &mut view);
                 true
             }
             None => false,

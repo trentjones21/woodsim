@@ -9,8 +9,8 @@ use crate::{
     chop::MiterSawStation,
     feed::{BLADE_DROP, BLADE_RADIUS, TableSawStation},
     shop::{
-        ActiveStation, Block, Part, ShopAssets, block_transform, inches, place_parts,
-        pointer_on_plane, set_material_on, snap_to_sixteenth,
+        Block, Part, ShopAssets, ShopView, block_transform, inches, place_parts, pointer_on_plane,
+        set_material_on, snap_to_sixteenth, station_part,
     },
 };
 
@@ -18,9 +18,15 @@ use crate::{
 /// table top.
 pub const ORIGIN: Vec3 = Vec3::new(0.0, inches(34.0), 0.0);
 
+/// The space the saw and its outfeed table take up, for outlining it in the overview.
+pub const BOUNDS: Block = Block {
+    min: Vec3::new(TABLE_LEFT, -ORIGIN.y, OUTFEED_END),
+    max: Vec3::new(TABLE_RIGHT, FENCE_HEIGHT, TABLE_FRONT + inches(2.0)),
+};
+
 pub const HELP: &str = "Left/Right: move the fence 1/16\"   Shift+Left/Right: 1\"   \
                         Or drag the fence\n\
-                        Hold Space: push the board   R: new board\n\
+                        Hold Space: push the board   R: new board   Esc: back to the shop\n\
                         Click a cut piece or press C: carry it to the miter saw   \
                         Tab: go to the miter saw";
 
@@ -53,7 +59,7 @@ impl Plugin for TableSawPlugin {
                 Update,
                 (
                     (move_fence_with_keys, push_board, new_board, carry_with_key)
-                        .run_if(resource_equals(ActiveStation::TableSaw)),
+                        .run_if(resource_equals(ShopView::TableSaw)),
                     (draw_fence, draw_board),
                 )
                     .chain(),
@@ -89,12 +95,12 @@ fn spawn_saw(
     let wood = shop.wood.clone();
 
     let mut spawn_box = |material: &Handle<StandardMaterial>, min: Vec3, max: Vec3| {
-        commands.spawn((
+        let entity = commands.spawn((
             Mesh3d(cube.clone()),
             MeshMaterial3d(material.clone()),
             block_transform(Block { min, max }, ORIGIN),
-            Pickable::IGNORE,
         ));
+        station_part(entity, ShopView::TableSaw);
     };
     spawn_box(
         &cast_iron,
@@ -250,19 +256,21 @@ fn new_board(keys: Res<ButtonInput<KeyCode>>, mut station: ResMut<TableSawStatio
     }
 }
 
-/// Carries a piece off the outfeed side to the miter saw and goes there. Returns false if
-/// that piece isn't there to take.
+/// Carries a piece off the outfeed side to the miter saw. Up close, the camera follows it; in
+/// the overview, it stays put. Returns false if that piece isn't there to take.
 fn carry(
     part: Part,
     table_saw: &mut TableSawStation,
     miter_saw: &mut MiterSawStation,
-    active: &mut ActiveStation,
+    view: &mut ShopView,
 ) -> bool {
     let Some(board) = table_saw.take(part) else {
         return false;
     };
     miter_saw.load(board);
-    *active = ActiveStation::MiterSaw;
+    if *view != ShopView::Overview {
+        *view = ShopView::MiterSaw;
+    }
     true
 }
 
@@ -271,12 +279,12 @@ fn carry_with_key(
     keys: Res<ButtonInput<KeyCode>>,
     mut table_saw: ResMut<TableSawStation>,
     mut miter_saw: ResMut<MiterSawStation>,
-    mut active: ResMut<ActiveStation>,
+    mut view: ResMut<ShopView>,
 ) {
     if keys.just_pressed(KeyCode::KeyC)
-        && !carry(Part::Piece, &mut table_saw, &mut miter_saw, &mut active)
+        && !carry(Part::Piece, &mut table_saw, &mut miter_saw, &mut view)
     {
-        carry(Part::Offcut, &mut table_saw, &mut miter_saw, &mut active);
+        carry(Part::Offcut, &mut table_saw, &mut miter_saw, &mut view);
     }
 }
 
@@ -287,11 +295,11 @@ fn carry_clicked(
     mut materials: Query<&mut MeshMaterial3d<StandardMaterial>>,
     mut table_saw: ResMut<TableSawStation>,
     mut miter_saw: ResMut<MiterSawStation>,
-    mut active: ResMut<ActiveStation>,
+    mut view: ResMut<ShopView>,
 ) {
     if click.button == PointerButton::Primary
         && let Ok(part) = parts.get(click.entity)
-        && carry(*part, &mut table_saw, &mut miter_saw, &mut active)
+        && carry(*part, &mut table_saw, &mut miter_saw, &mut view)
         && let Ok(mut material) = materials.get_mut(click.entity)
     {
         material.0 = shop.wood.clone();

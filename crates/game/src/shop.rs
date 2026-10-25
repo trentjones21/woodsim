@@ -1,7 +1,17 @@
 //! The shop around the stations: shared layout helpers, the camera, the readout, and moving
-//! between stations.
+//! between the overview and the stations.
 
-use bevy::prelude::*;
+use std::f32::consts::{FRAC_PI_2, PI};
+
+use bevy::{
+    ecs::system::EntityCommands,
+    input::{
+        gestures::PinchGesture,
+        mouse::{AccumulatedMouseScroll, MouseScrollUnit},
+    },
+    picking::pointer::PointerButton,
+    prelude::*,
+};
 use woodsim::{Cut, Length};
 
 use crate::{chop::MiterSawStation, feed::TableSawStation, miter_saw, table_saw};
@@ -44,12 +54,95 @@ impl BoardBlocks {
     }
 }
 
-/// Which station the player is working at.
+/// What the camera is showing: the whole shop, or one station up close. A station's keyboard
+/// controls only work while it's up close.
 #[derive(Resource, Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum ActiveStation {
+pub enum ShopView {
     #[default]
+    Overview,
     TableSaw,
     MiterSaw,
+}
+
+pub const OVERVIEW_HELP: &str = "W/A/S/D or arrows: pan   Drag the floor: pan   \
+                                 Scroll or pinch: zoom   Q/E: rotate\n\
+                                 Click a saw to work at it   Tab: go to the table saw";
+
+/// The floor runs this far from the middle of the shop in each direction, in meters.
+const SHOP_HALF_SIZE: f32 = 3.0;
+/// The walls are cut away low, like a dollhouse, so the overview can see in.
+const WALL_HEIGHT: f32 = 0.4;
+const WALL_THICKNESS: f32 = 0.12;
+
+/// How steeply the overview looks down at the floor.
+const OVERVIEW_PITCH: f32 = 50.0 * PI / 180.0;
+const MIN_DISTANCE: f32 = 1.5;
+const MAX_DISTANCE: f32 = 10.0;
+/// How far the overview's focus may wander from the middle of the shop.
+const PAN_LIMIT: f32 = 2.5;
+/// Keyboard panning speed, as a fraction of the camera's distance per second.
+const PAN_SPEED: f32 = 0.6;
+/// Dragging the floor pans this far per pixel, as a fraction of the camera's distance.
+const DRAG_PAN: f32 = 0.0012;
+/// Each line of scroll zooms in by this fraction. Trackpads scroll in pixels instead.
+const ZOOM_PER_LINE: f32 = 0.1;
+const PIXELS_PER_LINE: f32 = 20.0;
+
+/// Where the overview camera is aimed and how it's oriented.
+#[derive(Resource)]
+struct OverviewCamera {
+    /// The point on the floor the camera looks at.
+    focus: Vec3,
+    /// The camera's direction around the focus, measured from +z toward +x.
+    yaw: f32,
+    distance: f32,
+}
+
+impl Default for OverviewCamera {
+    fn default() -> OverviewCamera {
+        OverviewCamera {
+            // Between the two saws.
+            focus: Vec3::new(-0.6, 0.0, 0.3),
+            yaw: 30.0 * PI / 180.0,
+            distance: 7.0,
+        }
+    }
+}
+
+impl OverviewCamera {
+    fn pose(&self) -> Transform {
+        let toward_camera = Vec3::new(
+            self.yaw.sin() * OVERVIEW_PITCH.cos(),
+            OVERVIEW_PITCH.sin(),
+            self.yaw.cos() * OVERVIEW_PITCH.cos(),
+        );
+        Transform::from_translation(self.focus + toward_camera * self.distance)
+            .looking_at(self.focus, Vec3::Y)
+    }
+
+    /// Directions across the floor: away from the camera, and to its right.
+    fn ground_axes(&self) -> (Vec3, Vec3) {
+        let forward = Vec3::new(-self.yaw.sin(), 0.0, -self.yaw.cos());
+        let right = Vec3::new(self.yaw.cos(), 0.0, -self.yaw.sin());
+        (forward, right)
+    }
+
+    fn pan(&mut self, by: Vec3) {
+        let limit = Vec3::new(PAN_LIMIT, 0.0, PAN_LIMIT);
+        self.focus = (self.focus + by).clamp(-limit, limit);
+    }
+
+    fn zoom(&mut self, factor: f32) {
+        self.distance = (self.distance * factor).clamp(MIN_DISTANCE, MAX_DISTANCE);
+    }
+}
+
+/// The station under the pointer, and how many of its parts are, so moving from one part to
+/// the next doesn't flicker.
+#[derive(Resource, Default)]
+struct HoveredStation {
+    station: Option<ShopView>,
+    parts: u32,
 }
 
 #[derive(Component)]
@@ -91,24 +184,74 @@ pub struct ShopPlugin;
 
 impl Plugin for ShopPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<ActiveStation>()
+        app.init_resource::<ShopView>()
             .init_resource::<ShopAssets>()
+            .init_resource::<OverviewCamera>()
+            .init_resource::<HoveredStation>()
             .add_systems(Startup, (spawn_shop, spawn_readout))
-            .add_systems(Update, (switch_station, follow_station, update_readout));
+            .add_systems(
+                Update,
+                (
+                    switch_view,
+                    move_overview.run_if(resource_equals(ShopView::Overview)),
+                    follow_view,
+                    outline_hovered_station,
+                    update_readout,
+                )
+                    .chain(),
+            );
     }
 }
 
-/// The garage around the saws: a floor, a light, and the camera.
+/// The garage: a floor, low walls, a light, and the camera.
 fn spawn_shop(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    shop: Res<ShopAssets>,
+    overview: Res<OverviewCamera>,
 ) {
-    commands.spawn((
-        Mesh3d(meshes.add(Plane3d::default().mesh().size(6.0, 6.0))),
-        MeshMaterial3d(materials.add(Color::srgb(0.55, 0.55, 0.52))),
-        Pickable::IGNORE,
-    ));
+    commands
+        .spawn((
+            Mesh3d(
+                meshes.add(
+                    Plane3d::default()
+                        .mesh()
+                        .size(2.0 * SHOP_HALF_SIZE, 2.0 * SHOP_HALF_SIZE),
+                ),
+            ),
+            MeshMaterial3d(materials.add(Color::srgb(0.55, 0.55, 0.52))),
+        ))
+        .observe(drag_floor);
+
+    let wall = materials.add(Color::srgb(0.82, 0.8, 0.76));
+    let (inner, outer) = (SHOP_HALF_SIZE, SHOP_HALF_SIZE + WALL_THICKNESS);
+    for (min, max) in [
+        (
+            Vec3::new(-outer, 0.0, -outer),
+            Vec3::new(outer, WALL_HEIGHT, -inner),
+        ),
+        (
+            Vec3::new(-outer, 0.0, inner),
+            Vec3::new(outer, WALL_HEIGHT, outer),
+        ),
+        (
+            Vec3::new(-outer, 0.0, -inner),
+            Vec3::new(-inner, WALL_HEIGHT, inner),
+        ),
+        (
+            Vec3::new(inner, 0.0, -inner),
+            Vec3::new(outer, WALL_HEIGHT, inner),
+        ),
+    ] {
+        commands.spawn((
+            Mesh3d(shop.cube.clone()),
+            MeshMaterial3d(wall.clone()),
+            block_transform(Block { min, max }, Vec3::ZERO),
+            Pickable::IGNORE,
+        ));
+    }
+
     commands.spawn((
         DirectionalLight {
             shadow_maps_enabled: true,
@@ -116,49 +259,151 @@ fn spawn_shop(
         },
         Transform::from_xyz(1.0, 4.0, 2.0).looking_at(Vec3::ZERO, Vec3::Y),
     ));
-    commands.spawn((
-        Camera3d::default(),
-        camera_pose(ActiveStation::default()),
-        ShopCamera,
-    ));
+    commands.spawn((Camera3d::default(), overview.pose(), ShopCamera));
+}
+
+/// Makes `entity` part of `station`'s body: in the overview, pointing at it outlines the
+/// station, and clicking it, from anywhere, goes to that station.
+pub fn station_part(mut entity: EntityCommands, station: ShopView) {
+    entity
+        .observe(
+            move |_: On<PointerOver>, mut hovered: ResMut<HoveredStation>| {
+                if hovered.station == Some(station) {
+                    hovered.parts += 1;
+                } else {
+                    *hovered = HoveredStation {
+                        station: Some(station),
+                        parts: 1,
+                    };
+                }
+            },
+        )
+        .observe(
+            move |_: On<PointerOut>, mut hovered: ResMut<HoveredStation>| {
+                if hovered.station == Some(station) {
+                    hovered.parts = hovered.parts.saturating_sub(1);
+                    if hovered.parts == 0 {
+                        hovered.station = None;
+                    }
+                }
+            },
+        )
+        .observe(move |click: On<PointerClick>, mut view: ResMut<ShopView>| {
+            if click.button == PointerButton::Primary && *view != station {
+                *view = station;
+            }
+        });
+}
+
+/// Esc backs out to the overview; Tab goes from one saw to the other.
+fn switch_view(keys: Res<ButtonInput<KeyCode>>, mut view: ResMut<ShopView>) {
+    if keys.just_pressed(KeyCode::Escape) && *view != ShopView::Overview {
+        *view = ShopView::Overview;
+    }
+    if keys.just_pressed(KeyCode::Tab) {
+        *view = match *view {
+            ShopView::TableSaw => ShopView::MiterSaw,
+            ShopView::Overview | ShopView::MiterSaw => ShopView::TableSaw,
+        };
+    }
+}
+
+/// Pans with the keyboard, rotates in quarter turns, and zooms with the scroll wheel or a pinch.
+fn move_overview(
+    keys: Res<ButtonInput<KeyCode>>,
+    scroll: Res<AccumulatedMouseScroll>,
+    mut pinches: MessageReader<PinchGesture>,
+    time: Res<Time>,
+    mut overview: ResMut<OverviewCamera>,
+) {
+    let (forward, right) = overview.ground_axes();
+    let mut direction = Vec3::ZERO;
+    for (pan_keys, toward) in [
+        ([KeyCode::KeyW, KeyCode::ArrowUp], forward),
+        ([KeyCode::KeyS, KeyCode::ArrowDown], -forward),
+        ([KeyCode::KeyD, KeyCode::ArrowRight], right),
+        ([KeyCode::KeyA, KeyCode::ArrowLeft], -right),
+    ] {
+        if keys.any_pressed(pan_keys) {
+            direction += toward;
+        }
+    }
+    if direction != Vec3::ZERO {
+        let step = PAN_SPEED * overview.distance * time.delta_secs();
+        overview.pan(direction.normalize() * step);
+    }
+
+    if keys.just_pressed(KeyCode::KeyQ) {
+        overview.yaw += FRAC_PI_2;
+    }
+    if keys.just_pressed(KeyCode::KeyE) {
+        overview.yaw -= FRAC_PI_2;
+    }
+
+    let lines = match scroll.unit {
+        MouseScrollUnit::Line => scroll.delta.y,
+        MouseScrollUnit::Pixel => scroll.delta.y / PIXELS_PER_LINE,
+    };
+    let pinch: f32 = pinches.read().map(|pinch| pinch.0).sum();
+    if lines != 0.0 || pinch != 0.0 {
+        overview.zoom((1.0 - ZOOM_PER_LINE).powf(lines) * (1.0 - pinch));
+    }
+}
+
+/// Dragging the floor in the overview slides the shop under the pointer.
+fn drag_floor(drag: On<PointerDrag>, view: Res<ShopView>, mut overview: ResMut<OverviewCamera>) {
+    if *view != ShopView::Overview {
+        return;
+    }
+    let (forward, right) = overview.ground_axes();
+    // The floor is seen at an angle, so a pixel of vertical drag covers more of it.
+    let along = forward * drag.delta.y / OVERVIEW_PITCH.sin() - right * drag.delta.x;
+    let scale = DRAG_PAN * overview.distance;
+    overview.pan(along * scale);
 }
 
 /// Where the operator stands at each station: in front, a little to the side, looking down.
-fn camera_pose(station: ActiveStation) -> Transform {
+fn station_pose(station: ShopView) -> Option<Transform> {
     let (origin, eye, target) = match station {
-        ActiveStation::TableSaw => (
+        ShopView::Overview => return None,
+        ShopView::TableSaw => (
             table_saw::ORIGIN,
             Vec3::new(-0.3, 0.79, 1.35),
             Vec3::new(0.1, 0.0, -0.05),
         ),
-        ActiveStation::MiterSaw => (
+        ShopView::MiterSaw => (
             miter_saw::ORIGIN,
             Vec3::new(0.0, 0.7, 1.2),
             Vec3::new(0.0, 0.12, 0.0),
         ),
     };
-    Transform::from_translation(origin + eye).looking_at(origin + target, Vec3::Y)
+    Some(Transform::from_translation(origin + eye).looking_at(origin + target, Vec3::Y))
 }
 
-fn switch_station(keys: Res<ButtonInput<KeyCode>>, mut active: ResMut<ActiveStation>) {
-    if keys.just_pressed(KeyCode::Tab) {
-        *active = match *active {
-            ActiveStation::TableSaw => ActiveStation::MiterSaw,
-            ActiveStation::MiterSaw => ActiveStation::TableSaw,
-        };
-    }
-}
-
-/// Eases the camera over to the active station.
-fn follow_station(
-    active: Res<ActiveStation>,
+/// Eases the camera toward the overview or the station being worked at.
+fn follow_view(
+    view: Res<ShopView>,
+    overview: Res<OverviewCamera>,
     time: Res<Time>,
     mut camera: Single<&mut Transform, With<ShopCamera>>,
 ) {
-    let goal = camera_pose(*active);
+    let goal = station_pose(*view).unwrap_or_else(|| overview.pose());
     let t = 1.0 - (-6.0 * time.delta_secs()).exp();
     camera.translation = camera.translation.lerp(goal.translation, t);
     camera.rotation = camera.rotation.slerp(goal.rotation, t);
+}
+
+/// In the overview, outlines the station under the pointer to show it can be clicked.
+fn outline_hovered_station(view: Res<ShopView>, hovered: Res<HoveredStation>, mut gizmos: Gizmos) {
+    if *view != ShopView::Overview {
+        return;
+    }
+    let outline = match hovered.station {
+        Some(ShopView::TableSaw) => block_transform(table_saw::BOUNDS, table_saw::ORIGIN),
+        Some(ShopView::MiterSaw) => block_transform(miter_saw::BOUNDS, miter_saw::ORIGIN),
+        _ => return,
+    };
+    gizmos.cube(outline, Color::srgb(1.0, 0.85, 0.3));
 }
 
 fn spawn_readout(mut commands: Commands) {
@@ -222,21 +467,39 @@ fn spawn_readout(mut commands: Commands) {
 }
 
 fn update_readout(
-    active: Res<ActiveStation>,
+    view: Res<ShopView>,
+    hovered: Res<HoveredStation>,
     table_saw: Res<TableSawStation>,
     miter_saw: Res<MiterSawStation>,
     mut lines: Query<(&ReadoutLine, &mut Text)>,
 ) {
-    if !(active.is_changed() || table_saw.is_changed() || miter_saw.is_changed()) {
+    if !(view.is_changed()
+        || hovered.is_changed()
+        || table_saw.is_changed()
+        || miter_saw.is_changed())
+    {
         return;
     }
-    let (reading, status, help) = match *active {
-        ActiveStation::TableSaw => (
+    let (reading, status, help) = match *view {
+        ShopView::Overview => (
+            format!(
+                "Fence: {}   Length: {}",
+                table_saw.saw.fence, miter_saw.stop
+            ),
+            match hovered.station {
+                Some(ShopView::TableSaw) => "Click to work at the table saw.",
+                Some(ShopView::MiterSaw) => "Click to work at the miter saw.",
+                _ => "Click a saw to work at it.",
+            }
+            .to_string(),
+            OVERVIEW_HELP,
+        ),
+        ShopView::TableSaw => (
             format!("Fence: {}", table_saw.saw.fence),
             table_saw.status(),
             table_saw::HELP,
         ),
-        ActiveStation::MiterSaw => (
+        ShopView::MiterSaw => (
             format!("Length: {}", miter_saw.stop),
             miter_saw.status(),
             miter_saw::HELP,
@@ -314,5 +577,50 @@ pub fn set_material_on<E: EntityEvent>(
         if let Ok(mut current) = materials.get_mut(event.event_target()) {
             current.0 = material.clone();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn overview_pans_relative_to_where_the_camera_faces() {
+        let mut overview = OverviewCamera {
+            focus: Vec3::ZERO,
+            yaw: FRAC_PI_2,
+            distance: 4.0,
+        };
+        // Facing -x from the +x side: "forward" is -x and "right" is -z.
+        let (forward, right) = overview.ground_axes();
+        assert!(forward.abs_diff_eq(Vec3::NEG_X, 1e-6));
+        assert!(right.abs_diff_eq(Vec3::NEG_Z, 1e-6));
+
+        overview.pan(forward);
+        assert!(overview.focus.abs_diff_eq(Vec3::NEG_X, 1e-6));
+    }
+
+    #[test]
+    fn overview_stays_over_the_shop_and_within_zoom_limits() {
+        let mut overview = OverviewCamera::default();
+        overview.pan(Vec3::new(100.0, 5.0, -100.0));
+        assert_eq!(overview.focus, Vec3::new(PAN_LIMIT, 0.0, -PAN_LIMIT));
+
+        overview.zoom(0.0);
+        assert_eq!(overview.distance, MIN_DISTANCE);
+        overview.zoom(100.0);
+        assert_eq!(overview.distance, MAX_DISTANCE);
+    }
+
+    #[test]
+    fn overview_camera_looks_down_at_its_focus() {
+        let overview = OverviewCamera::default();
+        let pose = overview.pose();
+
+        assert!((pose.translation.distance(overview.focus) - overview.distance).abs() < 1e-5);
+        let looking = pose.forward().as_vec3();
+        let to_focus = (overview.focus - pose.translation).normalize();
+        assert!(looking.abs_diff_eq(to_focus, 1e-5));
+        assert!(pose.translation.y > overview.focus.y);
     }
 }

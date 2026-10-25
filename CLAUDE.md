@@ -19,7 +19,9 @@ Don't upgrade any of these without asking first.
   - Each station is a pair of modules: its state and where to draw the board (plain Rust, no systems, unit tested), and its Bevy side (spawning, input, drawing).
     - Table saw: `feed.rs` (`TableSawStation`) and `table_saw.rs`.
     - Miter saw: `chop.rs` (`MiterSawStation`, including the parts pile and cut list) and `miter_saw.rs`.
-  - `shop.rs`: what the stations share: layout helpers (`Block`, `inches`, `block_transform`), the shared cube mesh and wood materials (`ShopAssets`), the camera, the readout, and `ActiveStation`. Each station's coordinates start at its own `ORIGIN`; keyboard controls only run at the active station.
+  - `shop.rs`: the shop around the stations: layout helpers (`Block`, `inches`, `block_transform`), the shared cube mesh and wood materials (`ShopAssets`), the floor and walls, the camera, and the readout.
+    - `ShopView` is what the camera shows: the `Overview` of the whole shop (the starting view; pan, zoom, rotate) or one station up close. A station's keyboard controls only run while it's up close; mouse controls work from either.
+    - Each station's coordinates start at its own `ORIGIN`, and its `BOUNDS` outline it in the overview. Pass its body's entities to `station_part` so clicking them zooms in.
   - No wood disappears: anything a carried piece displaces, at either saw, goes on the parts pile (which lives in `MiterSawStation`). The one exception is R at the table saw, which throws the leftovers in the scrap bin.
   - Put game logic that doesn't need a window into plain structs like the station states so `cargo test -p game` can cover it.
 
@@ -30,7 +32,7 @@ Don't upgrade any of these without asking first.
 - `cargo run -p game --features dev`: same, with Bevy dynamic linking for faster rebuilds.
 - `WOODSHOP_SCREENSHOT=screenshots/shop.png cargo run -p game`: render a few frames, save a screenshot, quit. Use this to check visual changes yourself, then look at the image.
   - Now and then a screenshot comes back all black. Retake it before assuming a rendering bug; so far every retake has been fine.
-  - To check an interaction, temporarily add a `PreUpdate` system that calls `ButtonInput::<KeyCode>::press`, ordered `.after(bevy::input::InputSystems)`. Without that ordering, Bevy clears `just_pressed` before the game sees it. Remove the system afterward.
+  - To check an interaction, temporarily add a `PreUpdate` system that calls `ButtonInput::<KeyCode>::press`, ordered `.after(bevy::input::InputSystems)`. Without that ordering, Bevy clears `just_pressed` before the game sees it. To capture a later moment, temporarily change the frame numbers in `screenshot_and_exit`. Remove both afterward.
 - `cargo clippy --workspace --all-targets` and `cargo fmt --all` before finishing.
 
 ## Writing Bevy code
