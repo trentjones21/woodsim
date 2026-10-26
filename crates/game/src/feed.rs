@@ -191,6 +191,7 @@ impl TableSawStation {
                 .then(|| block(left_edge, fence, lead + length, lead + cut_length)),
             piece: unless_taken(Part::Piece, piece),
             offcut: unless_taken(Part::Offcut, offcut),
+            grain_origin: Vec3::new(left_edge, 0.0, lead),
         }
     }
 

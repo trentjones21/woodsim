@@ -1,10 +1,13 @@
 //! Woodshop Simulator. Bevy draws the shop; `woodsim` owns every board's real dimensions.
 
+mod board_mesh;
 mod chop;
 mod feed;
 mod miter_saw;
+mod scenery;
 mod shop;
 mod table_saw;
+mod textures;
 
 use std::path::PathBuf;
 
@@ -15,6 +18,7 @@ use bevy::{
 };
 
 use miter_saw::MiterSawPlugin;
+use scenery::ScenePlugin;
 use shop::ShopPlugin;
 use table_saw::TableSawPlugin;
 
@@ -30,6 +34,7 @@ fn main() {
         }),
         MeshPickingPlugin,
         ShopPlugin,
+        ScenePlugin,
         TableSawPlugin,
         MiterSawPlugin,
     ));

@@ -6,6 +6,7 @@ use bevy::{picking::pointer::PointerButton, prelude::*};
 use woodsim::Length;
 
 use crate::{
+    board_mesh::{Grain, board_mesh},
     chop::MiterSawStation,
     feed::{BLADE_DROP, BLADE_RADIUS, TableSawStation},
     shop::{
@@ -84,48 +85,133 @@ fn spawn_saw(
     station: Res<TableSawStation>,
 ) {
     let cube = shop.cube.clone();
+    // Machined cast iron: satin steel that picks up the room's reflections.
     let cast_iron = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.6, 0.62, 0.65),
-        metallic: 0.8,
-        perceptual_roughness: 0.45,
+        base_color: Color::srgb(0.46, 0.47, 0.49),
+        metallic: 0.9,
+        perceptual_roughness: 0.32,
         ..default()
     });
-    let cabinet = materials.add(Color::srgb(0.2, 0.3, 0.45));
-    let outfeed = materials.add(Color::srgb(0.32, 0.32, 0.34));
+    // Powder-coated cabinet paint with a little sheen.
+    let cabinet = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.13, 0.27, 0.22),
+        perceptual_roughness: 0.5,
+        clearcoat: 0.4,
+        clearcoat_perceptual_roughness: 0.3,
+        ..default()
+    });
+    let dark_metal = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.07, 0.07, 0.08),
+        metallic: 0.6,
+        perceptual_roughness: 0.4,
+        ..default()
+    });
+    let safety_red = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.78, 0.12, 0.06),
+        perceptual_roughness: 0.35,
+        clearcoat: 0.6,
+        ..default()
+    });
+    let tape_yellow = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.95, 0.78, 0.18),
+        perceptual_roughness: 0.4,
+        ..default()
+    });
     let wood = shop.wood.clone();
 
-    let mut spawn_box = |material: &Handle<StandardMaterial>, min: Vec3, max: Vec3| {
-        let entity = commands.spawn((
-            Mesh3d(cube.clone()),
-            MeshMaterial3d(material.clone()),
-            block_transform(Block { min, max }, ORIGIN),
-        ));
-        station_part(entity, ShopView::TableSaw);
-    };
+    let spawn_box =
+        |commands: &mut Commands, material: &Handle<StandardMaterial>, min: Vec3, max: Vec3| {
+            let entity = commands.spawn((
+                Mesh3d(cube.clone()),
+                MeshMaterial3d(material.clone()),
+                block_transform(Block { min, max }, ORIGIN),
+            ));
+            station_part(entity, ShopView::TableSaw);
+        };
     spawn_box(
+        &mut commands,
         &cast_iron,
         Vec3::new(TABLE_LEFT, inches(-1.5), TABLE_BACK),
         Vec3::new(TABLE_RIGHT, 0.0, TABLE_FRONT),
     );
-    // Front rail, which the fence rides on.
+    // Miter slots: shallow channels either side of the blade, drawn as dark strips.
+    for x in [-6.5, 5.5] {
+        spawn_box(
+            &mut commands,
+            &dark_metal,
+            Vec3::new(inches(x), inches(-0.2), TABLE_BACK),
+            Vec3::new(inches(x + 0.75), inches(0.02), TABLE_FRONT),
+        );
+    }
+    // The throat plate around the blade.
     spawn_box(
-        &cast_iron,
+        &mut commands,
+        &safety_red,
+        Vec3::new(inches(-1.75), inches(-0.2), inches(-7.0)),
+        Vec3::new(inches(1.75), inches(0.03), inches(7.0)),
+    );
+    // Front rail, which the fence rides on, with a measuring tape along its top.
+    spawn_box(
+        &mut commands,
+        &dark_metal,
         Vec3::new(TABLE_LEFT, inches(-2.5), TABLE_FRONT),
         Vec3::new(TABLE_RIGHT, 0.0, TABLE_FRONT + inches(2.0)),
     );
     spawn_box(
+        &mut commands,
+        &tape_yellow,
+        Vec3::new(TABLE_LEFT + inches(1.0), 0.0, TABLE_FRONT + inches(0.4)),
+        Vec3::new(
+            TABLE_RIGHT - inches(1.0),
+            inches(0.03),
+            TABLE_FRONT + inches(1.4),
+        ),
+    );
+    // The power paddle hangs under the rail, left of the blade, where a hip can bump it off.
+    spawn_box(
+        &mut commands,
+        &safety_red,
+        Vec3::new(inches(-12.0), inches(-5.0), TABLE_FRONT + inches(1.5)),
+        Vec3::new(inches(-8.5), inches(-2.5), TABLE_FRONT + inches(3.0)),
+    );
+    // The cabinet on a dark plinth, with a dust port out the back.
+    spawn_box(
+        &mut commands,
         &cabinet,
-        Vec3::new(inches(-10.0), -ORIGIN.y, inches(-10.0)),
+        Vec3::new(inches(-10.0), inches(3.0) - ORIGIN.y, inches(-10.0)),
         Vec3::new(inches(10.0), inches(-1.5), inches(10.0)),
     );
-    // Outfeed table and the panel holding up its far end.
     spawn_box(
-        &outfeed,
-        Vec3::new(inches(-10.0), inches(-0.75), OUTFEED_END),
-        Vec3::new(inches(20.0), 0.0, TABLE_BACK),
+        &mut commands,
+        &dark_metal,
+        Vec3::new(inches(-11.0), -ORIGIN.y, inches(-11.0)),
+        Vec3::new(inches(11.0), inches(3.0) - ORIGIN.y, inches(11.0)),
     );
+    commands.spawn((
+        Mesh3d(meshes.add(Cylinder::new(inches(2.0), inches(3.0)))),
+        MeshMaterial3d(dark_metal.clone()),
+        Transform::from_translation(ORIGIN + Vec3::new(0.0, inches(-24.0), inches(-11.0)))
+            .with_rotation(Quat::from_rotation_x(FRAC_PI_2)),
+        Pickable::IGNORE,
+    ));
+    // Outfeed table: a maple top on a painted support panel.
+    let outfeed_top = Block {
+        min: Vec3::new(inches(-10.0), inches(-0.75), OUTFEED_END),
+        max: Vec3::new(inches(20.0), 0.0, TABLE_BACK),
+    };
+    let entity = commands.spawn((
+        Mesh3d(meshes.add(board_mesh(
+            outfeed_top.max - outfeed_top.min,
+            Vec3::new(0.3, 0.0, 0.1),
+            Grain::X,
+        ))),
+        MeshMaterial3d(shop.maple.clone()),
+        Transform::from_translation(ORIGIN + outfeed_top.min),
+    ));
+    station_part(entity, ShopView::TableSaw);
     spawn_box(
-        &outfeed,
+        &mut commands,
+        &cabinet,
         Vec3::new(inches(-9.0), -ORIGIN.y, OUTFEED_END),
         Vec3::new(inches(19.0), inches(-0.75), OUTFEED_END + inches(0.75)),
     );
@@ -134,9 +220,9 @@ fn spawn_saw(
     commands.spawn((
         Mesh3d(meshes.add(Cylinder::new(BLADE_RADIUS, kerf))),
         MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgb(0.75, 0.75, 0.78),
+            base_color: Color::srgb(0.82, 0.82, 0.85),
             metallic: 1.0,
-            perceptual_roughness: 0.3,
+            perceptual_roughness: 0.22,
             ..default()
         })),
         // A cylinder's axis starts along Y; turn it to X so the blade spins toward the operator.
@@ -144,9 +230,32 @@ fn spawn_saw(
             .with_rotation(Quat::from_rotation_z(FRAC_PI_2)),
         Pickable::IGNORE,
     ));
+    // The riving knife stands in the kerf just behind the blade, so pieces pass either side.
+    commands.spawn((
+        Mesh3d(cube.clone()),
+        MeshMaterial3d(dark_metal.clone()),
+        block_transform(
+            Block {
+                min: Vec3::new(-kerf * 0.8, 0.0, inches(-6.5)),
+                max: Vec3::new(-kerf * 0.2, inches(2.25), inches(-3.0)),
+            },
+            ORIGIN,
+        ),
+        Pickable::IGNORE,
+    ));
 
-    let fence_color = materials.add(Color::srgb(0.8, 0.15, 0.12));
-    let fence_hover = materials.add(Color::srgb(0.95, 0.4, 0.3));
+    let fence_color = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.85, 0.2, 0.08),
+        perceptual_roughness: 0.35,
+        clearcoat: 0.6,
+        ..default()
+    });
+    let fence_hover = materials.add(StandardMaterial {
+        base_color: Color::srgb(1.0, 0.45, 0.25),
+        emissive: LinearRgba::new(1.0, 0.35, 0.1, 1.0) * 40.0,
+        perceptual_roughness: 0.35,
+        ..default()
+    });
     commands
         .spawn((
             Mesh3d(meshes.add(Cuboid::new(FENCE_WIDTH, FENCE_HEIGHT, FENCE_LENGTH))),
@@ -159,8 +268,10 @@ fn spawn_saw(
         .observe(grab_fence)
         .observe(drag_fence);
 
+    // Each part gets its own mesh, reshaped as the board is cut.
+    let mut part_mesh = || Mesh3d(meshes.add(board_mesh(Vec3::splat(0.01), Vec3::ZERO, Grain::Z)));
     commands.spawn((
-        Mesh3d(cube.clone()),
+        part_mesh(),
         MeshMaterial3d(wood.clone()),
         Transform::default(),
         Visibility::Hidden,
@@ -171,7 +282,7 @@ fn spawn_saw(
     for part in [Part::Piece, Part::Offcut] {
         commands
             .spawn((
-                Mesh3d(cube.clone()),
+                part_mesh(),
                 MeshMaterial3d(wood.clone()),
                 Transform::default(),
                 Visibility::Hidden,
@@ -329,9 +440,11 @@ fn draw_fence(station: Res<TableSawStation>, mut fence: Single<&mut Transform, W
 
 fn draw_board(
     station: Res<TableSawStation>,
-    mut parts: Query<(&Part, &mut Transform, &mut Visibility), With<AtTableSaw>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut parts: Query<(&Part, &Mesh3d, &mut Transform, &mut Visibility), With<AtTableSaw>>,
 ) {
     if station.is_changed() {
-        place_parts(&station.board_blocks(), ORIGIN, &mut parts);
+        let blocks = station.board_blocks();
+        place_parts(&blocks, ORIGIN, Grain::Z, &mut meshes, &mut parts);
     }
 }

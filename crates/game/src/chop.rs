@@ -219,9 +219,11 @@ impl MiterSawStation {
             min: Vec3::new(left, 0.0, 0.0),
             max: Vec3::new(right, thickness, width),
         };
+        let grain_origin = Vec3::new(left_end, 0.0, 0.0);
         match cut {
             None => BoardBlocks {
                 uncut: Some(block(left_end, stop)),
+                grain_origin,
                 ..default()
             },
             Some(cut) => BoardBlocks {
@@ -231,6 +233,7 @@ impl MiterSawStation {
                     .offcut
                     .as_ref()
                     .map(|offcut| block(left_end, left_end + offcut.length().as_meters_f32())),
+                grain_origin,
             },
         }
     }

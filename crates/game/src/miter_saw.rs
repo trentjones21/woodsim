@@ -6,6 +6,7 @@ use bevy::{picking::pointer::PointerButton, prelude::*};
 use woodsim::{Board, Length};
 
 use crate::{
+    board_mesh::{Grain, board_mesh},
     chop::MiterSawStation,
     feed::TableSawStation,
     shop::{
@@ -101,49 +102,133 @@ fn spawn_miter_saw(
     station: Res<MiterSawStation>,
 ) {
     let cube = shop.cube.clone();
-    let bench = materials.add(Color::srgb(0.5, 0.38, 0.25));
-    let metal = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.6, 0.62, 0.65),
-        metallic: 0.8,
+    let cabinet = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.22, 0.25, 0.29),
+        perceptual_roughness: 0.55,
+        clearcoat: 0.3,
+        ..default()
+    });
+    let drawer = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.27, 0.31, 0.36),
+        perceptual_roughness: 0.5,
+        clearcoat: 0.3,
+        ..default()
+    });
+    let dark = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.05, 0.05, 0.055),
+        metallic: 0.5,
         perceptual_roughness: 0.45,
         ..default()
     });
-    let body = materials.add(Color::srgb(0.15, 0.35, 0.6));
+    let aluminum = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.78, 0.79, 0.8),
+        metallic: 1.0,
+        perceptual_roughness: 0.35,
+        ..default()
+    });
+    // The saw's housing: bright, glossy tool plastic.
+    let body = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.0, 0.52, 0.56),
+        perceptual_roughness: 0.3,
+        clearcoat: 0.7,
+        clearcoat_perceptual_roughness: 0.2,
+        ..default()
+    });
     let wood = shop.wood.clone();
 
-    let mut spawn_box = |material: &Handle<StandardMaterial>, min: Vec3, max: Vec3| {
-        let entity = commands.spawn((
-            Mesh3d(cube.clone()),
-            MeshMaterial3d(material.clone()),
-            block_transform(Block { min, max }, ORIGIN),
-        ));
-        station_part(entity, ShopView::MiterSaw);
-    };
-    // The bench top sits a hair below the saw table so the two don't flicker against each other.
+    let spawn_box =
+        |commands: &mut Commands, material: &Handle<StandardMaterial>, min: Vec3, max: Vec3| {
+            let entity = commands.spawn((
+                Mesh3d(cube.clone()),
+                MeshMaterial3d(material.clone()),
+                block_transform(Block { min, max }, ORIGIN),
+            ));
+            station_part(entity, ShopView::MiterSaw);
+        };
+    // A cabinet workbench: drawers on a dark toe kick, under a maple top.
+    let front = inches(14.0);
     spawn_box(
-        &bench,
-        Vec3::new(-BENCH_HALF_LENGTH, -ORIGIN.y, inches(-8.0)),
-        Vec3::new(BENCH_HALF_LENGTH, inches(-0.05), inches(14.0)),
+        &mut commands,
+        &dark,
+        Vec3::new(-BENCH_HALF_LENGTH + inches(1.0), -ORIGIN.y, inches(-7.0)),
+        Vec3::new(
+            BENCH_HALF_LENGTH - inches(1.0),
+            inches(3.0) - ORIGIN.y,
+            front - inches(2.0),
+        ),
     );
     spawn_box(
-        &metal,
+        &mut commands,
+        &cabinet,
+        Vec3::new(-BENCH_HALF_LENGTH, inches(3.0) - ORIGIN.y, inches(-8.0)),
+        Vec3::new(BENCH_HALF_LENGTH, inches(-1.75), front),
+    );
+    for (bottom, top) in [(-12.0, -3.0), (-22.0, -13.0), (-32.5, -23.0)] {
+        for i in 0..4 {
+            let left = -BENCH_HALF_LENGTH + inches(1.0 + 19.5 * i as f32);
+            let right = left + inches(18.5);
+            spawn_box(
+                &mut commands,
+                &drawer,
+                Vec3::new(left, inches(bottom), front),
+                Vec3::new(right, inches(top), front + inches(0.4)),
+            );
+            let middle = (left + right) / 2.0;
+            spawn_box(
+                &mut commands,
+                &aluminum,
+                Vec3::new(middle - inches(2.5), inches(top - 2.0), front + inches(0.4)),
+                Vec3::new(middle + inches(2.5), inches(top - 1.4), front + inches(1.0)),
+            );
+        }
+    }
+    // The top sits a hair below the saw table so the two don't flicker against each other.
+    let top = Block {
+        min: Vec3::new(-BENCH_HALF_LENGTH, inches(-1.75), inches(-8.0)),
+        max: Vec3::new(BENCH_HALF_LENGTH, inches(-0.05), front + inches(0.5)),
+    };
+    let entity = commands.spawn((
+        Mesh3d(meshes.add(board_mesh(top.max - top.min, Vec3::ZERO, Grain::X))),
+        MeshMaterial3d(shop.maple.clone()),
+        Transform::from_translation(ORIGIN + top.min),
+    ));
+    station_part(entity, ShopView::MiterSaw);
+
+    // The saw: a dark base with a red zero-clearance strip where the blade comes through.
+    spawn_box(
+        &mut commands,
+        &dark,
         Vec3::new(inches(-7.0), inches(-1.0), inches(-6.0)),
         Vec3::new(inches(7.0), 0.0, inches(10.0)),
     );
+    commands.spawn((
+        Mesh3d(cube.clone()),
+        MeshMaterial3d(materials.add(Color::srgb(0.75, 0.1, 0.05))),
+        block_transform(
+            Block {
+                min: Vec3::new(inches(-0.6), inches(-0.5), inches(-1.0)),
+                max: Vec3::new(inches(0.6), inches(0.02), inches(9.0)),
+            },
+            ORIGIN,
+        ),
+        Pickable::IGNORE,
+    ));
     // The fence, split around the blade.
     for (left, right) in [
         (-BENCH_HALF_LENGTH + inches(2.0), inches(-0.75)),
         (inches(0.75), BENCH_HALF_LENGTH - inches(2.0)),
     ] {
         spawn_box(
-            &metal,
+            &mut commands,
+            &aluminum,
             Vec3::new(left, 0.0, inches(-1.0)),
             Vec3::new(right, FENCE_HEIGHT, 0.0),
         );
     }
     // The post the arm pivots on.
     spawn_box(
-        &body,
+        &mut commands,
+        &dark,
         Vec3::new(inches(-1.5), 0.0, inches(-6.0)),
         Vec3::new(inches(1.5), PIVOT.y + inches(1.0), inches(-2.5)),
     );
@@ -151,6 +236,7 @@ fn spawn_miter_saw(
     let kerf = station.saw.blade.kerf.as_meters_f32();
     let arm_length = BLADE_FROM_PIVOT.length();
     let arm_tilt = (-BLADE_FROM_PIVOT.y).atan2(BLADE_FROM_PIVOT.z);
+    let motor = meshes.add(Cylinder::new(inches(1.9), inches(4.5)));
     commands
         .spawn((
             Transform::from_translation(ORIGIN + PIVOT),
@@ -161,9 +247,9 @@ fn spawn_miter_saw(
             head.spawn((
                 Mesh3d(meshes.add(Cylinder::new(BLADE_RADIUS, kerf))),
                 MeshMaterial3d(materials.add(StandardMaterial {
-                    base_color: Color::srgb(0.75, 0.75, 0.78),
+                    base_color: Color::srgb(0.82, 0.82, 0.85),
                     metallic: 1.0,
-                    perceptual_roughness: 0.3,
+                    perceptual_roughness: 0.22,
                     ..default()
                 })),
                 // A cylinder's axis starts along Y; turn it to X so the blade cuts across the board.
@@ -176,32 +262,52 @@ fn spawn_miter_saw(
                 MeshMaterial3d(body.clone()),
                 Transform::from_translation(BLADE_FROM_PIVOT / 2.0 + Vec3::X * inches(1.0))
                     .with_rotation(Quat::from_rotation_x(arm_tilt))
-                    .with_scale(Vec3::new(inches(1.5), inches(1.5), arm_length)),
+                    .with_scale(Vec3::new(inches(1.5), inches(1.8), arm_length)),
                 Pickable::IGNORE,
             ));
-            // The motor, beside the blade on the stop side.
+            // The motor, a drum beside the blade on the stop side, with a dark end cap.
             head.spawn((
-                Mesh3d(cube.clone()),
+                Mesh3d(motor.clone()),
                 MeshMaterial3d(body.clone()),
                 Transform::from_translation(
-                    BLADE_FROM_PIVOT + Vec3::new(inches(2.25), inches(2.0), 0.0),
+                    BLADE_FROM_PIVOT + Vec3::new(inches(2.6), inches(2.0), 0.0),
                 )
-                .with_scale(Vec3::new(inches(3.5), inches(3.5), inches(4.5))),
+                .with_rotation(Quat::from_rotation_z(FRAC_PI_2)),
                 Pickable::IGNORE,
             ));
             head.spawn((
-                Mesh3d(cube.clone()),
-                MeshMaterial3d(body.clone()),
+                Mesh3d(motor),
+                MeshMaterial3d(dark.clone()),
                 Transform::from_translation(
-                    BLADE_FROM_PIVOT + Vec3::new(0.0, inches(4.5), inches(4.0)),
+                    BLADE_FROM_PIVOT + Vec3::new(inches(5.0), inches(2.0), 0.0),
                 )
-                .with_scale(Vec3::new(inches(1.2), inches(1.2), inches(4.0))),
+                .with_rotation(Quat::from_rotation_z(FRAC_PI_2))
+                .with_scale(Vec3::new(0.85, 0.15, 0.85)),
+                Pickable::IGNORE,
+            ));
+            // The handle, out front where a hand pulls the blade down.
+            head.spawn((
+                Mesh3d(cube.clone()),
+                MeshMaterial3d(dark.clone()),
+                Transform::from_translation(
+                    BLADE_FROM_PIVOT + Vec3::new(inches(0.5), inches(4.5), inches(4.0)),
+                )
+                .with_scale(Vec3::new(inches(1.3), inches(1.3), inches(4.5))),
                 Pickable::IGNORE,
             ));
         });
 
-    let stop_color = materials.add(Color::srgb(0.95, 0.72, 0.1));
-    let stop_hover = materials.add(Color::srgb(1.0, 0.85, 0.4));
+    let stop_color = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.98, 0.72, 0.08),
+        perceptual_roughness: 0.35,
+        clearcoat: 0.5,
+        ..default()
+    });
+    let stop_hover = materials.add(StandardMaterial {
+        base_color: Color::srgb(1.0, 0.85, 0.4),
+        emissive: LinearRgba::new(1.0, 0.7, 0.1, 1.0) * 40.0,
+        ..default()
+    });
     commands
         .spawn((
             Mesh3d(cube.clone()),
@@ -215,9 +321,11 @@ fn spawn_miter_saw(
         .observe(drag_stop);
 
     for part in [Part::Uncut, Part::Piece, Part::Offcut] {
+        // Each part gets its own mesh, reshaped as the board is cut.
+        let mesh = meshes.add(board_mesh(Vec3::splat(0.01), Vec3::ZERO, Grain::X));
         commands
             .spawn((
-                Mesh3d(cube.clone()),
+                Mesh3d(mesh),
                 MeshMaterial3d(wood.clone()),
                 Transform::default(),
                 Visibility::Hidden,
@@ -403,29 +511,42 @@ fn draw_head(station: Res<MiterSawStation>, mut head: Single<&mut Transform, Wit
 
 fn draw_board(
     station: Res<MiterSawStation>,
-    mut parts: Query<(&Part, &mut Transform, &mut Visibility), With<AtMiterSaw>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut parts: Query<(&Part, &Mesh3d, &mut Transform, &mut Visibility), With<AtMiterSaw>>,
 ) {
     if station.is_changed() {
-        place_parts(&station.board_blocks(), ORIGIN, &mut parts);
+        let blocks = station.board_blocks();
+        place_parts(&blocks, ORIGIN, Grain::X, &mut meshes, &mut parts);
     }
 }
 
-/// Keeps one box on the pile for each part set aside.
+/// A board on the pile: sized to the part, with the grain shifted so stacked parts don't all
+/// look like copies of each other.
+fn pile_mesh(index: usize, block: &Block) -> Mesh {
+    let grain_shift = Vec3::new(0.37 * index as f32, 0.0, 0.11 * index as f32);
+    board_mesh(block.max - block.min, grain_shift, Grain::X)
+}
+
+/// Keeps one board on the pile for each part set aside.
 fn draw_pile(
     mut commands: Commands,
     station: Res<MiterSawStation>,
     shop: Res<ShopAssets>,
-    mut pile: Query<(Entity, &PilePart, &mut Transform)>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut pile: Query<(Entity, &PilePart, &Mesh3d, &mut Transform)>,
 ) {
     if !station.is_changed() {
         return;
     }
     let blocks = station.pile_blocks();
     let mut drawn = 0;
-    for (entity, part, mut transform) in &mut pile {
+    for (entity, part, mesh, mut transform) in &mut pile {
         match blocks.get(part.0) {
             Some(block) => {
-                *transform = block_transform(*block, ORIGIN);
+                *transform = Transform::from_translation(ORIGIN + block.min);
+                if let Some(mut mesh) = meshes.get_mut(&mesh.0) {
+                    *mesh = pile_mesh(part.0, block);
+                }
                 drawn += 1;
             }
             None => commands.entity(entity).despawn(),
@@ -434,9 +555,9 @@ fn draw_pile(
     for (index, block) in blocks.iter().enumerate().skip(drawn) {
         commands
             .spawn((
-                Mesh3d(shop.cube.clone()),
+                Mesh3d(meshes.add(pile_mesh(index, block))),
                 MeshMaterial3d(shop.wood.clone()),
-                block_transform(*block, ORIGIN),
+                Transform::from_translation(ORIGIN + block.min),
                 PilePart(index),
             ))
             .observe(highlight_on_pile)

@@ -19,9 +19,12 @@ Don't upgrade any of these without asking first.
   - Each station is a pair of modules: its state and where to draw the board (plain Rust, no systems, unit tested), and its Bevy side (spawning, input, drawing).
     - Table saw: `feed.rs` (`TableSawStation`) and `table_saw.rs`.
     - Miter saw: `chop.rs` (`MiterSawStation`, including the parts pile and cut list) and `miter_saw.rs`.
-  - `shop.rs`: the shop around the stations: layout helpers (`Block`, `inches`, `block_transform`), the shared cube mesh and wood materials (`ShopAssets`), the floor and walls, the camera, and the readout.
+  - `shop.rs`: the shop around the stations: layout helpers (`Block`, `inches`, `block_transform`), shared meshes, textures, and materials (`ShopAssets`), the floor, the camera and its post-processing, and the readout.
     - `ShopView` is what the camera shows: the `Overview` of the whole shop (the starting view; pan, zoom, rotate) or one station up close. A station's keyboard controls only run while it's up close; mouse controls work from either.
     - Each station's coordinates start at its own `ORIGIN`, and its `BOUNDS` outline it in the overview. Pass its body's entities to `station_part` so clicking them zooms in.
+  - `scenery.rs`: everything that's just for looks: walls that cut away on the camera's side, the window and sun, shop lights, the lumber rack, pegboard, props, and dust.
+  - `textures.rs`: every texture is generated in code at startup (wood, concrete, pegboard, and the room cubemap reflections come from). There are no asset files.
+  - `board_mesh.rs`: give anything wooden a `board_mesh` and `ShopAssets::wood` (or `maple`) so the grain runs along the board. `BoardBlocks::grain_origin` keeps the grain continuous as a board is cut.
   - No wood disappears: anything a carried piece displaces, at either saw, goes on the parts pile (which lives in `MiterSawStation`). The one exception is R at the table saw, which throws the leftovers in the scrap bin.
   - Put game logic that doesn't need a window into plain structs like the station states so `cargo test -p game` can cover it.
 
@@ -48,6 +51,9 @@ Examples of things that differ from older Bevy:
 - Picking events are their own types (`PointerDrag`, `PointerDragStart`, `PointerOver`), not `Pointer<Drag>`. Observers take `On<E>`, and `MeshPickingPlugin` isn't part of `DefaultPlugins`.
 - Text size is `TextFont { font_size: FontSize::Px(18.0), .. }`.
 - 0.20 has a new scene macro (`bsn!` / `bsn_list!`). This project uses plain `commands.spawn((...))`; don't mix in BSN without asking.
+- A spawned tuple can hold at most 15 components; add the rest with `.insert((...))`.
+- Shadows respect `RenderLayers` but lighting doesn't: a light shades every mesh, whatever its layer. The shop uses that on purpose: an invisible shell on layer 1 (full walls and a roof) shadows the interior so sunlight only enters through the window, and only the sun is on layer 1.
+- Runtime-made images have no mipmaps unless you build them (`textures::with_mipmaps`); without them, textures shimmer at a distance.
 
 ## Simulation rules
 
