@@ -1,12 +1,16 @@
 //! The shop around the stations: shared layout helpers, the camera, the readout, and moving
 //! between the overview and the stations.
 
-use std::f32::consts::{FRAC_PI_2, PI};
+use std::{
+    f32::consts::{FRAC_PI_2, PI},
+    time::Duration,
+};
 
 use bevy::{
     anti_alias::taa::TemporalAntiAliasing,
     camera::{Exposure, Hdr},
     core_pipeline::tonemapping::Tonemapping,
+    diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin},
     ecs::system::EntityCommands,
     input::{
         gestures::PinchGesture,
@@ -23,6 +27,7 @@ use bevy::{
     },
     prelude::*,
     render::view::{ColorGrading, ColorGradingGlobal},
+    time::common_conditions::on_real_timer,
 };
 use woodsim::{Cut, Length};
 
@@ -180,6 +185,8 @@ enum ReadoutLine {
     Status,
     Help,
     CutList,
+    /// Frame rate and frame time, so performance can be checked while playing.
+    Fps,
 }
 
 /// Meshes, textures, and materials more than one part of the shop uses.
@@ -256,7 +263,8 @@ pub struct ShopPlugin;
 
 impl Plugin for ShopPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<ShopView>()
+        app.add_plugins(FrameTimeDiagnosticsPlugin::default())
+            .init_resource::<ShopView>()
             .init_resource::<ShopAssets>()
             .init_resource::<OverviewCamera>()
             .init_resource::<HoveredStation>()
@@ -271,6 +279,11 @@ impl Plugin for ShopPlugin {
                     update_readout,
                 )
                     .chain(),
+            )
+            // Often enough to follow, slow enough to read.
+            .add_systems(
+                Update,
+                update_fps.run_if(on_real_timer(Duration::from_millis(250))),
             );
     }
 }
@@ -551,6 +564,16 @@ fn spawn_readout(mut commands: Commands) {
             Node {
                 top: px(16),
                 right: px(16),
+                ..panel.clone()
+            },
+        ),
+        (
+            ReadoutLine::Fps,
+            15.0,
+            text.with_alpha(0.75),
+            Node {
+                bottom: px(16),
+                right: px(16),
                 ..panel
             },
         ),
@@ -616,7 +639,27 @@ fn update_readout(
             ReadoutLine::Status => status.clone(),
             ReadoutLine::Help => help.to_string(),
             ReadoutLine::CutList => miter_saw.cut_list(),
+            ReadoutLine::Fps => continue,
         };
+    }
+}
+
+/// Shows the frame rate, the average frame time, and the slowest frame of the last couple of
+/// seconds, which is where hitches show up.
+fn update_fps(diagnostics: Res<DiagnosticsStore>, mut lines: Query<(&ReadoutLine, &mut Text)>) {
+    let fps = diagnostics
+        .get(&FrameTimeDiagnosticsPlugin::FPS)
+        .and_then(|fps| fps.smoothed());
+    let frame_time = diagnostics.get(&FrameTimeDiagnosticsPlugin::FRAME_TIME);
+    let average = frame_time.and_then(|time| time.smoothed());
+    let worst = frame_time.and_then(|time| time.values().copied().reduce(f64::max));
+    let (Some(fps), Some(average), Some(worst)) = (fps, average, worst) else {
+        return;
+    };
+    for (line, mut text) in &mut lines {
+        if let ReadoutLine::Fps = line {
+            text.0 = format!("{fps:.0} fps   {average:.1} ms   worst {worst:.1} ms");
+        }
     }
 }
 
