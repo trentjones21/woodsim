@@ -6,12 +6,12 @@ use bevy::{picking::pointer::PointerButton, prelude::*};
 use woodsim::{Board, Length};
 
 use crate::{
-    chop::MiterSawStation,
+    chop::{MiterSawStation, board_turn},
     feed::TableSawStation,
-    meshes::{Grain, board_mesh, rounded_box},
+    meshes::{Grain, board_mesh, lumber_mesh, rounded_box},
     shop::{
-        Block, Part, ShopAssets, ShopView, inches, place_parts, pointer_on_plane, rounded_block,
-        set_material_on, snap_to_sixteenth, station_part,
+        Block, Part, Placed, ShopAssets, ShopView, inches, place_parts, pointer_on_plane,
+        rounded_block, set_material_on, snap_to_sixteenth, station_part,
     },
 };
 
@@ -319,9 +319,9 @@ fn spawn_miter_saw(
         .observe(grab_stop)
         .observe(drag_stop);
 
-    for part in [Part::Uncut, Part::Piece, Part::Offcut] {
-        // Each part gets its own mesh, reshaped as the board is cut.
-        let mesh = meshes.add(board_mesh(Vec3::splat(0.01), Vec3::ZERO, Grain::X));
+    for part in [Part::Whole, Part::Piece, Part::Offcut] {
+        // Each part gets its own mesh, rebuilt as the board is cut.
+        let mesh = meshes.add(rounded_box(Vec3::splat(0.01)));
         commands
             .spawn((
                 Mesh3d(mesh),
@@ -353,7 +353,7 @@ fn carry_with_key(
 ) {
     if keys.just_pressed(KeyCode::KeyT)
         && let Some(board) = miter_saw
-            .take(Part::Uncut)
+            .take(Part::Whole)
             .or_else(|| miter_saw.take(Part::Piece))
     {
         carry_to_table_saw(board, &mut table_saw, &mut miter_saw, &mut view);
@@ -510,16 +510,9 @@ fn draw_board(
     mut parts: Query<(&Part, &Mesh3d, &mut Transform, &mut Visibility), With<AtMiterSaw>>,
 ) {
     if station.is_changed() {
-        let blocks = station.board_blocks();
-        place_parts(&blocks, ORIGIN, Grain::X, &mut meshes, &mut parts);
+        let boards = station.boards();
+        place_parts(&boards, ORIGIN, board_turn(), &mut meshes, &mut parts);
     }
-}
-
-/// A board on the pile: sized to the part, with the grain shifted so stacked parts don't all
-/// look like copies of each other.
-fn pile_mesh(index: usize, block: &Block) -> Mesh {
-    let grain_shift = Vec3::new(0.37 * index as f32, 0.0, 0.11 * index as f32);
-    board_mesh(block.max - block.min, grain_shift, Grain::X)
 }
 
 /// Keeps one board on the pile for each part set aside.
@@ -533,26 +526,29 @@ fn draw_pile(
     if !station.is_changed() {
         return;
     }
-    let blocks = station.pile_blocks();
+    let pile_parts = station.pile();
+    let place = |placed: &Placed| {
+        Transform::from_translation(ORIGIN + placed.corner).with_rotation(board_turn())
+    };
     let mut drawn = 0;
     for (entity, part, mesh, mut transform) in &mut pile {
-        match blocks.get(part.0) {
-            Some(block) => {
-                *transform = Transform::from_translation(ORIGIN + block.min);
+        match pile_parts.get(part.0) {
+            Some(placed) => {
+                *transform = place(placed);
                 if let Some(mut mesh) = meshes.get_mut(&mesh.0) {
-                    *mesh = pile_mesh(part.0, block);
+                    *mesh = lumber_mesh(&placed.board, placed.grain);
                 }
                 drawn += 1;
             }
             None => commands.entity(entity).despawn(),
         }
     }
-    for (index, block) in blocks.iter().enumerate().skip(drawn) {
+    for (index, placed) in pile_parts.iter().enumerate().skip(drawn) {
         commands
             .spawn((
-                Mesh3d(meshes.add(pile_mesh(index, block))),
+                Mesh3d(meshes.add(lumber_mesh(&placed.board, placed.grain))),
                 MeshMaterial3d(shop.wood.clone()),
-                Transform::from_translation(ORIGIN + block.min),
+                place(placed),
                 PilePart(index),
             ))
             .observe(highlight_on_pile)

@@ -1,13 +1,18 @@
 use std::fmt;
 
-use crate::Length;
+use crate::{Kerf, Length};
 
-/// A rectangular board. Its length runs along the grain.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// A board: rectangular stock, plus any slots saws have cut into it without cutting it apart.
+/// Its length runs along the grain.
+///
+/// Positions on a board are in its own coordinates: `l` along its length from one end, `w`
+/// across its width from one edge, and `t` up through its thickness from its bottom face.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Board {
     length: Length,
     width: Length,
     thickness: Length,
+    kerfs: Vec<Kerf>,
 }
 
 impl Board {
@@ -21,6 +26,7 @@ impl Board {
             length,
             width,
             thickness,
+            kerfs: Vec::new(),
         }
     }
 
@@ -36,12 +42,39 @@ impl Board {
         self.thickness
     }
 
-    pub(crate) fn with_length(&self, length: Length) -> Board {
-        Board::new(length, self.width, self.thickness)
+    /// The slots cut into this board, oldest first.
+    pub fn kerfs(&self) -> &[Kerf] {
+        &self.kerfs
     }
 
-    pub(crate) fn with_width(&self, width: Length) -> Board {
-        Board::new(self.length, width, self.thickness)
+    /// This board with one more slot cut into it.
+    pub(crate) fn with_kerf(&self, kerf: Kerf) -> Board {
+        let mut board = self.clone();
+        board.kerfs.push(kerf);
+        board
+    }
+
+    /// The part of this board from `from` to `to` across its width, as a board of its own.
+    pub(crate) fn across(&self, from: Length, to: Length) -> Board {
+        self.part(Length::ZERO, from, self.length, to - from)
+    }
+
+    /// The part of this board from `from` to `to` along its length, as a board of its own.
+    pub(crate) fn along(&self, from: Length, to: Length) -> Board {
+        self.part(from, Length::ZERO, to - from, self.width)
+    }
+
+    /// The part of this board with its corner at `(l, w)` = (`along`, `across`) and the given
+    /// length and width. It keeps the slots that reach into it.
+    fn part(&self, along: Length, across: Length, length: Length, width: Length) -> Board {
+        let mut part = Board::new(length, width, self.thickness);
+        part.kerfs = self
+            .kerfs
+            .iter()
+            .map(|kerf| kerf.moved_to(along, across))
+            .filter(|kerf| kerf.touches(length, width, self.thickness))
+            .collect();
+        part
     }
 }
 

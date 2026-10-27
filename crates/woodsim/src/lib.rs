@@ -5,9 +5,11 @@
 //! this crate reports, so everything here can be tested with plain `cargo test`.
 
 mod board;
+mod kerf;
 mod length;
 mod saw;
 
 pub use board::Board;
+pub use kerf::Kerf;
 pub use length::Length;
-pub use saw::{Blade, Cut, CutError, MiterSaw, TableSaw};
+pub use saw::{Blade, Cut, CutError, MiterSaw, Pass, TableSaw};

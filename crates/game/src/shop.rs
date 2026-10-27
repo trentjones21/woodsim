@@ -22,12 +22,12 @@ use bevy::{
     render::view::{ColorGrading, ColorGradingGlobal},
     time::common_conditions::on_real_timer,
 };
-use woodsim::{Cut, Length};
+use woodsim::{Board, Cut, Kerf, Length};
 
 use crate::{
     chop::MiterSawStation,
     feed::TableSawStation,
-    meshes::{Grain, board_mesh, rounded_box},
+    meshes::{lumber_mesh, rounded_box},
     miter_saw,
     scenery::SKY,
     table_saw,
@@ -46,31 +46,39 @@ pub struct Block {
     pub max: Vec3,
 }
 
-/// The parts of a board a saw shows: what the blade hasn't reached, and both sides of the cut.
+/// The parts of a board a saw shows: the board in one piece (slots and all), or both sides of a
+/// cut that went through it.
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Part {
-    Uncut,
+    Whole,
     Piece,
     Offcut,
 }
 
-/// Where to draw each part of the board on a saw.
-#[derive(Debug, Default, PartialEq)]
-pub struct BoardBlocks {
-    pub uncut: Option<Block>,
-    pub piece: Option<Block>,
-    pub offcut: Option<Block>,
-    /// The corner the whole board's grain is measured from. It moves with the board, so the
-    /// grain stays put on the wood as the board slides and splits.
-    pub grain_origin: Vec3,
+/// A board on a saw, and where it sits. `corner` is its `l = w = t = 0` corner, in the station's
+/// coordinates. `grain` is where that corner sits in the board it was cut from, so the grain of
+/// the pieces lines up and stays put on the wood as they move.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Placed {
+    pub board: Board,
+    pub corner: Vec3,
+    pub grain: Vec3,
 }
 
-impl BoardBlocks {
-    pub fn get(&self, part: Part) -> Option<Block> {
+/// What to draw on a saw: a board in one piece, or both sides of a cut that went through it.
+#[derive(Debug, Default, PartialEq)]
+pub struct SawBoards {
+    pub whole: Option<Placed>,
+    pub piece: Option<Placed>,
+    pub offcut: Option<Placed>,
+}
+
+impl SawBoards {
+    pub fn get(&self, part: Part) -> Option<&Placed> {
         match part {
-            Part::Uncut => self.uncut,
-            Part::Piece => self.piece,
-            Part::Offcut => self.offcut,
+            Part::Whole => self.whole.as_ref(),
+            Part::Piece => self.piece.as_ref(),
+            Part::Offcut => self.offcut.as_ref(),
         }
     }
 }
@@ -183,7 +191,8 @@ enum ReadoutLine {
 /// Textures and materials more than one part of the shop uses.
 #[derive(Resource)]
 pub struct ShopAssets {
-    /// Pine, for boards. Use it on meshes from `board_mesh` so the grain runs the right way.
+    /// Pine, for boards. Use it on meshes from `board_mesh` or `lumber_mesh`, which lay the
+    /// grain along the board.
     pub wood: Handle<StandardMaterial>,
     /// How a piece of wood looks under the pointer when it can be picked up.
     pub wood_highlight: Handle<StandardMaterial>,
@@ -557,7 +566,10 @@ fn update_readout(
             OVERVIEW_HELP,
         ),
         ShopView::TableSaw => (
-            format!("Fence: {}", table_saw.saw.fence),
+            format!(
+                "Fence: {}   Blade: {}",
+                table_saw.saw.fence, table_saw.saw.height
+            ),
             table_saw.status(),
             table_saw::HELP,
         ),
@@ -611,12 +623,62 @@ pub fn describe_cut(verb: &str, cut: &Cut) -> String {
     }
 }
 
-/// Places each part of a board on a saw, reshaping its mesh to the part's size and hiding the
-/// parts that aren't there. Each part needs its own mesh.
+/// Describes a board and the slots sawn into it, e.g. "3/4" x 7-1/4" x 24", with a stopped cut
+/// 11-9/16" long on top and 13" on the bottom".
+pub fn describe_board(board: &Board) -> String {
+    let kerfs: Vec<String> = board
+        .kerfs()
+        .iter()
+        .map(|kerf| describe_kerf(board, kerf))
+        .collect();
+    if kerfs.is_empty() {
+        board.to_string()
+    } else {
+        format!("{board}, with {}", kerfs.join(" and "))
+    }
+}
+
+/// Describes a slot sawn into `board` from below, the way a table saw cuts: a stopped cut if it
+/// goes through, otherwise a groove (or a rabbet, along an edge). Lengths are rounded to 1/32",
+/// as you'd measure them.
+pub fn describe_kerf(board: &Board, kerf: &Kerf) -> String {
+    let thirty_second = Length::from_inch_fraction(1, 32);
+    let span = |t: Length| {
+        kerf.span_at(t).map_or(Length::ZERO, |(start, end)| {
+            (end.min(board.length()) - start.max(Length::ZERO))
+                .max(Length::ZERO)
+                .rounded_to(thirty_second)
+        })
+    };
+    let bottom = span(Length::ZERO);
+    if kerf.top() >= board.thickness() {
+        // A slot through the board's whole length would have cut it apart, so this one stops.
+        let top = span(board.thickness());
+        return format!("a stopped cut {top} long on top and {bottom} on the bottom");
+    }
+    let depth = kerf.top().rounded_to(thirty_second);
+    let kind = if kerf.near <= Length::ZERO || kerf.far >= board.width() {
+        "rabbet"
+    } else {
+        "groove"
+    };
+    let full_length = kerf
+        .span_at(Length::ZERO)
+        .is_some_and(|(start, end)| start <= Length::ZERO && end >= board.length());
+    if full_length {
+        format!("a {depth}-deep {kind} the full length")
+    } else {
+        format!("a {depth}-deep {kind} {bottom} long")
+    }
+}
+
+/// Places each part of a board on a saw, rebuilding its mesh to match the board and hiding the
+/// parts that aren't there. Each part needs its own mesh. `rotation` turns a board's own axes
+/// (`w`, `t`, `l` along x, y, z) to lie the way the saw holds it.
 pub fn place_parts<'a>(
-    blocks: &BoardBlocks,
+    boards: &SawBoards,
     origin: Vec3,
-    grain: Grain,
+    rotation: Quat,
     meshes: &mut Assets<Mesh>,
     parts: impl IntoIterator<
         Item = (
@@ -628,12 +690,12 @@ pub fn place_parts<'a>(
     >,
 ) {
     for (part, mesh, mut transform, mut visibility) in parts {
-        match blocks.get(*part) {
-            Some(block) => {
-                *transform = Transform::from_translation(origin + block.min);
+        match boards.get(*part) {
+            Some(placed) => {
+                *transform =
+                    Transform::from_translation(origin + placed.corner).with_rotation(rotation);
                 if let Some(mut mesh) = meshes.get_mut(&mesh.0) {
-                    let size = block.max - block.min;
-                    *mesh = board_mesh(size, block.min - blocks.grain_origin, grain);
+                    *mesh = lumber_mesh(&placed.board, placed.grain);
                 }
                 *visibility = Visibility::Inherited;
             }
@@ -658,8 +720,13 @@ pub fn block_transform(block: Block, origin: Vec3) -> Transform {
 
 /// Rounds a position in meters to the nearest 1/16", the finest mark on a fence or stop scale.
 pub fn snap_to_sixteenth(meters: f32) -> Length {
-    let sixteenths = (meters / inches(1.0) * 16.0).round() as i64;
-    Length::from_inch_fraction(sixteenths, 16)
+    snap(meters, 16)
+}
+
+/// Rounds a position in meters to the nearest `1/fraction` of an inch.
+pub fn snap(meters: f32, fraction: i64) -> Length {
+    let steps = (meters / inches(1.0) * fraction as f32).round() as i64;
+    Length::from_inch_fraction(steps, fraction)
 }
 
 /// Where the pointer meets a level plane `height` meters above the floor.

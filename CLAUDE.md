@@ -14,17 +14,17 @@ Don't upgrade any of these without asking first.
 
 ## Layout
 
-- `crates/woodsim`: the woodworking simulation. Boards, `Length`, saws, cuts. **No Bevy dependency, ever.** Every rule about wood lives here and is tested here.
+- `crates/woodsim`: the woodworking simulation. Boards, `Length`, kerfs, saws, cuts. **No Bevy dependency, ever.** Every rule about wood lives here and is tested here.
 - `crates/game`: the Bevy app. It draws boards and turns input into `woodsim` calls. It never changes board dimensions itself.
   - Each station is a pair of modules: its state and where to draw the board (plain Rust, no systems, unit tested), and its Bevy side (spawning, input, drawing).
-    - Table saw: `feed.rs` (`TableSawStation`) and `table_saw.rs`.
+    - Table saw: `feed.rs` (`TableSawStation`: where the board is along the blade, and the pass under way) and `table_saw.rs`.
     - Miter saw: `chop.rs` (`MiterSawStation`, including the parts pile and cut list) and `miter_saw.rs`.
-  - `shop.rs`: the shop around the stations: layout helpers (`Block`, `inches`, `rounded_block`), shared textures and materials (`ShopAssets`), the floor, the camera, and the readout (including the FPS counter).
+  - `shop.rs`: the shop around the stations: layout helpers (`Block`, `inches`, `rounded_block`), shared textures and materials (`ShopAssets`), the floor, the camera, and the readout (including the FPS counter). A station reports the boards on it as `Placed` (the `woodsim::Board` and where its corner sits), and `place_parts` draws them; `describe_board` puts a board and its slots into words.
     - `ShopView` is what the camera shows: the `Overview` of the whole shop (the starting view; pan, zoom, rotate) or one station up close. A station's keyboard controls only run while it's up close; mouse controls work from either.
     - Each station's coordinates start at its own `ORIGIN`, and its `BOUNDS` outline it in the overview. Pass its body's entities to `station_part` so clicking them zooms in.
   - `scenery.rs`: everything that's just for looks: walls that cut away on the camera's side, the sun and ambient light, the yard, the lumber rack, pegboard, and props.
   - `textures.rs`: every texture is generated in code at startup (wood, floor tiles, pegboard, grass). There are no asset files.
-  - `meshes.rs`: every box is a `rounded_box`, whose soft edges give the toy look; its UVs are in meters. Give anything wooden a `board_mesh` and `ShopAssets::wood` (or `maple`) so the grain runs along the board. `BoardBlocks::grain_origin` keeps the grain continuous as a board is cut.
+  - `meshes.rs`: every box is a `rounded_box`, whose soft edges give the toy look; its UVs are in meters. `lumber_mesh` draws a simulated board with crisp sawn edges and every slot cut into it; wooden furniture uses the rounded `board_mesh`. Use either with `ShopAssets::wood` (or `maple`) so the grain runs along the board. `Placed::grain` keeps the grain continuous as a board is cut.
   - No wood disappears: anything a carried piece displaces, at either saw, goes on the parts pile (which lives in `MiterSawStation`). The one exception is R at the table saw, which throws the leftovers in the scrap bin.
   - Put game logic that doesn't need a window into plain structs like the station states so `cargo test -p game` can cover it.
 
@@ -67,5 +67,9 @@ Examples of things that differ from older Bevy:
 
 - `Length` is an exact integer count of nanometers (1" = 25,400,000 nm), chosen so 1/64", 0.001", and 0.01 mm are all exact. Never store a length the simulation depends on as a float. Convert with `as_meters_f32()` only when handing values to Bevy (1 Bevy unit = 1 meter).
 - A board's length runs along the grain. Ripping (table saw) cuts the width; crosscutting (miter saw) cuts the length.
+- Positions on a board are in its own coordinates: `l` along its length, `w` across its width, `t` up through its thickness. The table saw holds the `w = width` edge against the fence and leads with `l = 0`; the miter saw puts the `l = length` end against the stop and the `w = width` edge against the fence. The game builds a board's mesh in those axes (`w`, `t`, `l` along x, y, z) and each station turns it into place.
+- A board is its stock dimensions plus the `Kerf`s cut into it: slots a round blade swept without cutting it apart (stopped cuts, grooves, rabbets). A kerf records exactly what the saw did (the slot's faces, the blade's radius and center height, how far the center traveled); shapes are worked out from that. A pass that cuts through splits the board, and earlier kerfs move into the pieces.
+- Tool settings and travel are exact. Lengths that come from the round blade (where a stopped slot ends) are exact to the nanometer and shown rounded to 1/32", as you'd measure them.
+- Whether a pass cuts a board apart is decided for that pass alone; two passes that only cut through together (say, from both faces) aren't detected yet.
 - Every cut loses up to one kerf to sawdust. `Cut::piece` is the measured side (against the fence, or the length cut to).
-- Wood is conserved: piece + offcut + waste always equals the original dimension. `tests/conservation.rs` checks this with proptest; any new operation needs the same kind of test.
+- Wood is conserved: piece + offcut + waste always equals the original dimension, and a pass that doesn't cut through leaves the dimensions alone and adds exactly one kerf. `tests/conservation.rs` checks this with proptest; any new operation needs the same kind of test.

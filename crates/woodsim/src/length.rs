@@ -1,6 +1,6 @@
 use std::fmt;
 use std::iter::Sum;
-use std::ops::{Add, Sub};
+use std::ops::{Add, Neg, Sub};
 
 const NM_PER_INCH: i64 = 25_400_000;
 const NM_PER_MM: i64 = 1_000_000;
@@ -44,6 +44,18 @@ impl Length {
         self.0
     }
 
+    /// The nearest whole number of `step`s, such as a measured length rounded to the nearest
+    /// 1/32" for a plan. Halfway rounds away from zero.
+    pub fn rounded_to(self, step: Length) -> Length {
+        let half = step.0 / 2;
+        let steps = if self.0 >= 0 {
+            (self.0 + half) / step.0
+        } else {
+            -((half - self.0) / step.0)
+        };
+        Length(steps * step.0)
+    }
+
     pub fn as_inches_f64(self) -> f64 {
         self.0 as f64 / NM_PER_INCH as f64
     }
@@ -67,6 +79,14 @@ impl Sub for Length {
 
     fn sub(self, rhs: Length) -> Length {
         Length(self.0 - rhs.0)
+    }
+}
+
+impl Neg for Length {
+    type Output = Length;
+
+    fn neg(self) -> Length {
+        Length(-self.0)
     }
 }
 
@@ -141,6 +161,20 @@ mod tests {
         ];
         for (length, expected) in cases {
             assert_eq!(length.to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn rounds_to_the_nearest_step() {
+        let step = Length::from_inch_fraction(1, 32);
+        let cases = [
+            (Length::from_mm(10), "13/32\""),
+            (Length::from_inch_fraction(3, 64), "1/16\""),
+            (Length::ZERO - Length::from_inch_fraction(3, 64), "-1/16\""),
+            (Length::from_inches(6), "6\""),
+        ];
+        for (length, expected) in cases {
+            assert_eq!(length.rounded_to(step).to_string(), expected);
         }
     }
 

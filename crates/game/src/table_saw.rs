@@ -7,11 +7,11 @@ use woodsim::Length;
 
 use crate::{
     chop::MiterSawStation,
-    feed::{BLADE_DROP, BLADE_RADIUS, TableSawStation},
+    feed::TableSawStation,
     meshes::{Grain, board_mesh, rounded_box},
     shop::{
         Block, Part, ShopAssets, ShopView, inches, place_parts, pointer_on_plane, rounded_block,
-        set_material_on, snap_to_sixteenth, station_part,
+        set_material_on, snap, snap_to_sixteenth, station_part,
     },
 };
 
@@ -27,9 +27,11 @@ pub const BOUNDS: Block = Block {
 
 pub const HELP: &str = "Left/Right: move the fence 1/16\"   Shift+Left/Right: 1\"   \
                         Or drag the fence\n\
-                        Hold Space: push the board   R: new board   Esc: back to the shop\n\
-                        Click a cut piece or press C: carry it to the miter saw   \
-                        Tab: go to the miter saw";
+                        Up/Down: raise or lower the blade 1/16\"   Shift+Up/Down: 1/4\"\n\
+                        Drag the board, or hold Space, to push it   Drag it back to back it out\n\
+                        B: bring the board back around   R: new board\n\
+                        Right-click a board or press C: carry it to the miter saw\n\
+                        Tab: go to the miter saw   Esc: back to the shop";
 
 /// The cast-iron top, in table space.
 const TABLE_LEFT: f32 = inches(-14.0);
@@ -46,6 +48,12 @@ const FENCE_LENGTH: f32 = TABLE_FRONT + inches(2.0) - TABLE_BACK;
 
 const FENCE_STEP: Length = Length::from_inch_fraction(1, 16);
 const FENCE_BIG_STEP: Length = Length::from_inches(1);
+const HEIGHT_STEP: Length = Length::from_inch_fraction(1, 16);
+const HEIGHT_BIG_STEP: Length = Length::from_inch_fraction(1, 4);
+/// The riving knife's top sits this far below the blade's, so it can follow a cut that doesn't
+/// go through.
+const KNIFE_BELOW_BLADE: f32 = inches(1.0 / 8.0);
+const KNIFE_HEIGHT: f32 = inches(4.0);
 /// How fast the board moves while Space is held: 10" a second.
 const FEED_SPEED: f32 = inches(10.0);
 
@@ -54,13 +62,21 @@ pub struct TableSawPlugin;
 impl Plugin for TableSawPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<TableSawStation>()
+            .init_resource::<BoardGrab>()
             .add_systems(Startup, spawn_saw)
             .add_systems(
                 Update,
                 (
-                    (move_fence_with_keys, push_board, new_board, carry_with_key)
+                    (
+                        move_fence_with_keys,
+                        raise_blade_with_keys,
+                        push_board,
+                        bring_back_with_key,
+                        new_board,
+                        carry_with_key,
+                    )
                         .run_if(resource_equals(ShopView::TableSaw)),
-                    (draw_fence, draw_board),
+                    (draw_fence, draw_blade, draw_board),
                 )
                     .chain(),
             );
@@ -75,6 +91,18 @@ struct Fence {
 
 #[derive(Component)]
 struct AtTableSaw;
+
+/// The blade, which rises and falls with its height setting.
+#[derive(Component)]
+struct BladeDisc;
+
+/// The riving knife, which rises and falls with the blade.
+#[derive(Component)]
+struct RivingKnife;
+
+/// How far behind the board's leading end the pointer grabbed it to drag it, in meters.
+#[derive(Resource, Default)]
+struct BoardGrab(f32);
 
 fn spawn_saw(
     mut commands: Commands,
@@ -205,31 +233,32 @@ fn spawn_saw(
         Vec3::new(inches(19.0), inches(-0.75), OUTFEED_END + inches(0.75)),
     );
 
+    // The blade and riving knife are placed at the blade's height by `draw_blade`.
     let kerf = station.saw.blade.kerf.as_meters_f32();
+    let radius = station.saw.blade.radius().as_meters_f32();
     commands.spawn((
-        Mesh3d(meshes.add(Cylinder::new(BLADE_RADIUS, kerf))),
+        Mesh3d(meshes.add(Cylinder::new(radius, kerf))),
         MeshMaterial3d(materials.add(StandardMaterial {
             base_color: Color::srgb(0.88, 0.89, 0.92),
             perceptual_roughness: 0.3,
             ..default()
         })),
         // A cylinder's axis starts along Y; turn it to X so the blade spins toward the operator.
-        Transform::from_translation(ORIGIN + Vec3::new(-kerf / 2.0, -BLADE_DROP, 0.0))
-            .with_rotation(Quat::from_rotation_z(FRAC_PI_2)),
+        Transform::from_rotation(Quat::from_rotation_z(FRAC_PI_2)),
         Pickable::IGNORE,
+        BladeDisc,
     ));
     // The riving knife stands in the kerf just behind the blade, so pieces pass either side.
+    let knife = Block {
+        min: Vec3::new(-kerf * 0.8, -KNIFE_HEIGHT, inches(-6.5)),
+        max: Vec3::new(-kerf * 0.2, 0.0, inches(-3.0)),
+    };
     commands.spawn((
-        rounded_block(
-            &mut meshes,
-            Block {
-                min: Vec3::new(-kerf * 0.8, 0.0, inches(-6.5)),
-                max: Vec3::new(-kerf * 0.2, inches(2.25), inches(-3.0)),
-            },
-            ORIGIN,
-        ),
+        Mesh3d(meshes.add(rounded_box(knife.max - knife.min))),
         MeshMaterial3d(dark_metal.clone()),
+        Transform::default(),
         Pickable::IGNORE,
+        RivingKnife,
     ));
 
     let fence_color = materials.add(StandardMaterial {
@@ -259,21 +288,11 @@ fn spawn_saw(
         .observe(grab_fence)
         .observe(drag_fence);
 
-    // Each part gets its own mesh, reshaped as the board is cut.
-    let mut part_mesh = || Mesh3d(meshes.add(board_mesh(Vec3::splat(0.01), Vec3::ZERO, Grain::Z)));
-    commands.spawn((
-        part_mesh(),
-        MeshMaterial3d(wood.clone()),
-        Transform::default(),
-        Visibility::Hidden,
-        Pickable::IGNORE,
-        Part::Uncut,
-        AtTableSaw,
-    ));
-    for part in [Part::Piece, Part::Offcut] {
+    // Each part gets its own mesh, rebuilt as the board is cut.
+    for part in [Part::Whole, Part::Piece, Part::Offcut] {
         commands
             .spawn((
-                part_mesh(),
+                Mesh3d(meshes.add(rounded_box(Vec3::splat(0.01)))),
                 MeshMaterial3d(wood.clone()),
                 Transform::default(),
                 Visibility::Hidden,
@@ -282,7 +301,9 @@ fn spawn_saw(
             ))
             .observe(highlight_carryable)
             .observe(set_material_on::<PointerOut>(wood.clone()))
-            .observe(carry_clicked);
+            .observe(carry_clicked)
+            .observe(grab_board)
+            .observe(drag_board);
     }
 }
 
@@ -342,13 +363,79 @@ fn drag_fence(
     }
 }
 
+fn raise_blade_with_keys(keys: Res<ButtonInput<KeyCode>>, mut station: ResMut<TableSawStation>) {
+    let step = if keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]) {
+        HEIGHT_BIG_STEP
+    } else {
+        HEIGHT_STEP
+    };
+    let height = station.saw.height;
+    if keys.just_pressed(KeyCode::ArrowUp) {
+        station.set_height(height + step);
+    }
+    if keys.just_pressed(KeyCode::ArrowDown) {
+        station.set_height(height - step);
+    }
+}
+
 fn push_board(
     keys: Res<ButtonInput<KeyCode>>,
     time: Res<Time>,
     mut station: ResMut<TableSawStation>,
 ) {
-    if keys.pressed(KeyCode::Space) && !station.is_through() {
+    if keys.pressed(KeyCode::Space) {
         station.push(FEED_SPEED * time.delta_secs());
+    }
+}
+
+fn bring_back_with_key(keys: Res<ButtonInput<KeyCode>>, mut station: ResMut<TableSawStation>) {
+    if keys.just_pressed(KeyCode::KeyB) {
+        station.bring_back();
+    }
+}
+
+/// Remembers where on the board the pointer grabbed it, so it doesn't jump to the cursor.
+fn grab_board(
+    drag: On<PointerDragStart>,
+    camera: Single<(&Camera, &GlobalTransform)>,
+    transforms: Query<&Transform, With<AtTableSaw>>,
+    mut grab: ResMut<BoardGrab>,
+) {
+    let (camera, camera_transform) = *camera;
+    if drag.button == PointerButton::Primary
+        && let Ok(transform) = transforms.get(drag.entity)
+        && let Some(point) = pointer_on_plane(
+            camera,
+            camera_transform,
+            drag.pointer.position,
+            transform.translation.y,
+        )
+    {
+        grab.0 = point.z - transform.translation.z;
+    }
+}
+
+/// Slides the board along the fence after the pointer: forward to cut, back to back it out.
+fn drag_board(
+    drag: On<PointerDrag>,
+    camera: Single<(&Camera, &GlobalTransform)>,
+    transforms: Query<&Transform, With<AtTableSaw>>,
+    grab: Res<BoardGrab>,
+    mut station: ResMut<TableSawStation>,
+) {
+    let (camera, camera_transform) = *camera;
+    if drag.button == PointerButton::Primary
+        && let Ok(transform) = transforms.get(drag.entity)
+        && let Some(point) = pointer_on_plane(
+            camera,
+            camera_transform,
+            drag.pointer.position,
+            transform.translation.y,
+        )
+    {
+        // The board's leading end is at z = -advance in table space.
+        let lead = point.z - grab.0 - ORIGIN.z;
+        station.move_to(snap(-lead, 64));
     }
 }
 
@@ -358,8 +445,8 @@ fn new_board(keys: Res<ButtonInput<KeyCode>>, mut station: ResMut<TableSawStatio
     }
 }
 
-/// Carries a piece off the outfeed side to the miter saw. Up close, the camera follows it; in
-/// the overview, it stays put. Returns false if that piece isn't there to take.
+/// Carries a board off the saw to the miter saw. Up close, the camera follows it; in the
+/// overview, it stays put. Returns false if that board isn't there to take.
 fn carry(
     part: Part,
     table_saw: &mut TableSawStation,
@@ -376,17 +463,20 @@ fn carry(
     true
 }
 
-/// C carries the piece cut against the fence, or the offcut once that piece is gone.
+/// C carries the piece cut against the fence, the offcut once that piece is gone, or the board
+/// if it's still in one piece.
 fn carry_with_key(
     keys: Res<ButtonInput<KeyCode>>,
     mut table_saw: ResMut<TableSawStation>,
     mut miter_saw: ResMut<MiterSawStation>,
     mut view: ResMut<ShopView>,
 ) {
-    if keys.just_pressed(KeyCode::KeyC)
-        && !carry(Part::Piece, &mut table_saw, &mut miter_saw, &mut view)
-    {
-        carry(Part::Offcut, &mut table_saw, &mut miter_saw, &mut view);
+    if keys.just_pressed(KeyCode::KeyC) {
+        for part in [Part::Piece, Part::Offcut, Part::Whole] {
+            if carry(part, &mut table_saw, &mut miter_saw, &mut view) {
+                break;
+            }
+        }
     }
 }
 
@@ -399,7 +489,7 @@ fn carry_clicked(
     mut miter_saw: ResMut<MiterSawStation>,
     mut view: ResMut<ShopView>,
 ) {
-    if click.button == PointerButton::Primary
+    if click.button == PointerButton::Secondary
         && let Ok(part) = parts.get(click.entity)
         && carry(*part, &mut table_saw, &mut miter_saw, &mut view)
         && let Ok(mut material) = materials.get_mut(click.entity)
@@ -408,14 +498,16 @@ fn carry_clicked(
     }
 }
 
-/// Lights up a cut piece under the pointer when it can be carried off.
+/// Lights up a board under the pointer when it can be carried off.
 fn highlight_carryable(
     over: On<PointerOver>,
     station: Res<TableSawStation>,
     shop: Res<ShopAssets>,
+    parts: Query<&Part>,
     mut materials: Query<&mut MeshMaterial3d<StandardMaterial>>,
 ) {
-    if station.is_through()
+    if let Ok(part) = parts.get(over.entity)
+        && station.can_take(*part)
         && let Ok(mut material) = materials.get_mut(over.entity)
     {
         material.0 = shop.wood_highlight.clone();
@@ -429,13 +521,31 @@ fn draw_fence(station: Res<TableSawStation>, mut fence: Single<&mut Transform, W
     }
 }
 
+/// Raises the blade and riving knife to the blade's height. The blade's center is its radius
+/// below its top.
+fn draw_blade(
+    station: Res<TableSawStation>,
+    mut blade: Single<&mut Transform, (With<BladeDisc>, Without<RivingKnife>)>,
+    mut knife: Single<&mut Transform, (With<RivingKnife>, Without<BladeDisc>)>,
+) {
+    if station.is_changed() {
+        let saw = station.saw;
+        let height = saw.height.as_meters_f32();
+        let kerf = saw.blade.kerf.as_meters_f32();
+        let center = height - saw.blade.radius().as_meters_f32();
+        blade.translation = ORIGIN + Vec3::new(-kerf / 2.0, center, 0.0);
+        let knife_top = height - KNIFE_BELOW_BLADE;
+        knife.translation = ORIGIN + Vec3::new(-kerf * 0.8, knife_top - KNIFE_HEIGHT, inches(-6.5));
+    }
+}
+
 fn draw_board(
     station: Res<TableSawStation>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut parts: Query<(&Part, &Mesh3d, &mut Transform, &mut Visibility), With<AtTableSaw>>,
 ) {
     if station.is_changed() {
-        let blocks = station.board_blocks();
-        place_parts(&blocks, ORIGIN, Grain::Z, &mut meshes, &mut parts);
+        let boards = station.boards();
+        place_parts(&boards, ORIGIN, Quat::IDENTITY, &mut meshes, &mut parts);
     }
 }

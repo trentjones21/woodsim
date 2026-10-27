@@ -4,11 +4,16 @@
 //! Positions are in meters, in the station's own coordinates: x = 0 is the blade's stop-side
 //! face with +x toward the stop block, y = 0 is the saw table, and z = 0 is the fence face with
 //! +z toward the operator.
+//!
+//! A board lies with its length along x, its `l = length` end against the stop, and its
+//! `w = width` edge against the fence: its own axes turned a quarter turn, by `BOARD_TURN`.
+
+use std::f32::consts::FRAC_PI_2;
 
 use bevy::prelude::*;
 use woodsim::{Blade, Board, Cut, CutError, Length, MiterSaw};
 
-use crate::shop::{Block, BoardBlocks, Part, describe_cut, inches};
+use crate::shop::{Part, Placed, SawBoards, describe_board, describe_cut, inches};
 
 pub const STOP_MIN: Length = Length::from_inch_fraction(1, 16);
 pub const STOP_MAX: Length = Length::from_inches(36);
@@ -18,6 +23,12 @@ const PILE_LEFT: f32 = inches(-38.0);
 const PILE_FRONT: f32 = inches(-1.25);
 /// A sliver of space between stacked parts so each one reads as its own board.
 const PILE_GAP: f32 = inches(1.0 / 16.0);
+
+/// Turns a board's own axes (`w`, `t`, `l` along x, y, z) to lie on the saw: `l` along +x and
+/// `w` along -z, away from the operator.
+pub fn board_turn() -> Quat {
+    Quat::from_rotation_y(FRAC_PI_2)
+}
 
 #[derive(Resource)]
 pub struct MiterSawStation {
@@ -52,7 +63,10 @@ impl Default for MiterSawStation {
     fn default() -> MiterSawStation {
         MiterSawStation {
             saw: MiterSaw {
-                blade: Blade::FULL_KERF,
+                blade: Blade {
+                    diameter: Length::from_inches(12),
+                    kerf: Blade::FULL_KERF,
+                },
             },
             stop: Length::from_inches(12),
             work: Work::Empty,
@@ -112,7 +126,7 @@ impl MiterSawStation {
     pub fn can_take(&self, part: Part) -> bool {
         self.blade_up()
             && match (&self.work, part) {
-                (Work::Ready { .. }, Part::Uncut) | (Work::Cut { .. }, Part::Piece) => true,
+                (Work::Ready { .. }, Part::Whole) | (Work::Cut { .. }, Part::Piece) => true,
                 (Work::Cut { cut, .. }, Part::Offcut) => cut.offcut.is_some(),
                 _ => false,
             }
@@ -204,53 +218,61 @@ impl MiterSawStation {
         self.lowered <= 0.0
     }
 
-    pub fn board_blocks(&self) -> BoardBlocks {
+    pub fn boards(&self) -> SawBoards {
         let (board, stop, cut) = match &self.work {
-            Work::Empty => return BoardBlocks::default(),
+            Work::Empty => return SawBoards::default(),
             Work::Ready { board, .. } => (board, self.stop, None),
             Work::Cut { board, stop, cut } => (board, *stop, Some(cut)),
         };
-        // The board's right end rests against the stop block; the rest reaches left past the blade.
+        // The board's far end rests against the stop block; the rest reaches left past the
+        // blade. Its corner is at its left end, on the operator's side.
         let stop = stop.as_meters_f32();
         let left_end = stop - board.length().as_meters_f32();
         let width = board.width().as_meters_f32();
-        let thickness = board.thickness().as_meters_f32();
-        let block = |left: f32, right: f32| Block {
-            min: Vec3::new(left, 0.0, 0.0),
-            max: Vec3::new(right, thickness, width),
-        };
-        let grain_origin = Vec3::new(left_end, 0.0, 0.0);
+        let at = |x: f32| Vec3::new(x, 0.0, width);
         match cut {
-            None => BoardBlocks {
-                uncut: Some(block(left_end, stop)),
-                grain_origin,
+            None => SawBoards {
+                whole: Some(Placed {
+                    board: board.clone(),
+                    corner: at(left_end),
+                    grain: Vec3::ZERO,
+                }),
                 ..default()
             },
-            Some(cut) => BoardBlocks {
-                uncut: None,
-                piece: Some(block(stop - cut.piece.length().as_meters_f32(), stop)),
-                offcut: cut
-                    .offcut
-                    .as_ref()
-                    .map(|offcut| block(left_end, left_end + offcut.length().as_meters_f32())),
-                grain_origin,
-            },
+            Some(cut) => {
+                let piece_start = stop - cut.piece.length().as_meters_f32();
+                SawBoards {
+                    whole: None,
+                    piece: Some(Placed {
+                        board: cut.piece.clone(),
+                        corner: at(piece_start),
+                        grain: Vec3::Z * (piece_start - left_end),
+                    }),
+                    offcut: cut.offcut.clone().map(|offcut| Placed {
+                        board: offcut,
+                        corner: at(left_end),
+                        grain: Vec3::ZERO,
+                    }),
+                }
+            }
         }
     }
 
     /// Where each part on the pile sits: stacked flat behind the fence, oldest at the bottom.
-    pub fn pile_blocks(&self) -> Vec<Block> {
+    /// The grain shifts from part to part, so they don't all look like copies of each other.
+    pub fn pile(&self) -> Vec<Placed> {
         let mut bottom = 0.0;
         self.parts
             .iter()
-            .map(|part| {
-                let top = bottom + part.thickness().as_meters_f32();
-                let block = Block {
-                    min: Vec3::new(PILE_LEFT, bottom, PILE_FRONT - part.width().as_meters_f32()),
-                    max: Vec3::new(PILE_LEFT + part.length().as_meters_f32(), top, PILE_FRONT),
+            .enumerate()
+            .map(|(index, part)| {
+                let placed = Placed {
+                    board: part.clone(),
+                    corner: Vec3::new(PILE_LEFT, bottom, PILE_FRONT),
+                    grain: Vec3::new(0.11, 0.0, 0.37) * index as f32,
                 };
-                bottom = top + PILE_GAP;
-                block
+                bottom += part.thickness().as_meters_f32() + PILE_GAP;
+                placed
             })
             .collect()
     }
@@ -271,7 +293,7 @@ impl MiterSawStation {
         };
         for (board, count) in counts {
             let pieces = if count == 1 { "pc" } else { "pcs" };
-            list.push_str(&format!("\n{count} {pieces}: {board}"));
+            list.push_str(&format!("\n{count} {pieces}: {}", describe_board(board)));
         }
         list
     }
@@ -290,9 +312,10 @@ impl MiterSawStation {
                 missed: Some(error),
                 ..
             } => format!("No cut: {error}."),
-            Work::Ready { board, .. } => {
-                format!("Board on the saw: {board}. Hold Space to lower the blade.")
-            }
+            Work::Ready { board, .. } => format!(
+                "Board on the saw: {}. Hold Space to lower the blade.",
+                describe_board(board)
+            ),
             Work::Cut { cut, .. } => describe_cut("Cut", cut),
         }
     }
@@ -332,19 +355,23 @@ mod tests {
 
     #[test]
     fn empty_saw_shows_no_board() {
-        assert_eq!(
-            MiterSawStation::default().board_blocks(),
-            BoardBlocks::default()
-        );
+        assert_eq!(MiterSawStation::default().boards(), SawBoards::default());
+    }
+
+    /// Where a board on the saw starts and ends along x.
+    fn x_span(placed: &Placed) -> (f32, f32) {
+        let start = placed.corner.x;
+        (start, start + placed.board.length().as_meters_f32())
     }
 
     #[test]
     fn loaded_board_rests_against_the_stop() {
-        let uncut = loaded().board_blocks().uncut.unwrap();
+        let whole = loaded().boards().whole.unwrap();
 
-        assert_close(uncut.min.x, inches(-12.0));
-        assert_close(uncut.max.x, inches(12.0));
-        assert_close(uncut.max.z, inches(6.0));
+        assert_close(x_span(&whole).0, inches(-12.0));
+        assert_close(x_span(&whole).1, inches(12.0));
+        // Its corner is on the operator's side, a board's width out from the fence.
+        assert_close(whole.corner.z, inches(6.0));
     }
 
     #[test]
@@ -354,14 +381,14 @@ mod tests {
         assert!(matches!(station.work, Work::Ready { .. }));
 
         station.lower(0.5);
-        let blocks = station.board_blocks();
-        assert_eq!(blocks.uncut, None);
-        let piece = blocks.piece.unwrap();
-        assert_close(piece.min.x, 0.0);
-        assert_close(piece.max.x, inches(12.0));
-        let offcut = blocks.offcut.unwrap();
-        assert_close(offcut.min.x, inches(-12.0));
-        assert_close(offcut.max.x, inches(-0.125));
+        let boards = station.boards();
+        assert_eq!(boards.whole, None);
+        let piece = boards.piece.unwrap();
+        assert_close(x_span(&piece).0, 0.0);
+        assert_close(x_span(&piece).1, inches(12.0));
+        let offcut = boards.offcut.unwrap();
+        assert_close(x_span(&offcut).0, inches(-12.0));
+        assert_close(x_span(&offcut).1, inches(-0.125));
         assert_eq!(
             station.status(),
             "Cut a 3/4\" x 6\" x 12\" piece, plus a 3/4\" x 6\" x 11-7/8\" offcut. \
@@ -380,7 +407,7 @@ mod tests {
         station.set_stop(Length::from_inches(20));
         assert_eq!(station.stop, Length::from_inches(20));
         // The pieces already cut stay where they were cut.
-        assert_close(station.board_blocks().piece.unwrap().max.x, inches(12.0));
+        assert_close(x_span(&station.boards().piece.unwrap()).1, inches(12.0));
     }
 
     #[test]
@@ -397,14 +424,14 @@ mod tests {
         let mut station = loaded();
         station.set_stop(Length::from_inches(30));
         chop(&mut station);
-        assert!(station.board_blocks().uncut.is_some());
+        assert!(station.boards().whole.is_some());
         assert_eq!(
             station.status(),
             "No cut: the blade misses the board: set to 30\", but the board is only 24\"."
         );
 
         station.set_stop(Length::from_inches(12));
-        assert_close(station.board_blocks().uncut.unwrap().max.x, inches(12.0));
+        assert_close(x_span(&station.boards().whole.unwrap()).1, inches(12.0));
         assert!(station.status().starts_with("Board on the saw"));
         chop(&mut station);
         assert!(matches!(station.work, Work::Cut { .. }));
@@ -416,9 +443,9 @@ mod tests {
         chop(&mut station);
         assert!(station.pick_up(Part::Offcut));
 
-        let uncut = station.board_blocks().uncut.unwrap();
-        assert_close(uncut.max.x, inches(12.0));
-        assert_close(uncut.max.x - uncut.min.x, inches(11.875));
+        let (start, end) = x_span(&station.boards().whole.unwrap());
+        assert_close(end, inches(12.0));
+        assert_close(end - start, inches(11.875));
         assert_eq!(station.parts.len(), 1);
         assert_eq!(station.parts[0].length(), Length::from_inches(12));
     }
@@ -440,7 +467,7 @@ mod tests {
         let mut station = loaded();
 
         assert_eq!(station.take(Part::Piece), None);
-        assert_eq!(station.take(Part::Uncut), Some(ripped_piece()));
+        assert_eq!(station.take(Part::Whole), Some(ripped_piece()));
         assert!(matches!(station.work, Work::Empty));
         assert!(station.parts.is_empty());
     }
@@ -508,15 +535,15 @@ mod tests {
         let mut station = loaded();
         chop(&mut station);
         station.set_aside();
-        let blocks = station.pile_blocks();
+        let pile = station.pile();
 
-        assert_eq!(blocks.len(), 2);
-        for block in &blocks {
-            assert_close(block.min.x, PILE_LEFT);
-            assert_close(block.max.z, PILE_FRONT);
+        assert_eq!(pile.len(), 2);
+        for part in &pile {
+            assert_close(part.corner.x, PILE_LEFT);
+            assert_close(part.corner.z, PILE_FRONT);
         }
-        assert_close(blocks[0].min.y, 0.0);
-        assert_close(blocks[1].min.y, blocks[0].max.y + PILE_GAP);
+        assert_close(pile[0].corner.y, 0.0);
+        assert_close(pile[1].corner.y, inches(0.75) + PILE_GAP);
     }
 
     #[test]
