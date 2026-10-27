@@ -7,8 +7,7 @@ use std::{
 };
 
 use bevy::{
-    anti_alias::taa::TemporalAntiAliasing,
-    camera::{Exposure, Hdr},
+    camera::Exposure,
     core_pipeline::tonemapping::Tonemapping,
     diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin},
     ecs::system::EntityCommands,
@@ -16,15 +15,9 @@ use bevy::{
         gestures::PinchGesture,
         mouse::{AccumulatedMouseScroll, MouseScrollUnit},
     },
-    light::{GeneratedEnvironmentMapLight, ShadowFilteringMethod, VolumetricFog},
     math::Affine2,
-    pbr::ScreenSpaceAmbientOcclusion,
+    pbr::{DistanceFog, FogFalloff},
     picking::pointer::PointerButton,
-    post_process::{
-        bloom::Bloom,
-        dof::{DepthOfField, DepthOfFieldMode},
-        effect_stack::Vignette,
-    },
     prelude::*,
     render::view::{ColorGrading, ColorGradingGlobal},
     time::common_conditions::on_real_timer,
@@ -32,11 +25,13 @@ use bevy::{
 use woodsim::{Cut, Length};
 
 use crate::{
-    board_mesh::{Grain, board_mesh},
     chop::MiterSawStation,
     feed::TableSawStation,
-    miter_saw, table_saw,
-    textures::{self, CONCRETE_TILE, MAPLE, PINE},
+    meshes::{Grain, board_mesh, rounded_box},
+    miter_saw,
+    scenery::SKY,
+    table_saw,
+    textures::{self, FLOOR_TILE, MAPLE, PINE},
 };
 
 /// Converts inches to meters, for laying out the scene.
@@ -99,10 +94,6 @@ pub const SHOP_HALF_SIZE: f32 = 3.0;
 
 /// How bright the camera expects the scene to be. Lower is brighter.
 const EXPOSURE_EV100: f32 = 7.0;
-/// Depth of field, as an f-stop. The overview's shallow focus makes the shop look like a
-/// miniature; up close, only the far background softens.
-const OVERVIEW_APERTURE: f32 = 0.4;
-const STATION_APERTURE: f32 = 2.0;
 
 /// How steeply the overview looks down at the floor.
 const OVERVIEW_PITCH: f32 = 46.0 * PI / 180.0;
@@ -189,72 +180,50 @@ enum ReadoutLine {
     Fps,
 }
 
-/// Meshes, textures, and materials more than one part of the shop uses.
+/// Textures and materials more than one part of the shop uses.
 #[derive(Resource)]
 pub struct ShopAssets {
-    /// A 1 m cube, scaled to fill each box in the scene.
-    pub cube: Handle<Mesh>,
     /// Pine, for boards. Use it on meshes from `board_mesh` so the grain runs the right way.
     pub wood: Handle<StandardMaterial>,
     /// How a piece of wood looks under the pointer when it can be picked up.
     pub wood_highlight: Handle<StandardMaterial>,
     /// Maple, for bench tops.
     pub maple: Handle<StandardMaterial>,
-    pub concrete: Handle<StandardMaterial>,
+    pub floor: Handle<StandardMaterial>,
     pub pegboard: Handle<Image>,
-    /// The blurry room the camera reflects; see `textures::room_cubemap`.
-    pub room: Handle<Image>,
 }
 
 impl FromWorld for ShopAssets {
     fn from_world(world: &mut World) -> ShopAssets {
-        let cube = world
-            .resource_mut::<Assets<Mesh>>()
-            .add(Cuboid::new(1.0, 1.0, 1.0));
         let mut images = world.resource_mut::<Assets<Image>>();
-        let (pine, pine_normals) = textures::wood(&PINE);
-        let (pine, pine_normals) = (images.add(pine), images.add(pine_normals));
-        let (maple, maple_normals) = textures::wood(&MAPLE);
-        let (maple, maple_normals) = (images.add(maple), images.add(maple_normals));
-        let (concrete, concrete_normals) = textures::concrete();
-        let (concrete, concrete_normals) = (images.add(concrete), images.add(concrete_normals));
+        let pine = images.add(textures::wood(&PINE));
+        let maple = images.add(textures::wood(&MAPLE));
+        let floor = images.add(textures::floor());
         let pegboard = images.add(textures::pegboard());
-        let room = images.add(textures::room_cubemap());
 
         let mut materials = world.resource_mut::<Assets<StandardMaterial>>();
-        let wood =
-            |tint: Color, texture: &Handle<Image>, normals: &Handle<Image>| StandardMaterial {
-                base_color: tint,
-                base_color_texture: Some(texture.clone()),
-                normal_map_texture: Some(normals.clone()),
-                perceptual_roughness: 0.62,
-                reflectance: 0.35,
-                ..default()
-            };
+        let wood = |tint: Color, texture: &Handle<Image>| StandardMaterial {
+            base_color: tint,
+            base_color_texture: Some(texture.clone()),
+            perceptual_roughness: 0.7,
+            reflectance: 0.3,
+            ..default()
+        };
         ShopAssets {
-            cube,
-            wood: materials.add(wood(Color::WHITE, &pine, &pine_normals)),
+            wood: materials.add(wood(Color::WHITE, &pine)),
             wood_highlight: materials.add(StandardMaterial {
                 emissive: LinearRgba::new(0.9, 0.6, 0.25, 1.0) * 60.0,
-                ..wood(Color::srgb(1.0, 0.95, 0.85), &pine, &pine_normals)
+                ..wood(Color::srgb(1.0, 0.95, 0.85), &pine)
             }),
-            maple: materials.add(StandardMaterial {
-                perceptual_roughness: 0.45,
-                ..wood(Color::WHITE, &maple, &maple_normals)
-            }),
-            concrete: materials.add(StandardMaterial {
-                base_color_texture: Some(concrete),
-                normal_map_texture: Some(concrete_normals),
-                perceptual_roughness: 0.78,
-                reflectance: 0.3,
-                // The floor's UVs span the whole shop; repeat a slab every CONCRETE_TILE.
-                uv_transform: Affine2::from_scale(Vec2::splat(
-                    2.0 * SHOP_HALF_SIZE / CONCRETE_TILE,
-                )),
+            maple: materials.add(wood(Color::WHITE, &maple)),
+            floor: materials.add(StandardMaterial {
+                base_color_texture: Some(floor),
+                perceptual_roughness: 0.8,
+                // The floor's UVs span the whole shop; repeat the pattern every FLOOR_TILE.
+                uv_transform: Affine2::from_scale(Vec2::splat(2.0 * SHOP_HALF_SIZE / FLOOR_TILE)),
                 ..default()
             }),
             pegboard,
-            room,
         }
     }
 }
@@ -288,7 +257,7 @@ impl Plugin for ShopPlugin {
     }
 }
 
-/// The concrete floor and the camera. The walls, lights, and furnishings are in `scenery`.
+/// The floor and the camera. The walls, lights, and furnishings are in `scenery`.
 fn spawn_shop(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -304,59 +273,32 @@ fn spawn_shop(
                         .size(2.0 * SHOP_HALF_SIZE, 2.0 * SHOP_HALF_SIZE),
                 ),
             ),
-            MeshMaterial3d(shop.concrete.clone()),
+            MeshMaterial3d(shop.floor.clone()),
         ))
         .observe(drag_floor);
 
-    let mut camera = commands.spawn((
+    commands.spawn((
         Camera3d::default(),
         overview.pose(),
         ShopCamera,
-        // Render in HDR so bright sun patches and lamps can bloom, then tone-map like film.
-        Hdr,
         Exposure {
             ev100: EXPOSURE_EV100,
         },
         Tonemapping::TonyMcMapface,
-        Bloom::NATURAL,
         ColorGrading {
             global: ColorGradingGlobal {
-                temperature: 0.0,
-                post_saturation: 1.05,
+                post_saturation: 1.1,
                 ..default()
             },
             ..default()
         },
-    ));
-    camera.insert((
-        // Ambient occlusion darkens creases and contact points; temporal anti-aliasing smooths
-        // it, the soft shadows, and the light shafts. Both need multisampling off.
-        Msaa::Off,
-        ScreenSpaceAmbientOcclusion::default(),
-        TemporalAntiAliasing::default(),
-        ShadowFilteringMethod::Temporal,
-        DepthOfField {
-            mode: DepthOfFieldMode::Bokeh,
-            focal_distance: overview.distance,
-            aperture_f_stops: OVERVIEW_APERTURE,
-            ..default()
-        },
-        VolumetricFog {
-            ambient_intensity: 0.0,
-            step_count: 64,
-            jitter: 0.5,
-            ..default()
-        },
-        GeneratedEnvironmentMapLight {
-            environment_map: shop.room.clone(),
-            intensity: 40.0,
-            ..default()
-        },
-        // A soft darkening toward the corners, like a camera lens, to draw the eye inward.
-        Vignette {
-            intensity: 0.45,
-            radius: 0.85,
-            smoothness: 3.0,
+        // The lawn fades into the sky far off, so the ground never ends at a hard edge.
+        DistanceFog {
+            color: SKY,
+            falloff: FogFalloff::Linear {
+                start: 20.0,
+                end: 45.0,
+            },
             ..default()
         },
     ));
@@ -464,7 +406,7 @@ fn drag_floor(drag: On<PointerDrag>, view: Res<ShopView>, mut overview: ResMut<O
 
 /// Where the operator stands at each station (in front, a little to the side, looking down),
 /// and how far away the work they're looking at is.
-fn station_pose(station: ShopView) -> Option<(Transform, f32)> {
+fn station_pose(station: ShopView) -> Option<Transform> {
     let (origin, eye, target) = match station {
         ShopView::Overview => return None,
         ShopView::TableSaw => (
@@ -478,28 +420,20 @@ fn station_pose(station: ShopView) -> Option<(Transform, f32)> {
             Vec3::new(0.0, 0.12, 0.0),
         ),
     };
-    let pose = Transform::from_translation(origin + eye).looking_at(origin + target, Vec3::Y);
-    Some((pose, eye.distance(target)))
+    Some(Transform::from_translation(origin + eye).looking_at(origin + target, Vec3::Y))
 }
 
-/// Eases the camera toward the overview or the station being worked at, keeping what it's
-/// looking at in focus.
+/// Eases the camera toward the overview or the station being worked at.
 fn follow_view(
     view: Res<ShopView>,
     overview: Res<OverviewCamera>,
     time: Res<Time>,
-    camera: Single<(&mut Transform, &mut DepthOfField), With<ShopCamera>>,
+    mut camera: Single<&mut Transform, With<ShopCamera>>,
 ) {
-    let (goal, focus, aperture) = match station_pose(*view) {
-        Some((pose, focus)) => (pose, focus, STATION_APERTURE),
-        None => (overview.pose(), overview.distance, OVERVIEW_APERTURE),
-    };
+    let goal = station_pose(*view).unwrap_or_else(|| overview.pose());
     let t = 1.0 - (-6.0 * time.delta_secs()).exp();
-    let (mut transform, mut depth_of_field) = camera.into_inner();
-    transform.translation = transform.translation.lerp(goal.translation, t);
-    transform.rotation = transform.rotation.slerp(goal.rotation, t);
-    depth_of_field.focal_distance += (focus - depth_of_field.focal_distance) * t;
-    depth_of_field.aperture_f_stops += (aperture - depth_of_field.aperture_f_stops) * t;
+    camera.translation = camera.translation.lerp(goal.translation, t);
+    camera.rotation = camera.rotation.slerp(goal.rotation, t);
 }
 
 /// In the overview, outlines the station under the pointer to show it can be clicked.
@@ -516,19 +450,19 @@ fn outline_hovered_station(view: Res<ShopView>, hovered: Res<HoveredStation>, mu
 }
 
 fn spawn_readout(mut commands: Commands) {
-    let text = Color::srgb(0.95, 0.92, 0.86);
+    let text = Color::srgb(0.17, 0.2, 0.27);
     let panel = Node {
         position_type: PositionType::Absolute,
         padding: UiRect::axes(px(14), px(8)),
-        border: UiRect::all(px(1)),
-        border_radius: BorderRadius::all(px(10)),
+        border: UiRect::all(px(2)),
+        border_radius: BorderRadius::all(px(12)),
         ..default()
     };
     let lines = [
         (
             ReadoutLine::Reading,
             34.0,
-            Color::srgb(1.0, 0.78, 0.42),
+            Color::srgb(0.88, 0.38, 0.1),
             Node {
                 top: px(16),
                 left: px(16),
@@ -587,8 +521,8 @@ fn spawn_readout(mut commands: Commands) {
             },
             TextColor(color),
             node,
-            BackgroundColor(Color::srgba(0.07, 0.06, 0.05, 0.72)),
-            BorderColor::all(Color::srgba(1.0, 0.9, 0.75, 0.14)),
+            BackgroundColor(Color::srgba(1.0, 0.98, 0.94, 0.94)),
+            BorderColor::all(Color::srgba(0.17, 0.2, 0.27, 0.18)),
             line,
         ));
     }
@@ -706,6 +640,14 @@ pub fn place_parts<'a>(
             None => *visibility = Visibility::Hidden,
         }
     }
+}
+
+/// A rounded box filling `block`, given in the coordinates of a station at `origin`.
+pub fn rounded_block(meshes: &mut Assets<Mesh>, block: Block, origin: Vec3) -> (Mesh3d, Transform) {
+    (
+        Mesh3d(meshes.add(rounded_box(block.max - block.min))),
+        Transform::from_translation(origin + block.min),
+    )
 }
 
 /// Places a unit cube so it fills `block`, given in the coordinates of a station at `origin`.

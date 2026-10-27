@@ -1,52 +1,58 @@
 //! The garage around the saws: walls that cut away on the camera's side like a dollhouse, the
-//! light coming in, and the things a real shop collects. None of it affects the simulation.
+//! sunny yard outside, and the things a real shop collects. None of it affects the simulation.
 //!
-//! Sunlight only gets in through the window because an invisible shell (the full walls and a
-//! roof) casts shadows the camera never sees: it's on render layer 1, which the sun sees and
-//! the camera doesn't.
+//! The look is bright and toylike, and cheap to draw: one sun with soft shadows, a cool
+//! ambient light so shade stays colorful instead of dark, and plain painted materials.
 
 use bevy::{
-    camera::visibility::RenderLayers,
     ecs::system::EntityCommands,
-    light::{
-        CascadeShadowConfigBuilder, DirectionalLightShadowMap, FogVolume, NotShadowCaster,
-        VolumetricLight,
-    },
+    light::{CascadeShadowConfigBuilder, DirectionalLightShadowMap, NotShadowCaster},
     math::Affine2,
     prelude::*,
 };
 
 use crate::{
-    board_mesh::{Grain, board_mesh},
+    meshes::{Grain, board_mesh, rounded_box},
     shop::{SHOP_HALF_SIZE, ShopAssets, ShopView},
-    textures::PEGBOARD_TILE,
+    textures::{self, GRASS_TILE, PEGBOARD_TILE},
 };
+
+/// The sky, which also tints the far-off lawn.
+pub const SKY: Color = Color::srgb(0.66, 0.84, 0.96);
 
 const WALL_HEIGHT: f32 = 2.4;
 const WALL_THICKNESS: f32 = 0.12;
+/// Walls are painted two colors, split at this height.
+const WAINSCOT_HEIGHT: f32 = 1.0;
 /// Walls on the camera's side drop to this height so the camera can see in.
 const CUTAWAY_HEIGHT: f32 = 0.35;
+/// The dark band along the top of every wall, like the cut edge of a dollhouse.
+const CAP_THICKNESS: f32 = 0.025;
 /// The window in the back wall, in world x and y.
 const WINDOW_X: (f32, f32) = (0.1, 1.5);
 const WINDOW_Y: (f32, f32) = (1.0, 2.05);
-/// Which way sunlight travels: in through the back window, down onto the floor by the saws.
-const SUN_DIRECTION: Vec3 = Vec3::new(-0.25, -0.62, 0.74);
-const SUN_LUX: f32 = 14_000.0;
+/// Which way sunlight travels: steeply down from the right of the camera's usual view, so
+/// shadows fall where you can see them.
+const SUN_DIRECTION: Vec3 = Vec3::new(-0.6, -0.72, -0.3);
+const SUN_LUX: f32 = 1_900.0;
 
 pub struct ScenePlugin;
 
 impl Plugin for ScenePlugin {
     fn build(&self, app: &mut App) {
-        app.insert_resource(ClearColor(Color::srgb(0.05, 0.047, 0.043)))
-            .insert_resource(DirectionalLightShadowMap { size: 4096 })
+        app.insert_resource(ClearColor(SKY))
+            .insert_resource(GlobalAmbientLight {
+                // Sky-blue fill, so shade reads cool and colorful against the warm sun.
+                color: Color::srgb(0.8, 0.87, 1.0),
+                brightness: 75.0,
+                ..default()
+            })
+            .insert_resource(DirectionalLightShadowMap { size: 2048 })
             .add_systems(
                 Startup,
-                (spawn_walls, spawn_lights, spawn_furnishings, spawn_motes),
+                (spawn_walls, spawn_lights, spawn_yard, spawn_furnishings),
             )
-            .add_systems(
-                Update,
-                (cut_away_walls, hide_overhead_in_overview, drift_motes),
-            );
+            .add_systems(Update, (cut_away_walls, hide_overhead_in_overview));
     }
 }
 
@@ -81,38 +87,40 @@ struct Wall {
 struct OnWall(WallSide);
 
 /// Something hanging from the ceiling. It's hidden in the overview, where it would block the
-/// view from above; its light still shines.
+/// view from above.
 #[derive(Component)]
 struct Overhead;
 
-/// A fleck of sawdust hanging in the air. It sparkles where the sun catches it.
-#[derive(Component)]
-struct Mote {
-    home: Vec3,
-    phase: f32,
-}
-
-/// Spawns a box filling `min`..`max` in shop coordinates.
+/// Spawns a rounded box filling `min`..`max` in shop coordinates.
 fn spawn_box<'a>(
     commands: &'a mut Commands,
-    cube: &Handle<Mesh>,
+    meshes: &mut Assets<Mesh>,
     material: &Handle<StandardMaterial>,
     min: Vec3,
     max: Vec3,
 ) -> EntityCommands<'a> {
     commands.spawn((
-        Mesh3d(cube.clone()),
+        Mesh3d(meshes.add(rounded_box(max - min))),
         MeshMaterial3d(material.clone()),
-        Transform::from_translation((min + max) / 2.0).with_scale(max - min),
+        Transform::from_translation(min),
         Pickable::IGNORE,
     ))
 }
 
+/// A plain painted material.
+fn paint(materials: &mut Assets<StandardMaterial>, color: Color) -> Handle<StandardMaterial> {
+    materials.add(StandardMaterial {
+        base_color: color,
+        perceptual_roughness: 0.6,
+        ..default()
+    })
+}
+
 /// The walls' footprints at a given height, with the back wall split around the window when
 /// `window` is set.
-fn wall_boxes(height: f32, outset: f32, window: bool) -> Vec<(WallSide, Vec3, Vec3)> {
-    let inner = SHOP_HALF_SIZE - outset;
-    let outer = SHOP_HALF_SIZE + WALL_THICKNESS + outset;
+fn wall_boxes(height: f32, window: bool) -> Vec<(WallSide, Vec3, Vec3)> {
+    let inner = SHOP_HALF_SIZE;
+    let outer = SHOP_HALF_SIZE + WALL_THICKNESS;
     let mut boxes = vec![
         (
             WallSide::Front,
@@ -169,46 +177,54 @@ fn spawn_walls(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    shop: Res<ShopAssets>,
 ) {
-    let paint = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.82, 0.79, 0.74),
-        perceptual_roughness: 0.9,
-        ..default()
-    });
-    // The visible walls: each side full height and cut away, one shown at a time.
+    let lower = paint(&mut materials, Color::srgb(0.24, 0.6, 0.62));
+    let upper = paint(&mut materials, Color::srgb(0.98, 0.94, 0.85));
+    let trim = paint(&mut materials, Color::srgb(1.0, 0.98, 0.94));
+    let cap = paint(&mut materials, Color::srgb(0.16, 0.3, 0.34));
+    // Each side has a full-height and a cut-away version, and one is shown at a time. Walls
+    // cast no shadows: the sun lights the whole shop, whichever walls are standing.
     for (cut_away, height, window) in [(false, WALL_HEIGHT, true), (true, CUTAWAY_HEIGHT, false)] {
-        for (side, min, max) in wall_boxes(height, 0.0, window) {
-            spawn_box(&mut commands, &shop.cube, &paint, min, max)
-                .insert((Wall { side, cut_away }, NotShadowCaster));
+        for (side, min, max) in wall_boxes(height, window) {
+            let wall = || (Wall { side, cut_away }, NotShadowCaster);
+            let split = WAINSCOT_HEIGHT.clamp(min.y, max.y);
+            for (material, bottom, top) in [(&lower, min.y, split), (&upper, split, max.y)] {
+                if top > bottom {
+                    spawn_box(
+                        &mut commands,
+                        &mut meshes,
+                        material,
+                        min.with_y(bottom),
+                        max.with_y(top),
+                    )
+                    .insert(wall());
+                }
+            }
+            // A chair rail where the colors meet, standing a little proud of the wall.
+            if min.y < WAINSCOT_HEIGHT && max.y > WAINSCOT_HEIGHT + 0.03 {
+                let proud = -side.outward() * 0.015;
+                spawn_box(
+                    &mut commands,
+                    &mut meshes,
+                    &trim,
+                    (min + proud.min(Vec3::ZERO)).with_y(WAINSCOT_HEIGHT - 0.02),
+                    (max + proud.max(Vec3::ZERO)).with_y(WAINSCOT_HEIGHT + 0.03),
+                )
+                .insert(wall());
+            }
+            // Only the tops of the walls get a cap, not the pieces under and over the window.
+            if max.y >= height {
+                spawn_box(
+                    &mut commands,
+                    &mut meshes,
+                    &cap,
+                    min.with_y(height),
+                    max.with_y(height + CAP_THICKNESS),
+                )
+                .insert(wall());
+            }
         }
     }
-
-    // The shadow shell, a hair larger than the walls so it doesn't shadow their faces.
-    let shell = RenderLayers::layer(1);
-    let mut shadow_box = |min: Vec3, max: Vec3| {
-        spawn_box(&mut commands, &shop.cube, &paint, min, max).insert(shell.clone());
-    };
-    for (_, min, max) in wall_boxes(WALL_HEIGHT, 0.03, true) {
-        shadow_box(min, max);
-    }
-    let roof = SHOP_HALF_SIZE + WALL_THICKNESS + 0.03;
-    shadow_box(
-        Vec3::new(-roof, WALL_HEIGHT, -roof),
-        Vec3::new(roof, WALL_HEIGHT + 0.1, roof),
-    );
-
-    // Dark, unlit ground around the garage, so the lit shop stands out like a diorama.
-    commands.spawn((
-        Mesh3d(meshes.add(Plane3d::default().mesh().size(40.0, 40.0))),
-        MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgb(0.045, 0.042, 0.038),
-            unlit: true,
-            ..default()
-        })),
-        Transform::from_xyz(0.0, -0.005, 0.0),
-        Pickable::IGNORE,
-    ));
 }
 
 /// Shows each wall's full or cut-away version depending on which side of the shop the camera
@@ -256,12 +272,11 @@ fn spawn_lights(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    shop: Res<ShopAssets>,
 ) {
-    // Late-afternoon sun, slanting in through the back window into the dusty air.
+    // A warm midday sun, high enough to light the whole shop.
     commands.spawn((
         DirectionalLight {
-            color: Color::srgb(1.0, 0.86, 0.68),
+            color: Color::srgb(1.0, 0.95, 0.86),
             illuminance: SUN_LUX,
             shadow_maps_enabled: true,
             ..default()
@@ -269,40 +284,19 @@ fn spawn_lights(
         Transform::default().looking_to(SUN_DIRECTION.normalize(), Vec3::Y),
         CascadeShadowConfigBuilder {
             num_cascades: 2,
-            first_cascade_far_bound: 6.0,
-            maximum_distance: 20.0,
+            first_cascade_far_bound: 8.0,
+            maximum_distance: 25.0,
             ..default()
         }
         .build(),
-        VolumetricLight,
-        // The sun sees the shadow shell; the camera doesn't.
-        RenderLayers::from_layers(&[0, 1]),
-    ));
-    commands.spawn((
-        FogVolume {
-            density_factor: 0.4,
-            scattering: 0.6,
-            absorption: 0.02,
-            light_tint: Color::srgb(1.0, 0.92, 0.8),
-            ..default()
-        },
-        Transform::from_xyz(0.0, WALL_HEIGHT / 2.0, 0.0).with_scale(Vec3::new(
-            2.0 * SHOP_HALF_SIZE,
-            WALL_HEIGHT,
-            2.0 * SHOP_HALF_SIZE,
-        )),
     ));
 
-    // Two LED shop lights hanging over the saws.
-    let housing = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.85, 0.86, 0.87),
-        metallic: 0.6,
-        perceptual_roughness: 0.4,
-        ..default()
-    });
+    // Two LED shop lights hanging over the saws. They only show up close; the sun does the
+    // lighting.
+    let housing = paint(&mut materials, Color::srgb(0.92, 0.93, 0.95));
     let diffuser = materials.add(StandardMaterial {
         base_color: Color::WHITE,
-        emissive: LinearRgba::new(1.0, 0.97, 0.92, 1.0) * 2500.0,
+        emissive: LinearRgba::new(1.0, 0.97, 0.92, 1.0) * 300.0,
         ..default()
     });
     let chain = meshes.add(Cylinder::new(0.004, WALL_HEIGHT - 2.25));
@@ -317,7 +311,7 @@ fn spawn_lights(
         };
         spawn_box(
             &mut commands,
-            &shop.cube,
+            &mut meshes,
             &housing,
             center - size / 2.0,
             center + size / 2.0,
@@ -327,7 +321,7 @@ fn spawn_lights(
         let lens_center = center - Vec3::Y * 0.03;
         spawn_box(
             &mut commands,
-            &shop.cube,
+            &mut meshes,
             &diffuser,
             lens_center - lens / 2.0,
             lens_center + lens / 2.0,
@@ -348,17 +342,97 @@ fn spawn_lights(
                 Pickable::IGNORE,
             ));
         }
+    }
+}
+
+/// The lawn around the garage, a driveway out front, and a few round trees and bushes.
+fn spawn_yard(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut images: ResMut<Assets<Image>>,
+) {
+    const LAWN_SIZE: f32 = 120.0;
+    commands.spawn((
+        Mesh3d(meshes.add(Plane3d::default().mesh().size(LAWN_SIZE, LAWN_SIZE))),
+        MeshMaterial3d(materials.add(StandardMaterial {
+            base_color_texture: Some(images.add(textures::grass())),
+            perceptual_roughness: 0.9,
+            // The plane's UVs span the whole lawn; repeat the grass every GRASS_TILE.
+            uv_transform: Affine2::from_scale(Vec2::splat(LAWN_SIZE / GRASS_TILE)),
+            ..default()
+        })),
+        Transform::from_xyz(0.0, -0.01, 0.0),
+        Pickable::IGNORE,
+    ));
+    let driveway = paint(&mut materials, Color::srgb(0.84, 0.82, 0.78));
+    let outer = SHOP_HALF_SIZE + WALL_THICKNESS;
+    spawn_box(
+        &mut commands,
+        &mut meshes,
+        &driveway,
+        Vec3::new(-2.2, -0.04, outer),
+        Vec3::new(2.2, 0.02, outer + 6.0),
+    );
+
+    let trunk = paint(&mut materials, Color::srgb(0.55, 0.36, 0.22));
+    let leaves = [
+        paint(&mut materials, Color::srgb(0.36, 0.7, 0.3)),
+        paint(&mut materials, Color::srgb(0.45, 0.78, 0.32)),
+        paint(&mut materials, Color::srgb(0.3, 0.62, 0.32)),
+    ];
+    let ball = meshes.add(Sphere::new(1.0).mesh().ico(3).expect("a valid sphere"));
+    let post = meshes.add(Cylinder::new(1.0, 1.0));
+    // Each tree: where it stands, and how big it is.
+    for (i, (x, z, scale)) in [
+        (-5.2, -4.6, 1.2),
+        (4.9, -4.9, 1.0),
+        (-5.8, 2.2, 0.9),
+        (5.6, 3.4, 1.1),
+        (-3.6, 6.5, 0.8),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let base = Vec3::new(x, 0.0, z);
         commands.spawn((
-            SpotLight {
-                color: Color::srgb(1.0, 0.92, 0.82),
-                intensity: 7_000.0,
-                range: 8.0,
-                inner_angle: 0.5,
-                outer_angle: 1.15,
-                shadow_maps_enabled: true,
-                ..default()
-            },
-            Transform::from_translation(center - Vec3::Y * 0.07).looking_to(Vec3::NEG_Y, Vec3::X),
+            Mesh3d(post.clone()),
+            MeshMaterial3d(trunk.clone()),
+            Transform::from_translation(base + Vec3::Y * 0.6 * scale)
+                .with_scale(Vec3::new(0.12, 1.2, 0.12) * scale),
+            Pickable::IGNORE,
+        ));
+        // A cluster of overlapping balls makes a soft, round crown.
+        for (j, (offset, radius)) in [
+            (Vec3::new(0.0, 1.9, 0.0), 0.95),
+            (Vec3::new(0.55, 1.55, 0.25), 0.7),
+            (Vec3::new(-0.5, 1.6, -0.2), 0.72),
+            (Vec3::new(0.05, 2.5, -0.1), 0.6),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            commands.spawn((
+                Mesh3d(ball.clone()),
+                MeshMaterial3d(leaves[(i + j) % leaves.len()].clone()),
+                Transform::from_translation(base + offset * scale)
+                    .with_scale(Vec3::splat(radius * scale)),
+                Pickable::IGNORE,
+            ));
+        }
+    }
+    // Bushes along the back of the garage.
+    for (i, x) in [-2.4_f32, -1.5, 2.0, 2.8].into_iter().enumerate() {
+        let radius = 0.42 + 0.08 * (i % 2) as f32;
+        commands.spawn((
+            Mesh3d(ball.clone()),
+            MeshMaterial3d(leaves[i % leaves.len()].clone()),
+            Transform::from_xyz(x, radius * 0.6, -outer - 0.55).with_scale(Vec3::new(
+                radius,
+                radius * 0.85,
+                radius,
+            )),
+            Pickable::IGNORE,
         ));
     }
 }
@@ -369,39 +443,37 @@ fn spawn_furnishings(
     mut materials: ResMut<Assets<StandardMaterial>>,
     shop: Res<ShopAssets>,
 ) {
-    let cube = shop.cube.clone();
-    let mut material = |color: Color, metallic: f32, roughness: f32| {
-        materials.add(StandardMaterial {
-            base_color: color,
-            metallic,
-            perceptual_roughness: roughness,
-            ..default()
-        })
-    };
-    let steel = material(Color::srgb(0.08, 0.08, 0.09), 0.7, 0.45);
-    let chrome = material(Color::srgb(0.85, 0.86, 0.88), 1.0, 0.18);
-    let rubber = material(Color::srgb(0.1, 0.1, 0.11), 0.0, 0.9);
-    let window_trim = material(Color::srgb(0.95, 0.94, 0.9), 0.0, 0.5);
-    let handle_wood = material(Color::srgb(0.55, 0.3, 0.14), 0.0, 0.5);
-    let red = material(Color::srgb(0.72, 0.07, 0.05), 0.0, 0.3);
-    let yellow = material(Color::srgb(0.95, 0.72, 0.08), 0.0, 0.35);
+    let charcoal = paint(&mut materials, Color::srgb(0.22, 0.24, 0.3));
+    let steel = paint(&mut materials, Color::srgb(0.84, 0.86, 0.9));
+    let rubber = paint(&mut materials, Color::srgb(0.2, 0.21, 0.25));
+    let white = paint(&mut materials, Color::srgb(1.0, 0.98, 0.94));
+    let handle_wood = paint(&mut materials, Color::srgb(0.78, 0.46, 0.22));
+    let red = paint(&mut materials, Color::srgb(0.92, 0.25, 0.22));
+    let yellow = paint(&mut materials, Color::srgb(1.0, 0.8, 0.2));
+    let blue = paint(&mut materials, Color::srgb(0.25, 0.52, 0.92));
+    let purple = paint(&mut materials, Color::srgb(0.55, 0.38, 0.8));
+    let green = paint(&mut materials, Color::srgb(0.38, 0.72, 0.4));
+    let terracotta = paint(&mut materials, Color::srgb(0.88, 0.5, 0.32));
+    let leaf = paint(&mut materials, Color::srgb(0.36, 0.72, 0.34));
+    let mat_color = paint(&mut materials, Color::srgb(0.27, 0.3, 0.38));
     let sawdust = materials.add(StandardMaterial {
-        base_color: Color::srgba(0.86, 0.76, 0.58, 0.4),
+        base_color: Color::srgba(0.98, 0.84, 0.6, 0.55),
         perceptual_roughness: 1.0,
         alpha_mode: AlphaMode::Blend,
         ..default()
     });
     let glass = materials.add(StandardMaterial {
-        base_color: Color::srgba(0.75, 0.85, 0.95, 0.12),
-        perceptual_roughness: 0.05,
-        reflectance: 0.6,
+        base_color: Color::srgba(0.75, 0.9, 1.0, 0.25),
+        perceptual_roughness: 0.1,
         alpha_mode: AlphaMode::Blend,
         ..default()
     });
     let pegboard = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.95, 0.74, 0.5),
         base_color_texture: Some(shop.pegboard.clone()),
-        perceptual_roughness: 0.85,
-        uv_transform: Affine2::from_scale(Vec2::new(1.9, 1.0) / PEGBOARD_TILE),
+        perceptual_roughness: 0.8,
+        // Rounded boxes' UVs are in meters.
+        uv_transform: Affine2::from_scale(Vec2::splat(1.0 / PEGBOARD_TILE)),
         ..default()
     });
 
@@ -435,26 +507,55 @@ fn spawn_furnishings(
             Vec3::new(right, (sill + head) / 2.0 + 0.02, face - 0.03),
         ),
     ] {
-        spawn_box(&mut commands, &cube, &window_trim, min, max).insert(OnWall(WallSide::Back));
+        spawn_box(&mut commands, &mut meshes, &white, min, max).insert(OnWall(WallSide::Back));
     }
     spawn_box(
         &mut commands,
-        &cube,
+        &mut meshes,
         &glass,
         Vec3::new(left, sill, face - 0.05),
         Vec3::new(right, head, face - 0.045),
     )
     .insert((OnWall(WallSide::Back), NotShadowCaster));
 
+    // A clock on the back wall, at ten past ten.
+    let clock_center = Vec3::new(2.15, 1.75, face);
+    let disc = meshes.add(Cylinder::new(1.0, 1.0));
+    for (material, radius, depth) in [(&charcoal, 0.17, 0.03), (&white, 0.145, 0.04)] {
+        commands.spawn((
+            Mesh3d(disc.clone()),
+            MeshMaterial3d(material.clone()),
+            Transform::from_translation(clock_center + Vec3::Z * depth / 2.0)
+                .with_rotation(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2))
+                .with_scale(Vec3::new(radius, depth, radius)),
+            OnWall(WallSide::Back),
+            Pickable::IGNORE,
+        ));
+    }
+    // Angles counterclockwise from twelve: the minute hand on the 2, the hour hand past the 10.
+    for (angle, length) in [(-1.05_f32, 0.11), (0.96, 0.07)] {
+        let mut hand = rounded_box(Vec3::new(0.012, length, 0.006));
+        hand.translate_by(Vec3::new(-0.006, 0.0, 0.0));
+        commands.spawn((
+            Mesh3d(meshes.add(hand)),
+            MeshMaterial3d(charcoal.clone()),
+            Transform::from_translation(clock_center + Vec3::Z * 0.04)
+                .with_rotation(Quat::from_rotation_z(angle)),
+            OnWall(WallSide::Back),
+            Pickable::IGNORE,
+        ));
+    }
+
     // Pegboard behind the miter saw, with the hand tools a shop starts with.
-    let board_min = Vec3::new(-2.55, 1.05, face);
-    let board_max = Vec3::new(-0.65, 2.05, face + 0.006);
-    spawn_box(&mut commands, &cube, &pegboard, board_min, board_max).insert(OnWall(WallSide::Back));
-    let on_board = face + 0.006;
+    let board_min = Vec3::new(-2.55, 1.15, face);
+    let board_max = Vec3::new(-0.65, 2.05, face + 0.012);
+    spawn_box(&mut commands, &mut meshes, &pegboard, board_min, board_max)
+        .insert(OnWall(WallSide::Back));
+    let on_board = face + 0.012;
     let mut tool = |material: &Handle<StandardMaterial>, min: Vec3, max: Vec3| {
         spawn_box(
             &mut commands,
-            &cube,
+            &mut meshes,
             material,
             min + Vec3::Z * on_board,
             max + Vec3::Z * on_board,
@@ -463,14 +564,14 @@ fn spawn_furnishings(
     };
     // A handsaw: a steel blade tapering to the toe, and a wooden handle.
     tool(
-        &chrome,
+        &steel,
         Vec3::new(-2.42, 1.62, 0.0),
-        Vec3::new(-1.98, 1.74, 0.003),
+        Vec3::new(-1.98, 1.74, 0.006),
     );
     tool(
-        &chrome,
+        &steel,
         Vec3::new(-2.42, 1.58, 0.0),
-        Vec3::new(-2.1, 1.62, 0.003),
+        Vec3::new(-2.1, 1.62, 0.006),
     );
     tool(
         &handle_wood,
@@ -484,26 +585,26 @@ fn spawn_furnishings(
         Vec3::new(-1.71, 1.77, 0.025),
     );
     tool(
-        &steel,
+        &charcoal,
         Vec3::new(-1.79, 1.77, 0.0),
         Vec3::new(-1.66, 1.81, 0.035),
     );
     // A framing square.
     tool(
-        &chrome,
+        &steel,
         Vec3::new(-1.55, 1.25, 0.0),
-        Vec3::new(-1.51, 1.86, 0.004),
+        Vec3::new(-1.51, 1.86, 0.006),
     );
     tool(
-        &chrome,
+        &steel,
         Vec3::new(-1.55, 1.25, 0.0),
-        Vec3::new(-1.15, 1.29, 0.004),
+        Vec3::new(-1.15, 1.29, 0.006),
     );
     // Three F-clamps.
     for i in 0..3 {
         let x = -1.32 + 0.12 * i as f32;
         tool(
-            &chrome,
+            &steel,
             Vec3::new(x, 1.4, 0.0),
             Vec3::new(x + 0.015, 1.9, 0.01),
         );
@@ -527,9 +628,9 @@ fn spawn_furnishings(
             Vec3::new(x + 0.025, 1.84, 0.025),
         );
         tool(
-            &chrome,
+            &steel,
             Vec3::new(x + 0.004, 1.6, 0.0),
-            Vec3::new(x + 0.021, 1.72, 0.005),
+            Vec3::new(x + 0.021, 1.72, 0.006),
         );
     }
     tool(
@@ -544,8 +645,8 @@ fn spawn_furnishings(
     for z in [-1.8, -0.75, 0.3] {
         spawn_box(
             &mut commands,
-            &cube,
-            &steel,
+            &mut meshes,
+            &charcoal,
             Vec3::new(wall, 1.1, z - 0.025),
             Vec3::new(wall + 0.04, 2.25, z + 0.025),
         )
@@ -553,8 +654,8 @@ fn spawn_furnishings(
         for y in [1.25, 1.6, 1.95] {
             spawn_box(
                 &mut commands,
-                &cube,
-                &steel,
+                &mut meshes,
+                &charcoal,
                 Vec3::new(wall, y - 0.025, z - 0.02),
                 Vec3::new(wall + arm_reach, y, z + 0.02),
             )
@@ -595,30 +696,23 @@ fn spawn_furnishings(
         }
     }
 
-    // A rolling tool chest in the back corner: red drawers, chrome pulls, black casters.
+    // A rolling tool chest in the back corner: purple drawers, pale pulls, casters.
     let chest_min = Vec3::new(2.25, 0.08, -2.95);
     let chest_max = Vec3::new(2.95, 1.0, -2.45);
-    let chest_paint = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.66, 0.05, 0.04),
-        perceptual_roughness: 0.25,
-        clearcoat: 0.8,
-        clearcoat_perceptual_roughness: 0.15,
-        ..default()
-    });
-    spawn_box(&mut commands, &cube, &chest_paint, chest_min, chest_max);
+    spawn_box(&mut commands, &mut meshes, &purple, chest_min, chest_max);
     // A seam and a pull at the top of each drawer.
     for top in [0.97, 0.84, 0.71, 0.58, 0.38] {
         spawn_box(
             &mut commands,
-            &cube,
-            &steel,
-            Vec3::new(chest_min.x + 0.02, top, chest_max.z),
+            &mut meshes,
+            &charcoal,
+            Vec3::new(chest_min.x + 0.02, top, chest_max.z - 0.004),
             Vec3::new(chest_max.x - 0.02, top + 0.008, chest_max.z + 0.004),
         );
         spawn_box(
             &mut commands,
-            &cube,
-            &chrome,
+            &mut meshes,
+            &white,
             Vec3::new(chest_min.x + 0.08, top - 0.03, chest_max.z),
             Vec3::new(chest_max.x - 0.08, top - 0.015, chest_max.z + 0.025),
         );
@@ -635,31 +729,48 @@ fn spawn_furnishings(
     }
 
     // A shop vac by the table saw, ready for the sawdust.
+    for (material, radius, height, y) in [
+        (&blue, 0.2, 0.42, 0.25),
+        (&charcoal, 0.21, 0.1, 0.51),
+        (&rubber, 0.22, 0.04, 0.03),
+    ] {
+        commands.spawn((
+            Mesh3d(meshes.add(Cylinder::new(radius, height))),
+            MeshMaterial3d(material.clone()),
+            Transform::from_xyz(1.35, y, -1.5),
+            Pickable::IGNORE,
+        ));
+    }
+
+    // A potted plant in the front corner, for a bit of life.
+    let pot = Vec3::new(-2.55, 0.0, 2.55);
     commands.spawn((
-        Mesh3d(meshes.add(Cylinder::new(0.2, 0.42))),
-        MeshMaterial3d(yellow.clone()),
-        Transform::from_xyz(1.35, 0.25, -1.5),
+        Mesh3d(meshes.add(Cylinder::new(0.17, 0.32))),
+        MeshMaterial3d(terracotta),
+        Transform::from_translation(pot + Vec3::Y * 0.16),
         Pickable::IGNORE,
     ));
-    commands.spawn((
-        Mesh3d(meshes.add(Cylinder::new(0.21, 0.1))),
-        MeshMaterial3d(steel.clone()),
-        Transform::from_xyz(1.35, 0.51, -1.5),
-        Pickable::IGNORE,
-    ));
-    commands.spawn((
-        Mesh3d(meshes.add(Cylinder::new(0.22, 0.04))),
-        MeshMaterial3d(rubber.clone()),
-        Transform::from_xyz(1.35, 0.03, -1.5),
-        Pickable::IGNORE,
-    ));
+    let ball = meshes.add(Sphere::new(1.0).mesh().ico(3).expect("a valid sphere"));
+    for (offset, radius) in [
+        (Vec3::new(0.0, 0.52, 0.0), 0.2),
+        (Vec3::new(0.12, 0.44, 0.06), 0.15),
+        (Vec3::new(-0.1, 0.46, -0.08), 0.15),
+        (Vec3::new(0.02, 0.68, -0.02), 0.13),
+    ] {
+        commands.spawn((
+            Mesh3d(ball.clone()),
+            MeshMaterial3d(leaf.clone()),
+            Transform::from_translation(pot + offset).with_scale(Vec3::splat(radius)),
+            Pickable::IGNORE,
+        ));
+    }
 
     // Anti-fatigue mats where the operator stands at each saw.
     for (min, max) in [
-        (Vec3::new(-0.5, 0.0, 0.5), Vec3::new(0.65, 0.012, 1.1)),
-        (Vec3::new(-2.3, 0.0, 0.42), Vec3::new(-0.9, 0.012, 0.95)),
+        (Vec3::new(-0.5, 0.0, 0.5), Vec3::new(0.65, 0.015, 1.1)),
+        (Vec3::new(-2.3, 0.0, 0.42), Vec3::new(-0.9, 0.015, 0.95)),
     ] {
-        spawn_box(&mut commands, &cube, &rubber, min, max);
+        spawn_box(&mut commands, &mut meshes, &mat_color, min, max);
     }
 
     // Sawdust that's drifted down around the table saw: soft, overlapping drifts that are
@@ -693,7 +804,7 @@ fn spawn_furnishings(
     let bin = Vec3::new(1.3, 0.0, 0.05);
     commands.spawn((
         Mesh3d(meshes.add(Cylinder::new(0.2, 0.6))),
-        MeshMaterial3d(material_steel_blue(&mut materials)),
+        MeshMaterial3d(green),
         Transform::from_translation(bin + Vec3::Y * 0.3),
         Pickable::IGNORE,
     ));
@@ -714,12 +825,10 @@ fn spawn_furnishings(
                 Grain::Z,
             ))),
             MeshMaterial3d(shop.wood.clone()),
-            Transform::from_translation(bin + Vec3::new(0.0, 0.18, 0.0))
-                .with_rotation(
-                    Quat::from_rotation_y(turn)
-                        * Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2 + lean),
-                )
-                .with_scale(Vec3::ONE),
+            Transform::from_translation(bin + Vec3::new(0.0, 0.18, 0.0)).with_rotation(
+                Quat::from_rotation_y(turn)
+                    * Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2 + lean),
+            ),
             Pickable::IGNORE,
         ));
     }
@@ -762,66 +871,4 @@ fn spawn_furnishings(
         Transform::from_xyz(1.08, 0.71, horse_z - 0.2),
         Pickable::IGNORE,
     ));
-}
-
-fn material_steel_blue(materials: &mut Assets<StandardMaterial>) -> Handle<StandardMaterial> {
-    materials.add(StandardMaterial {
-        base_color: Color::srgb(0.16, 0.24, 0.34),
-        perceptual_roughness: 0.6,
-        ..default()
-    })
-}
-
-fn spawn_motes(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-) {
-    let mesh = meshes.add(Sphere::new(0.003).mesh().ico(1).expect("a valid sphere"));
-    let material = materials.add(StandardMaterial {
-        base_color: Color::srgb(1.0, 0.95, 0.85),
-        perceptual_roughness: 1.0,
-        ..default()
-    });
-    // Scatter them through the sunbeam, from the window down to the floor.
-    let window = Vec3::new((WINDOW_X.0 + WINDOW_X.1) / 2.0, 1.5, -SHOP_HALF_SIZE);
-    let down_beam = SUN_DIRECTION.normalize();
-    for i in 0u32..400 {
-        // A cheap repeatable scatter, so the dust looks the same every run.
-        let r = |k: u32| {
-            let h = (i * 7919 + k * 104_729) as f32;
-            (h.sin() * 43_758.547).fract().abs()
-        };
-        let along = r(1) * 2.6;
-        let spread = Vec3::new(r(2) - 0.5, r(3) - 0.5, r(4) - 0.5) * Vec3::new(1.6, 1.2, 0.6);
-        let home = window + down_beam * along + spread;
-        if home.y < 0.05 {
-            continue;
-        }
-        commands.spawn((
-            Mesh3d(mesh.clone()),
-            MeshMaterial3d(material.clone()),
-            Transform::from_translation(home),
-            Mote {
-                home,
-                phase: r(5) * 100.0,
-            },
-            NotShadowCaster,
-            Pickable::IGNORE,
-        ));
-    }
-}
-
-/// Dust drifts lazily on the air.
-fn drift_motes(time: Res<Time>, mut motes: Query<(&Mote, &mut Transform)>) {
-    let t = time.elapsed_secs();
-    for (mote, mut transform) in &mut motes {
-        let p = mote.phase;
-        transform.translation = mote.home
-            + Vec3::new(
-                (t * 0.13 + p).sin() * 0.06,
-                (t * 0.09 + p * 1.7).sin() * 0.05,
-                (t * 0.11 + p * 2.3).cos() * 0.06,
-            );
-    }
 }

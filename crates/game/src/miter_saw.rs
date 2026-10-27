@@ -6,11 +6,11 @@ use bevy::{picking::pointer::PointerButton, prelude::*};
 use woodsim::{Board, Length};
 
 use crate::{
-    board_mesh::{Grain, board_mesh},
     chop::MiterSawStation,
     feed::TableSawStation,
+    meshes::{Grain, board_mesh, rounded_box},
     shop::{
-        Block, Part, ShopAssets, ShopView, block_transform, inches, place_parts, pointer_on_plane,
+        Block, Part, ShopAssets, ShopView, inches, place_parts, pointer_on_plane, rounded_block,
         set_material_on, snap_to_sixteenth, station_part,
     },
 };
@@ -101,54 +101,39 @@ fn spawn_miter_saw(
     shop: Res<ShopAssets>,
     station: Res<MiterSawStation>,
 ) {
-    let cube = shop.cube.clone();
-    let cabinet = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.22, 0.25, 0.29),
-        perceptual_roughness: 0.55,
-        clearcoat: 0.3,
-        ..default()
-    });
-    let drawer = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.27, 0.31, 0.36),
-        perceptual_roughness: 0.5,
-        clearcoat: 0.3,
-        ..default()
-    });
-    let dark = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.05, 0.05, 0.055),
-        metallic: 0.5,
-        perceptual_roughness: 0.45,
-        ..default()
-    });
-    let aluminum = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.78, 0.79, 0.8),
-        metallic: 1.0,
-        perceptual_roughness: 0.35,
-        ..default()
-    });
-    // The saw's housing: bright, glossy tool plastic.
-    let body = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.0, 0.52, 0.56),
-        perceptual_roughness: 0.3,
-        clearcoat: 0.7,
-        clearcoat_perceptual_roughness: 0.2,
-        ..default()
-    });
+    let mut paint = |color: Color| {
+        materials.add(StandardMaterial {
+            base_color: color,
+            perceptual_roughness: 0.55,
+            ..default()
+        })
+    };
+    let cabinet = paint(Color::srgb(0.9, 0.42, 0.36));
+    let drawer = paint(Color::srgb(0.97, 0.56, 0.48));
+    let dark = paint(Color::srgb(0.22, 0.24, 0.3));
+    let aluminum = paint(Color::srgb(0.86, 0.88, 0.91));
+    let pull = paint(Color::srgb(0.98, 0.95, 0.88));
+    // The saw's housing: bright tool plastic.
+    let body = paint(Color::srgb(0.08, 0.64, 0.66));
+    let zero_clearance = paint(Color::srgb(0.92, 0.25, 0.22));
     let wood = shop.wood.clone();
 
-    let spawn_box =
-        |commands: &mut Commands, material: &Handle<StandardMaterial>, min: Vec3, max: Vec3| {
-            let entity = commands.spawn((
-                Mesh3d(cube.clone()),
-                MeshMaterial3d(material.clone()),
-                block_transform(Block { min, max }, ORIGIN),
-            ));
-            station_part(entity, ShopView::MiterSaw);
-        };
+    let spawn_box = |commands: &mut Commands,
+                     meshes: &mut Assets<Mesh>,
+                     material: &Handle<StandardMaterial>,
+                     min: Vec3,
+                     max: Vec3| {
+        let entity = commands.spawn((
+            rounded_block(meshes, Block { min, max }, ORIGIN),
+            MeshMaterial3d(material.clone()),
+        ));
+        station_part(entity, ShopView::MiterSaw);
+    };
     // A cabinet workbench: drawers on a dark toe kick, under a maple top.
     let front = inches(14.0);
     spawn_box(
         &mut commands,
+        &mut meshes,
         &dark,
         Vec3::new(-BENCH_HALF_LENGTH + inches(1.0), -ORIGIN.y, inches(-7.0)),
         Vec3::new(
@@ -159,6 +144,7 @@ fn spawn_miter_saw(
     );
     spawn_box(
         &mut commands,
+        &mut meshes,
         &cabinet,
         Vec3::new(-BENCH_HALF_LENGTH, inches(3.0) - ORIGIN.y, inches(-8.0)),
         Vec3::new(BENCH_HALF_LENGTH, inches(-1.75), front),
@@ -169,6 +155,7 @@ fn spawn_miter_saw(
             let right = left + inches(18.5);
             spawn_box(
                 &mut commands,
+                &mut meshes,
                 &drawer,
                 Vec3::new(left, inches(bottom), front),
                 Vec3::new(right, inches(top), front + inches(0.4)),
@@ -176,7 +163,8 @@ fn spawn_miter_saw(
             let middle = (left + right) / 2.0;
             spawn_box(
                 &mut commands,
-                &aluminum,
+                &mut meshes,
+                &pull,
                 Vec3::new(middle - inches(2.5), inches(top - 2.0), front + inches(0.4)),
                 Vec3::new(middle + inches(2.5), inches(top - 1.4), front + inches(1.0)),
             );
@@ -197,20 +185,21 @@ fn spawn_miter_saw(
     // The saw: a dark base with a red zero-clearance strip where the blade comes through.
     spawn_box(
         &mut commands,
+        &mut meshes,
         &dark,
         Vec3::new(inches(-7.0), inches(-1.0), inches(-6.0)),
         Vec3::new(inches(7.0), 0.0, inches(10.0)),
     );
     commands.spawn((
-        Mesh3d(cube.clone()),
-        MeshMaterial3d(materials.add(Color::srgb(0.75, 0.1, 0.05))),
-        block_transform(
+        rounded_block(
+            &mut meshes,
             Block {
                 min: Vec3::new(inches(-0.6), inches(-0.5), inches(-1.0)),
                 max: Vec3::new(inches(0.6), inches(0.02), inches(9.0)),
             },
             ORIGIN,
         ),
+        MeshMaterial3d(zero_clearance),
         Pickable::IGNORE,
     ));
     // The fence, split around the blade.
@@ -220,6 +209,7 @@ fn spawn_miter_saw(
     ] {
         spawn_box(
             &mut commands,
+            &mut meshes,
             &aluminum,
             Vec3::new(left, 0.0, inches(-1.0)),
             Vec3::new(right, FENCE_HEIGHT, 0.0),
@@ -228,6 +218,7 @@ fn spawn_miter_saw(
     // The post the arm pivots on.
     spawn_box(
         &mut commands,
+        &mut meshes,
         &dark,
         Vec3::new(inches(-1.5), 0.0, inches(-6.0)),
         Vec3::new(inches(1.5), PIVOT.y + inches(1.0), inches(-2.5)),
@@ -237,6 +228,14 @@ fn spawn_miter_saw(
     let arm_length = BLADE_FROM_PIVOT.length();
     let arm_tilt = (-BLADE_FROM_PIVOT.y).atan2(BLADE_FROM_PIVOT.z);
     let motor = meshes.add(Cylinder::new(inches(1.9), inches(4.5)));
+    // Rounded boxes start at a corner; these are centered on their transforms.
+    let mut centered = |size: Vec3| {
+        let mut mesh = rounded_box(size);
+        mesh.translate_by(-size / 2.0);
+        meshes.add(mesh)
+    };
+    let arm = centered(Vec3::new(inches(1.5), inches(1.8), arm_length));
+    let handle = centered(Vec3::new(inches(1.3), inches(1.3), inches(4.5)));
     commands
         .spawn((
             Transform::from_translation(ORIGIN + PIVOT),
@@ -247,9 +246,8 @@ fn spawn_miter_saw(
             head.spawn((
                 Mesh3d(meshes.add(Cylinder::new(BLADE_RADIUS, kerf))),
                 MeshMaterial3d(materials.add(StandardMaterial {
-                    base_color: Color::srgb(0.82, 0.82, 0.85),
-                    metallic: 1.0,
-                    perceptual_roughness: 0.22,
+                    base_color: Color::srgb(0.88, 0.89, 0.92),
+                    perceptual_roughness: 0.3,
                     ..default()
                 })),
                 // A cylinder's axis starts along Y; turn it to X so the blade cuts across the board.
@@ -258,11 +256,10 @@ fn spawn_miter_saw(
                 Pickable::IGNORE,
             ));
             head.spawn((
-                Mesh3d(cube.clone()),
+                Mesh3d(arm),
                 MeshMaterial3d(body.clone()),
                 Transform::from_translation(BLADE_FROM_PIVOT / 2.0 + Vec3::X * inches(1.0))
-                    .with_rotation(Quat::from_rotation_x(arm_tilt))
-                    .with_scale(Vec3::new(inches(1.5), inches(1.8), arm_length)),
+                    .with_rotation(Quat::from_rotation_x(arm_tilt)),
                 Pickable::IGNORE,
             ));
             // The motor, a drum beside the blade on the stop side, with a dark end cap.
@@ -287,20 +284,18 @@ fn spawn_miter_saw(
             ));
             // The handle, out front where a hand pulls the blade down.
             head.spawn((
-                Mesh3d(cube.clone()),
+                Mesh3d(handle),
                 MeshMaterial3d(dark.clone()),
                 Transform::from_translation(
                     BLADE_FROM_PIVOT + Vec3::new(inches(0.5), inches(4.5), inches(4.0)),
-                )
-                .with_scale(Vec3::new(inches(1.3), inches(1.3), inches(4.5))),
+                ),
                 Pickable::IGNORE,
             ));
         });
 
     let stop_color = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.98, 0.72, 0.08),
-        perceptual_roughness: 0.35,
-        clearcoat: 0.5,
+        base_color: Color::srgb(1.0, 0.78, 0.15),
+        perceptual_roughness: 0.4,
         ..default()
     });
     let stop_hover = materials.add(StandardMaterial {
@@ -310,7 +305,11 @@ fn spawn_miter_saw(
     });
     commands
         .spawn((
-            Mesh3d(cube.clone()),
+            Mesh3d(meshes.add(rounded_box(Vec3::new(
+                STOP_WIDTH,
+                STOP_HEIGHT,
+                STOP_FRONT - STOP_BACK,
+            )))),
             MeshMaterial3d(stop_color.clone()),
             Transform::default(),
             StopBlock { grab_offset: 0.0 },
@@ -495,11 +494,7 @@ fn drag_stop(
 fn draw_stop(station: Res<MiterSawStation>, mut stop: Single<&mut Transform, With<StopBlock>>) {
     if station.is_changed() {
         let left = station.stop.as_meters_f32();
-        let block = Block {
-            min: Vec3::new(left, 0.0, STOP_BACK),
-            max: Vec3::new(left + STOP_WIDTH, STOP_HEIGHT, STOP_FRONT),
-        };
-        **stop = block_transform(block, ORIGIN);
+        stop.translation = ORIGIN + Vec3::new(left, 0.0, STOP_BACK);
     }
 }
 

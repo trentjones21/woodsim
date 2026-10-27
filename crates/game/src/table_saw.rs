@@ -6,11 +6,11 @@ use bevy::{picking::pointer::PointerButton, prelude::*};
 use woodsim::Length;
 
 use crate::{
-    board_mesh::{Grain, board_mesh},
     chop::MiterSawStation,
     feed::{BLADE_DROP, BLADE_RADIUS, TableSawStation},
+    meshes::{Grain, board_mesh, rounded_box},
     shop::{
-        Block, Part, ShopAssets, ShopView, block_transform, inches, place_parts, pointer_on_plane,
+        Block, Part, ShopAssets, ShopView, inches, place_parts, pointer_on_plane, rounded_block,
         set_material_on, snap_to_sixteenth, station_part,
     },
 };
@@ -43,7 +43,6 @@ const FENCE_WIDTH: f32 = inches(2.0);
 const FENCE_HEIGHT: f32 = inches(2.5);
 /// The fence runs the depth of the table and over the front rail.
 const FENCE_LENGTH: f32 = TABLE_FRONT + inches(2.0) - TABLE_BACK;
-const FENCE_Z: f32 = TABLE_BACK + FENCE_LENGTH / 2.0;
 
 const FENCE_STEP: Length = Length::from_inch_fraction(1, 16);
 const FENCE_BIG_STEP: Length = Length::from_inches(1);
@@ -84,53 +83,35 @@ fn spawn_saw(
     shop: Res<ShopAssets>,
     station: Res<TableSawStation>,
 ) {
-    let cube = shop.cube.clone();
-    // Machined cast iron: satin steel that picks up the room's reflections.
-    let cast_iron = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.46, 0.47, 0.49),
-        metallic: 0.9,
-        perceptual_roughness: 0.32,
-        ..default()
-    });
-    // Powder-coated cabinet paint with a little sheen.
-    let cabinet = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.13, 0.27, 0.22),
-        perceptual_roughness: 0.5,
-        clearcoat: 0.4,
-        clearcoat_perceptual_roughness: 0.3,
-        ..default()
-    });
-    let dark_metal = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.07, 0.07, 0.08),
-        metallic: 0.6,
-        perceptual_roughness: 0.4,
-        ..default()
-    });
-    let safety_red = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.78, 0.12, 0.06),
-        perceptual_roughness: 0.35,
-        clearcoat: 0.6,
-        ..default()
-    });
-    let tape_yellow = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.95, 0.78, 0.18),
-        perceptual_roughness: 0.4,
-        ..default()
-    });
+    let mut paint = |color: Color| {
+        materials.add(StandardMaterial {
+            base_color: color,
+            perceptual_roughness: 0.55,
+            ..default()
+        })
+    };
+    let table_top = paint(Color::srgb(0.76, 0.79, 0.83));
+    let cabinet = paint(Color::srgb(0.98, 0.72, 0.2));
+    let dark_metal = paint(Color::srgb(0.22, 0.24, 0.3));
+    let safety_red = paint(Color::srgb(0.92, 0.25, 0.22));
+    let tape_yellow = paint(Color::srgb(1.0, 0.88, 0.35));
     let wood = shop.wood.clone();
 
-    let spawn_box =
-        |commands: &mut Commands, material: &Handle<StandardMaterial>, min: Vec3, max: Vec3| {
-            let entity = commands.spawn((
-                Mesh3d(cube.clone()),
-                MeshMaterial3d(material.clone()),
-                block_transform(Block { min, max }, ORIGIN),
-            ));
-            station_part(entity, ShopView::TableSaw);
-        };
+    let spawn_box = |commands: &mut Commands,
+                     meshes: &mut Assets<Mesh>,
+                     material: &Handle<StandardMaterial>,
+                     min: Vec3,
+                     max: Vec3| {
+        let entity = commands.spawn((
+            rounded_block(meshes, Block { min, max }, ORIGIN),
+            MeshMaterial3d(material.clone()),
+        ));
+        station_part(entity, ShopView::TableSaw);
+    };
     spawn_box(
         &mut commands,
-        &cast_iron,
+        &mut meshes,
+        &table_top,
         Vec3::new(TABLE_LEFT, inches(-1.5), TABLE_BACK),
         Vec3::new(TABLE_RIGHT, 0.0, TABLE_FRONT),
     );
@@ -138,6 +119,7 @@ fn spawn_saw(
     for x in [-6.5, 5.5] {
         spawn_box(
             &mut commands,
+            &mut meshes,
             &dark_metal,
             Vec3::new(inches(x), inches(-0.2), TABLE_BACK),
             Vec3::new(inches(x + 0.75), inches(0.02), TABLE_FRONT),
@@ -146,6 +128,7 @@ fn spawn_saw(
     // The throat plate around the blade.
     spawn_box(
         &mut commands,
+        &mut meshes,
         &safety_red,
         Vec3::new(inches(-1.75), inches(-0.2), inches(-7.0)),
         Vec3::new(inches(1.75), inches(0.03), inches(7.0)),
@@ -153,12 +136,14 @@ fn spawn_saw(
     // Front rail, which the fence rides on, with a measuring tape along its top.
     spawn_box(
         &mut commands,
+        &mut meshes,
         &dark_metal,
         Vec3::new(TABLE_LEFT, inches(-2.5), TABLE_FRONT),
         Vec3::new(TABLE_RIGHT, 0.0, TABLE_FRONT + inches(2.0)),
     );
     spawn_box(
         &mut commands,
+        &mut meshes,
         &tape_yellow,
         Vec3::new(TABLE_LEFT + inches(1.0), 0.0, TABLE_FRONT + inches(0.4)),
         Vec3::new(
@@ -170,6 +155,7 @@ fn spawn_saw(
     // The power paddle hangs under the rail, left of the blade, where a hip can bump it off.
     spawn_box(
         &mut commands,
+        &mut meshes,
         &safety_red,
         Vec3::new(inches(-12.0), inches(-5.0), TABLE_FRONT + inches(1.5)),
         Vec3::new(inches(-8.5), inches(-2.5), TABLE_FRONT + inches(3.0)),
@@ -177,12 +163,14 @@ fn spawn_saw(
     // The cabinet on a dark plinth, with a dust port out the back.
     spawn_box(
         &mut commands,
+        &mut meshes,
         &cabinet,
         Vec3::new(inches(-10.0), inches(3.0) - ORIGIN.y, inches(-10.0)),
         Vec3::new(inches(10.0), inches(-1.5), inches(10.0)),
     );
     spawn_box(
         &mut commands,
+        &mut meshes,
         &dark_metal,
         Vec3::new(inches(-11.0), -ORIGIN.y, inches(-11.0)),
         Vec3::new(inches(11.0), inches(3.0) - ORIGIN.y, inches(11.0)),
@@ -211,6 +199,7 @@ fn spawn_saw(
     station_part(entity, ShopView::TableSaw);
     spawn_box(
         &mut commands,
+        &mut meshes,
         &cabinet,
         Vec3::new(inches(-9.0), -ORIGIN.y, OUTFEED_END),
         Vec3::new(inches(19.0), inches(-0.75), OUTFEED_END + inches(0.75)),
@@ -220,9 +209,8 @@ fn spawn_saw(
     commands.spawn((
         Mesh3d(meshes.add(Cylinder::new(BLADE_RADIUS, kerf))),
         MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgb(0.82, 0.82, 0.85),
-            metallic: 1.0,
-            perceptual_roughness: 0.22,
+            base_color: Color::srgb(0.88, 0.89, 0.92),
+            perceptual_roughness: 0.3,
             ..default()
         })),
         // A cylinder's axis starts along Y; turn it to X so the blade spins toward the operator.
@@ -232,33 +220,36 @@ fn spawn_saw(
     ));
     // The riving knife stands in the kerf just behind the blade, so pieces pass either side.
     commands.spawn((
-        Mesh3d(cube.clone()),
-        MeshMaterial3d(dark_metal.clone()),
-        block_transform(
+        rounded_block(
+            &mut meshes,
             Block {
                 min: Vec3::new(-kerf * 0.8, 0.0, inches(-6.5)),
                 max: Vec3::new(-kerf * 0.2, inches(2.25), inches(-3.0)),
             },
             ORIGIN,
         ),
+        MeshMaterial3d(dark_metal.clone()),
         Pickable::IGNORE,
     ));
 
     let fence_color = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.85, 0.2, 0.08),
-        perceptual_roughness: 0.35,
-        clearcoat: 0.6,
+        base_color: Color::srgb(0.9, 0.2, 0.22),
+        perceptual_roughness: 0.4,
         ..default()
     });
     let fence_hover = materials.add(StandardMaterial {
-        base_color: Color::srgb(1.0, 0.45, 0.25),
-        emissive: LinearRgba::new(1.0, 0.35, 0.1, 1.0) * 40.0,
-        perceptual_roughness: 0.35,
+        base_color: Color::srgb(1.0, 0.45, 0.4),
+        emissive: LinearRgba::new(1.0, 0.35, 0.2, 1.0) * 40.0,
+        perceptual_roughness: 0.4,
         ..default()
     });
     commands
         .spawn((
-            Mesh3d(meshes.add(Cuboid::new(FENCE_WIDTH, FENCE_HEIGHT, FENCE_LENGTH))),
+            Mesh3d(meshes.add(rounded_box(Vec3::new(
+                FENCE_WIDTH,
+                FENCE_HEIGHT,
+                FENCE_LENGTH,
+            )))),
             MeshMaterial3d(fence_color.clone()),
             Transform::default(),
             Fence { grab_offset: 0.0 },
@@ -433,8 +424,8 @@ fn highlight_carryable(
 
 fn draw_fence(station: Res<TableSawStation>, mut fence: Single<&mut Transform, With<Fence>>) {
     if station.is_changed() {
-        let x = station.saw.fence.as_meters_f32() + FENCE_WIDTH / 2.0;
-        fence.translation = ORIGIN + Vec3::new(x, FENCE_HEIGHT / 2.0, FENCE_Z);
+        let x = station.saw.fence.as_meters_f32();
+        fence.translation = ORIGIN + Vec3::new(x, 0.0, TABLE_BACK);
     }
 }
 
