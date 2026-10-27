@@ -9,7 +9,7 @@
 //! axes line up with table space: `w` along x, `t` along y, and `l` along z.
 
 use bevy::prelude::*;
-use woodsim::{Blade, Board, CutError, Length, Pass, TableSaw};
+use woodsim::{Blade, Board, CutError, Length, Pass, Piece, TableSaw};
 
 use crate::shop::{Part, Placed, SawBoards, describe_board, describe_cut, describe_kerf};
 
@@ -153,8 +153,8 @@ impl TableSawStation {
         }
         let board = match (part, self.result()) {
             (Part::Whole, _) => self.current_board(),
-            (Part::Piece, Some(Ok(Pass::Cut(cut)))) => cut.piece.clone(),
-            (Part::Offcut, Some(Ok(Pass::Cut(cut)))) => cut.offcut.clone()?,
+            (Part::Piece, Some(Ok(Pass::Cut(cut)))) => cut.piece.board.clone(),
+            (Part::Offcut, Some(Ok(Pass::Cut(cut)))) => cut.offcut.as_ref()?.board.clone(),
             _ => return None,
         };
         self.taken.push(part);
@@ -190,7 +190,8 @@ impl TableSawStation {
             ]
             .into_iter()
             .filter(|(part, _)| !self.taken.contains(part))
-            .filter_map(|(_, board)| board.cloned())
+            .filter_map(|(_, piece)| piece.map(|piece| piece.board.clone()))
+            .chain(cut.loose.iter().map(|piece| piece.board.clone()))
             .collect(),
             _ if self.taken.contains(&Part::Whole) => Vec::new(),
             _ => vec![self.current_board()],
@@ -266,28 +267,30 @@ impl TableSawStation {
             |part: Part, placed: Placed| (!self.taken.contains(&part)).then_some(placed);
         match self.result() {
             Some(Ok(Pass::Cut(cut))) => {
-                // The piece against the fence was the board's far side, from `width - fence`.
-                let offset = Vec3::X * (width - fence).as_meters_f32();
+                // Each piece sits where it was on the board: its corner `across` and `along` it,
+                // which are x and z in table space.
+                let place = |piece: &Piece| {
+                    let offset = Vec3::new(
+                        piece.across.as_meters_f32(),
+                        0.0,
+                        piece.along.as_meters_f32(),
+                    );
+                    Placed {
+                        board: piece.board.clone(),
+                        corner: corner + offset,
+                        grain: offset,
+                    }
+                };
+                // A table saw pass never sets pieces loose: every slot so far runs in from the
+                // board's leading end, so the wood beside the new slot holds together. Any would
+                // go back with the leftovers when the next board loads.
                 SawBoards {
                     whole: None,
-                    piece: unless_taken(
-                        Part::Piece,
-                        Placed {
-                            board: cut.piece.clone(),
-                            corner: corner + offset,
-                            grain: offset,
-                        },
-                    ),
-                    offcut: cut.offcut.clone().and_then(|offcut| {
-                        unless_taken(
-                            Part::Offcut,
-                            Placed {
-                                board: offcut,
-                                corner,
-                                grain: Vec3::ZERO,
-                            },
-                        )
-                    }),
+                    piece: unless_taken(Part::Piece, place(&cut.piece)),
+                    offcut: cut
+                        .offcut
+                        .as_ref()
+                        .and_then(|offcut| unless_taken(Part::Offcut, place(offcut))),
                 }
             }
             _ => SawBoards {

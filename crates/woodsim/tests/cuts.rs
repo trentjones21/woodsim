@@ -52,15 +52,22 @@ fn rip_leaves_the_fence_width_and_loses_a_kerf() {
     );
 
     assert_eq!(
-        cut.piece,
+        cut.piece.board,
         Board::new(
             Length::from_inches(96),
             Length::from_inches(6),
             inches(0, 3, 4)
         )
     );
-    assert_eq!(cut.offcut.unwrap().width(), inches(1, 1, 8));
+    // The piece was the 6" beside the fence; the offcut the 1-1/8" at the other edge.
+    assert_eq!(cut.piece.across, inches(1, 1, 4));
+    let offcut = cut.offcut.unwrap();
+    assert_eq!(
+        (offcut.board.width(), offcut.across),
+        (inches(1, 1, 8), Length::ZERO)
+    );
     assert_eq!(cut.waste, inches(0, 1, 8));
+    assert!(cut.loose.is_empty());
 }
 
 #[test]
@@ -70,8 +77,8 @@ fn thin_kerf_blade_leaves_a_wider_offcut() {
         &one_by_eight(),
     );
 
-    assert_eq!(cut.piece.width(), Length::from_inches(6));
-    assert_eq!(cut.offcut.unwrap().width(), inches(1, 5, 32));
+    assert_eq!(cut.piece.board.width(), Length::from_inches(6));
+    assert_eq!(cut.offcut.unwrap().board.width(), inches(1, 5, 32));
     assert_eq!(cut.waste, inches(0, 3, 32));
 }
 
@@ -82,7 +89,7 @@ fn ripping_within_a_kerf_of_the_edge_turns_the_rest_to_sawdust() {
         &one_by_eight(),
     );
 
-    assert_eq!(cut.piece.width(), inches(7, 3, 16));
+    assert_eq!(cut.piece.board.width(), inches(7, 3, 16));
     assert_eq!(cut.offcut, None);
     assert_eq!(cut.waste, inches(0, 1, 16));
 }
@@ -114,9 +121,9 @@ fn crosscut_leaves_the_measured_length_and_loses_a_kerf() {
         .crosscut(&one_by_eight(), Length::from_inches(24))
         .unwrap();
 
-    assert_eq!(cut.piece.length(), Length::from_inches(24));
-    assert_eq!(cut.piece.width(), inches(7, 1, 4));
-    assert_eq!(cut.offcut.unwrap().length(), inches(71, 7, 8));
+    assert_eq!(cut.piece.board.length(), Length::from_inches(24));
+    assert_eq!(cut.piece.board.width(), inches(7, 1, 4));
+    assert_eq!(cut.offcut.unwrap().board.length(), inches(71, 7, 8));
     assert_eq!(cut.waste, inches(0, 1, 8));
 }
 
@@ -127,10 +134,10 @@ fn rip_to_width_then_crosscut_to_length() {
         &one_by_eight(),
     );
     let cut = miter_saw()
-        .crosscut(&ripped.piece, Length::from_inches(24))
+        .crosscut(&ripped.piece.board, Length::from_inches(24))
         .unwrap();
 
-    assert_eq!(cut.piece.to_string(), "3/4\" x 6\" x 24\"");
+    assert_eq!(cut.piece.board.to_string(), "3/4\" x 6\" x 24\"");
 }
 
 #[test]
@@ -139,8 +146,8 @@ fn kerf_means_an_eight_foot_board_does_not_make_four_two_foot_pieces() {
     let mut rest = one_by_eight();
     for _ in 0..3 {
         let cut = saw.crosscut(&rest, Length::from_inches(24)).unwrap();
-        assert_eq!(cut.piece.length(), Length::from_inches(24));
-        rest = cut.offcut.unwrap();
+        assert_eq!(cut.piece.board.length(), Length::from_inches(24));
+        rest = cut.offcut.unwrap().board;
     }
 
     assert_eq!(rest.length(), inches(23, 5, 8));

@@ -11,7 +11,7 @@
 use std::f32::consts::FRAC_PI_2;
 
 use bevy::prelude::*;
-use woodsim::{Blade, Board, Cut, CutError, Length, MiterSaw};
+use woodsim::{Blade, Board, Cut, CutError, Length, MiterSaw, Piece};
 
 use crate::shop::{Part, Placed, SawBoards, describe_board, describe_cut, inches};
 
@@ -97,7 +97,8 @@ impl MiterSawStation {
         }
     }
 
-    /// Lowers the blade by `amount` of its travel. Reaching the bottom cuts the board.
+    /// Lowers the blade by `amount` of its travel. Reaching the bottom cuts the board. Strips a
+    /// slot sets loose fall onto the parts pile.
     pub fn lower(&mut self, amount: f32) {
         self.lowered = (self.lowered + amount).min(1.0);
         if self.lowered < 1.0 {
@@ -106,6 +107,8 @@ impl MiterSawStation {
         if let Work::Ready { board, missed } = &mut self.work {
             match self.saw.crosscut(board, self.stop) {
                 Ok(cut) => {
+                    self.parts
+                        .extend(cut.loose.iter().map(|piece| piece.board.clone()));
                     self.work = Work::Cut {
                         board: board.clone(),
                         stop: self.stop,
@@ -146,8 +149,8 @@ impl MiterSawStation {
                     (Part::Offcut, Some(offcut)) => (offcut, Some(cut.piece)),
                     (_, offcut) => (cut.piece, offcut),
                 };
-                self.parts.extend(other);
-                Some(taken)
+                self.parts.extend(other.map(|piece| piece.board));
+                Some(taken.board)
             }
         }
     }
@@ -162,11 +165,12 @@ impl MiterSawStation {
             return false;
         };
         let (picked, other) = match (part, &cut.offcut) {
-            (Part::Piece, offcut) => (cut.piece.clone(), offcut.clone()),
-            (Part::Offcut, Some(offcut)) => (offcut.clone(), Some(cut.piece.clone())),
+            (Part::Piece, offcut) => (&cut.piece, offcut.as_ref()),
+            (Part::Offcut, Some(offcut)) => (offcut, Some(&cut.piece)),
             _ => return false,
         };
-        self.parts.extend(other);
+        let picked = picked.board.clone();
+        self.parts.extend(other.map(|piece| piece.board.clone()));
         self.work = Work::Ready {
             board: picked,
             missed: None,
@@ -208,9 +212,12 @@ impl MiterSawStation {
         match std::mem::replace(&mut self.work, Work::Empty) {
             Work::Empty => {}
             Work::Ready { board, .. } => self.parts.push(board),
-            Work::Cut { cut, .. } => self
-                .parts
-                .extend([Some(cut.piece), cut.offcut].into_iter().flatten()),
+            Work::Cut { cut, .. } => self.parts.extend(
+                [Some(cut.piece), cut.offcut]
+                    .into_iter()
+                    .flatten()
+                    .map(|piece| piece.board),
+            ),
         }
     }
 
@@ -229,30 +236,32 @@ impl MiterSawStation {
         let stop = stop.as_meters_f32();
         let left_end = stop - board.length().as_meters_f32();
         let width = board.width().as_meters_f32();
-        let at = |x: f32| Vec3::new(x, 0.0, width);
+        let corner = Vec3::new(left_end, 0.0, width);
         match cut {
             None => SawBoards {
                 whole: Some(Placed {
                     board: board.clone(),
-                    corner: at(left_end),
+                    corner,
                     grain: Vec3::ZERO,
                 }),
                 ..default()
             },
             Some(cut) => {
-                let piece_start = stop - cut.piece.length().as_meters_f32();
+                // Each piece sits where it was on the board: `along` it is +x on the saw, and
+                // `across` it is toward the fence, -z.
+                let place = |piece: &Piece| {
+                    let (along, across) =
+                        (piece.along.as_meters_f32(), piece.across.as_meters_f32());
+                    Placed {
+                        board: piece.board.clone(),
+                        corner: corner + Vec3::new(along, 0.0, -across),
+                        grain: Vec3::new(across, 0.0, along),
+                    }
+                };
                 SawBoards {
                     whole: None,
-                    piece: Some(Placed {
-                        board: cut.piece.clone(),
-                        corner: at(piece_start),
-                        grain: Vec3::Z * (piece_start - left_end),
-                    }),
-                    offcut: cut.offcut.clone().map(|offcut| Placed {
-                        board: offcut,
-                        corner: at(left_end),
-                        grain: Vec3::ZERO,
-                    }),
+                    piece: Some(place(&cut.piece)),
+                    offcut: cut.offcut.as_ref().map(place),
                 }
             }
         }
@@ -316,7 +325,8 @@ impl MiterSawStation {
                 "Board on the saw: {}. Hold Space to lower the blade.",
                 describe_board(board)
             ),
-            Work::Cut { cut, .. } => describe_cut("Cut", cut),
+            Work::Cut { cut, .. } if cut.loose.is_empty() => describe_cut("Cut", cut),
+            Work::Cut { cut, .. } => format!("{} Set aside on the pile.", describe_cut("Cut", cut)),
         }
     }
 }
@@ -572,6 +582,48 @@ mod tests {
         station.lower(0.5);
         assert!(!station.take_from_pile(0));
         assert_eq!(station.parts.len(), 1);
+    }
+
+    /// A 1x8 off the table saw with a stopped cut 6" from its fence edge, slotted through for
+    /// about its first 11-9/16".
+    fn slotted_board() -> Board {
+        let saw = woodsim::TableSaw {
+            blade: Blade {
+                diameter: Length::from_inches(10),
+                kerf: Blade::FULL_KERF,
+            },
+            fence: Length::from_inches(6),
+            height: Length::from_inches(1),
+        };
+        let board = Board::new(
+            Length::from_inches(24),
+            Length::from_inch_fraction(29, 4),
+            Length::from_inch_fraction(3, 4),
+        );
+        match saw.feed(&board, -Length::from_inches(6), Length::from_inches(10)) {
+            Ok(woodsim::Pass::Kerfed(board)) => board,
+            other => panic!("expected a stopped cut, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_crosscut_through_a_slot_sets_the_loose_strip_aside() {
+        let mut station = MiterSawStation::default();
+        station.load(slotted_board());
+        station.set_stop(Length::from_inches(14));
+        chop(&mut station);
+
+        // The other 9-7/8" fell apart along the slot. The narrow strip is on the pile.
+        assert_eq!(station.parts.len(), 1);
+        assert_eq!(station.parts[0].to_string(), "3/4\" x 1-1/8\" x 9-7/8\"");
+        assert!(station.status().ends_with(
+            "The slot already in the board split off a 3/4\" x 1-1/8\" x 9-7/8\". \
+             Set aside on the pile."
+        ));
+        // The offcut is the 6" strip, still against the fence where it was on the board.
+        let offcut = station.boards().offcut.unwrap();
+        assert_eq!(offcut.board.width(), Length::from_inches(6));
+        assert_close(offcut.corner.z, inches(6.0));
     }
 
     #[test]

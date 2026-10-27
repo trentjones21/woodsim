@@ -609,18 +609,32 @@ fn update_fps(diagnostics: Res<DiagnosticsStore>, mut lines: Query<(&ReadoutLine
     }
 }
 
-/// Describes a finished cut, e.g. "Ripped a 3/4" x 6" x 24" piece, plus a ... offcut."
+/// Describes a finished cut, e.g. "Ripped a 3/4" x 6" x 24" piece, plus a ... offcut.", and
+/// any strips a slot already in the board set loose.
 pub fn describe_cut(verb: &str, cut: &Cut) -> String {
-    match &cut.offcut {
+    let piece = &cut.piece.board;
+    let mut description = match &cut.offcut {
         Some(offcut) => format!(
-            "{verb} a {} piece, plus a {offcut} offcut. The blade turned {} to sawdust.",
-            cut.piece, cut.waste
+            "{verb} a {piece} piece, plus a {} offcut. The blade turned {} to sawdust.",
+            offcut.board, cut.waste
         ),
         None => format!(
-            "{verb} a {} piece, and the blade turned the last {} to sawdust.",
-            cut.piece, cut.waste
+            "{verb} a {piece} piece, and the blade turned the last {} to sawdust.",
+            cut.waste
         ),
+    };
+    let loose: Vec<String> = cut
+        .loose
+        .iter()
+        .map(|piece| format!("a {}", piece.board))
+        .collect();
+    if !loose.is_empty() {
+        description.push_str(&format!(
+            " The slot already in the board split off {}.",
+            loose.join(" and ")
+        ));
     }
+    description
 }
 
 /// Describes a board and the slots sawn into it, e.g. "3/4" x 7-1/4" x 24", with a stopped cut

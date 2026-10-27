@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::{Board, Kerf, Length};
+use crate::{Board, Kerf, Length, Piece};
 
 /// A round saw blade. Every cut turns a strip of wood as wide as the kerf into sawdust.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -20,15 +20,20 @@ impl Blade {
     }
 }
 
-/// What one pass through a saw produces when it cuts a board apart.
+/// What one pass through a saw produces when it cuts a board apart. Each piece says where it
+/// was on the board that was cut.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Cut {
     /// The piece on the measured side of the blade: against the fence, or the length you cut to.
-    pub piece: Board,
+    pub piece: Piece,
     /// The piece on the far side of the blade, or `None` if the blade turned it all to sawdust.
-    pub offcut: Option<Board>,
+    pub offcut: Option<Piece>,
     /// How much of the cut dimension became sawdust: the full kerf, or less if there's no offcut.
     pub waste: Length,
+    /// More pieces the cut set loose. Where a slot already in the board goes all the way
+    /// through what's left on one side of the blade, that side falls apart into strips; the
+    /// biggest is the piece or the offcut, and the rest are here.
+    pub loose: Vec<Piece>,
 }
 
 /// What feeding a board past a table saw's blade did to it.
@@ -115,22 +120,25 @@ impl TableSaw {
         if !kerf.touches(board.length(), width, board.thickness()) {
             return Ok(Pass::Missed);
         }
-        if !kerf.cuts_through(board.length(), board.thickness()) {
-            return Ok(Pass::Kerfed(board.with_kerf(kerf)));
+        let kerfed = board.with_kerf(kerf);
+        let mut pieces = kerfed.pieces();
+        if let [whole] = pieces.as_slice()
+            && whole.board.width() == width
+            && whole.board.length() == board.length()
+        {
+            return Ok(Pass::Kerfed(kerfed));
         }
-        let piece = board.across(far, width);
-        Ok(Pass::Cut(if kerf.near > Length::ZERO {
-            Cut {
-                piece,
-                offcut: Some(board.across(Length::ZERO, kerf.near)),
-                waste: self.blade.kerf,
-            }
-        } else {
-            Cut {
-                piece,
-                offcut: None,
-                waste: far,
-            }
+        let waste = width - pieces.iter().map(|piece| piece.board.width()).sum();
+        // The piece against the fence is the last one across the board.
+        let piece = pieces
+            .pop()
+            .expect("the wood beside the fence is never in the blade's path");
+        let offcut = take_biggest(&mut pieces);
+        Ok(Pass::Cut(Cut {
+            piece,
+            offcut,
+            waste,
+            loose: pieces,
         }))
     }
 
@@ -154,12 +162,35 @@ impl MiterSaw {
     pub fn crosscut(&self, board: &Board, length: Length) -> Result<Cut, CutError> {
         let total = board.length();
         let (kept, rest, waste) = split(total, length, self.blade.kerf)?;
+        // Each side of the blade may fall apart where a slot runs all the way through it.
+        let side = |from: Length, to: Length| -> Vec<Piece> {
+            let mut pieces = board.along(from, to).pieces();
+            for piece in &mut pieces {
+                piece.along = piece.along + from;
+            }
+            pieces
+        };
+        let mut against_stop = side(total - kept, total);
+        let mut beyond = rest.map_or_else(Vec::new, |rest| side(Length::ZERO, rest));
+        let piece = take_biggest(&mut against_stop)
+            .expect("a board has wood right up to its ends, so the stop side holds some");
+        let offcut = take_biggest(&mut beyond);
+        against_stop.append(&mut beyond);
         Ok(Cut {
-            piece: board.along(total - kept, total),
-            offcut: rest.map(|rest| board.along(Length::ZERO, rest)),
+            piece,
+            offcut,
             waste,
+            loose: against_stop,
         })
     }
+}
+
+/// Removes and returns the biggest piece, the one nearest the fence among equals.
+fn take_biggest(pieces: &mut Vec<Piece>) -> Option<Piece> {
+    let area =
+        |piece: &Piece| piece.board.length().as_nm() as i128 * piece.board.width().as_nm() as i128;
+    let index = (0..pieces.len()).max_by_key(|&i| (area(&pieces[i]), pieces[i].across))?;
+    Some(pieces.remove(index))
 }
 
 /// Splits `total` at `setting`, losing up to `kerf` to the blade.

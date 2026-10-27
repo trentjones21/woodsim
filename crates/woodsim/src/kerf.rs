@@ -34,15 +34,14 @@ impl Kerf {
         across && square(along) + square(up) < square(self.radius)
     }
 
-    /// Whether the slot runs the board's whole length and thickness, cutting it apart.
-    pub fn cuts_through(&self, length: Length, thickness: Length) -> bool {
-        // The region the blade swept is convex, so it covers the board's end-on rectangle if it
-        // covers all four corners.
-        [Length::ZERO, length].into_iter().all(|l| {
-            [Length::ZERO, thickness]
-                .into_iter()
-                .all(|t| self.reaches(l, t))
-        })
+    /// Where along the board the slot goes all the way through a board `thickness` thick, as
+    /// `l` positions, or `None` if it doesn't anywhere. The blade swept a convex region, so it
+    /// goes through wherever it reached both faces.
+    pub fn through_span(&self, thickness: Length) -> Option<(Length, Length)> {
+        let (bottom_start, bottom_end) = self.span_at(Length::ZERO)?;
+        let (top_start, top_end) = self.span_at(thickness)?;
+        let (start, end) = (bottom_start.max(top_start), bottom_end.min(top_end));
+        (start <= end).then_some((start, end))
     }
 
     /// How far the slot runs along the board at height `t`, as `l` positions, or `None` if the
@@ -60,12 +59,6 @@ impl Kerf {
     /// The highest `t` the slot reaches.
     pub fn top(&self) -> Length {
         self.center + self.radius
-    }
-
-    /// Whether the blade reached the point `(l, t)` in the slot's plane.
-    fn reaches(&self, l: Length, t: Length) -> bool {
-        let along = gap(l, l, self.start, self.end);
-        square(along) + square(t - self.center) <= square(self.radius)
     }
 
     /// The same slot, measured from a new corner at `(l, w)` = (`along`, `across`): where it
@@ -137,14 +130,17 @@ mod tests {
     }
 
     #[test]
-    fn cuts_through_only_when_it_reaches_every_corner() {
+    fn goes_through_only_where_it_reached_both_faces() {
         let kerf = stopped_cut();
+        // The blade reaches the top of a 3/4" board for less distance than the bottom, so the
+        // top decides where the slot goes through.
         let thickness = Length::from_inch_fraction(3, 4);
-        assert!(!kerf.cuts_through(inches(24), thickness));
-        // The top corner at the far end is the last to be reached: 4-3/4" above the center.
-        let far_end = kerf.span_at(thickness).unwrap().1;
-        assert!(kerf.cuts_through(far_end, thickness));
-        assert!(!kerf.cuts_through(far_end + Length::from_nm(1), thickness));
+        assert_eq!(kerf.through_span(thickness), kerf.span_at(thickness));
+        // A blade 1" up never goes through a board 1-1/4" thick.
+        assert_eq!(
+            kerf.through_span(inches(1) + Length::from_inch_fraction(1, 4)),
+            None
+        );
     }
 
     #[test]

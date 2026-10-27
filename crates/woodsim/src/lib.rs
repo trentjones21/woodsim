@@ -9,7 +9,7 @@ mod kerf;
 mod length;
 mod saw;
 
-pub use board::Board;
+pub use board::{Board, Piece};
 pub use kerf::Kerf;
 pub use length::Length;
 pub use saw::{Blade, Cut, CutError, MiterSaw, Pass, TableSaw};

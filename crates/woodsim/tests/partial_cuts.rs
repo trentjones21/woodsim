@@ -74,8 +74,8 @@ fn the_board_comes_apart_when_the_slot_reaches_its_far_top_corner() {
     let Ok(Pass::Cut(cut)) = saw.feed(&board, -inches(6), last) else {
         panic!("the board should be cut apart");
     };
-    assert_eq!(cut.piece.width(), inches(6));
-    assert!(cut.piece.kerfs().is_empty());
+    assert_eq!(cut.piece.board.width(), inches(6));
+    assert!(cut.piece.board.kerfs().is_empty());
 }
 
 #[test]
@@ -146,9 +146,9 @@ fn slots_come_along_when_the_board_is_cut_apart() {
         panic!("the rip should cut the board apart");
     };
     // The groove is in the 6" piece, now measured from its own sawn edge.
-    let groove = ripped.piece.kerfs()[0];
+    let groove = ripped.piece.board.kerfs()[0];
     assert_eq!((groove.near, groove.far), (fraction(31, 8), inches(4)));
-    assert!(ripped.offcut.unwrap().kerfs().is_empty());
+    assert!(ripped.offcut.unwrap().board.kerfs().is_empty());
 
     let miter_saw = MiterSaw {
         blade: Blade {
@@ -156,11 +156,65 @@ fn slots_come_along_when_the_board_is_cut_apart() {
             kerf: Blade::FULL_KERF,
         },
     };
-    let crosscut = miter_saw.crosscut(&ripped.piece, inches(12)).unwrap();
+    let crosscut = miter_saw.crosscut(&ripped.piece.board, inches(12)).unwrap();
     // Both ends of the crosscut keep the groove, which still runs their full length.
-    for part in [&crosscut.piece, crosscut.offcut.as_ref().unwrap()] {
+    for part in [
+        &crosscut.piece.board,
+        &crosscut.offcut.as_ref().unwrap().board,
+    ] {
         let groove = part.kerfs()[0];
         let (start, end) = groove.span_at(Length::ZERO).unwrap();
         assert!(start < Length::ZERO && end > part.length(), "{part}");
     }
+}
+
+/// The 1x8 with a stopped cut 6" from the fence edge: through the board for about the first
+/// 11-9/16", and 13" along the bottom.
+fn stopped_cut() -> Board {
+    let saw = table_saw(inches(6), inches(1));
+    kerfed(saw.feed(&one_by_eight(), -inches(6), inches(10)).unwrap()).0
+}
+
+fn miter_saw() -> MiterSaw {
+    MiterSaw {
+        blade: Blade {
+            diameter: inches(12),
+            kerf: Blade::FULL_KERF,
+        },
+    }
+}
+
+#[test]
+fn crosscutting_where_a_slot_goes_through_splits_off_a_strip() {
+    // The far end against the stop, cut 14" long: the other 9-7/8" is all slotted through.
+    let cut = miter_saw().crosscut(&stopped_cut(), inches(14)).unwrap();
+
+    // The 14" piece holds together; the slot's end is still notched into it from below.
+    assert_eq!(cut.piece.board.to_string(), "3/4\" x 7-1/4\" x 14\"");
+    assert_eq!(cut.piece.board.kerfs().len(), 1);
+    // The other side fell apart along the slot: the 6" strip beside the fence is the offcut,
+    // and the 1-1/8" strip on the other side of the slot is loose.
+    let offcut = cut.offcut.unwrap();
+    assert_eq!(offcut.board.to_string(), "3/4\" x 6\" x 9-7/8\"");
+    assert_eq!(
+        (offcut.along, offcut.across),
+        (Length::ZERO, fraction(5, 4))
+    );
+    assert!(offcut.board.kerfs().is_empty());
+    let [strip] = cut.loose.as_slice() else {
+        panic!("expected one loose strip, got {:?}", cut.loose);
+    };
+    assert_eq!(strip.board.to_string(), "3/4\" x 1-1/8\" x 9-7/8\"");
+    assert_eq!((strip.along, strip.across), (Length::ZERO, Length::ZERO));
+}
+
+#[test]
+fn a_slot_that_stops_short_of_the_cut_holds_the_offcut_together() {
+    // Cut 12" long, the other side is 11-7/8": the slot stops about 5/16" short of its end.
+    let cut = miter_saw().crosscut(&stopped_cut(), inches(12)).unwrap();
+
+    let offcut = cut.offcut.unwrap();
+    assert_eq!(offcut.board.to_string(), "3/4\" x 7-1/4\" x 11-7/8\"");
+    assert_eq!(offcut.board.kerfs().len(), 1);
+    assert!(cut.loose.is_empty());
 }
