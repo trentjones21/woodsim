@@ -14,7 +14,9 @@ use std::f32::consts::FRAC_PI_2;
 use bevy::prelude::*;
 use woodsim::{Angle, Board, Cut, CutError, Length, MiterSaw, Orientation, Pass};
 
-use crate::shop::{Part, Placed, SawBoards, describe_board, describe_cut, describe_kerf, inches};
+use crate::shop::{
+    Part, Placed, SawBoards, degrees, describe_board, describe_cut, describe_kerf, inches,
+};
 
 pub const STOP_MIN: Length = Length::from_inch_fraction(1, 16);
 pub const STOP_MAX: Length = Length::from_inches(36);
@@ -425,6 +427,24 @@ impl MiterSawStation {
         list
     }
 
+    /// A warning if the blade won't reach all the way across `board` as it lies, at the miter
+    /// angle: it cuts as far as it reaches and leaves the board in one piece.
+    fn reach_note(&self, board: &Board) -> String {
+        let span = self.lie.across().0.of(board);
+        let widest = self.saw.widest();
+        if span <= widest {
+            return String::new();
+        }
+        let angle = match self.saw.miter.abs() {
+            square if square == Angle::ZERO => String::new(),
+            miter => format!(" at {}", degrees(miter)),
+        };
+        format!(
+            " The blade reaches only {widest} across{angle}, so it can't cut all the way \
+             through this {span} board."
+        )
+    }
+
     /// What the depth stop will do to `board`, if it's on.
     fn depth_note(&self, board: &Board) -> String {
         let Some(stop) = self.depth_stop else {
@@ -460,8 +480,9 @@ impl MiterSawStation {
                 format!("Cutting. So far, {}.", describe_kerf(scarred, scar))
             }
             Work::Ready { board, .. } => format!(
-                "Board on the saw: {}. Hold Space to lower the blade.{}",
+                "Board on the saw: {}. Hold Space to lower the blade.{}{}",
                 describe_board(board),
+                self.reach_note(board),
                 self.depth_note(board)
             ),
             Work::Cut { cut, .. } if cut.loose.is_empty() => describe_cut("Cut", cut),
@@ -780,17 +801,20 @@ mod tests {
     }
 
     #[test]
-    fn a_board_turned_across_the_saw_is_too_wide_to_cut() {
+    fn a_board_turned_across_the_saw_is_cut_only_as_far_as_the_blade_reaches() {
         let mut station = loaded();
         assert!(station.turn_left());
+        station.set_stop(Length::from_inches(3));
+        assert!(station.status().ends_with(
+            "The blade reaches only 7-1/2\" across, so it can't cut all the way through this \
+             24\" board."
+        ));
         chop(&mut station);
 
-        assert!(matches!(station.work, Work::Ready { .. }));
-        assert_eq!(
-            station.status(),
-            "No cut: the blade can't reach across 24\" of board; it cuts boards up to 7-1/2\" \
-             wide."
-        );
+        let Work::Ready { board, .. } = &station.work else {
+            panic!("the board should still be whole against the stop");
+        };
+        assert_eq!(board.kerfs().len(), 1);
     }
 
     #[test]
@@ -881,7 +905,8 @@ mod tests {
     fn all_the_way_down_the_blade_reaches_through_the_table() {
         let mut station = loaded();
         station.lower(1.0);
-        assert_eq!(station.bottom(), -Length::from_inches(3));
+        assert_eq!(station.bottom(), station.saw.stroke.1);
+        assert!(station.bottom() < Length::ZERO);
     }
 
     #[test]
@@ -934,11 +959,23 @@ mod tests {
     fn turned_further_the_blade_reaches_across_less() {
         let mut station = loaded();
         station.set_miter(Angle::from_degrees(45));
+        assert!(station.status().ends_with(
+            "The blade reaches only 5-19/64\" across at 45 deg, so it can't cut all the way \
+             through this 6\" board."
+        ));
+
+        // It cuts as far as it reaches, and the board stays in one piece.
         chop(&mut station);
-        assert_eq!(
-            station.status(),
-            "No cut: the blade can't reach across 6\" of board; it cuts boards up to 5-19/64\" \
-             wide."
+        let Work::Ready { board, .. } = &station.work else {
+            panic!("the board should still be whole against the stop");
+        };
+        assert_eq!(board.kerfs().len(), 1);
+        assert!(
+            station
+                .status()
+                .starts_with("Board on the saw: 3/4\" x 6\" x 24\", with a stopped cut"),
+            "{}",
+            station.status()
         );
     }
 }

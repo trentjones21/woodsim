@@ -55,8 +55,6 @@ pub enum CutError {
     NonPositiveSetting(Length),
     /// The setting is at or past the board's far edge, so the blade never touches it.
     MissesBoard { setting: Length, available: Length },
-    /// The board is wider, across the saw, than the blade can reach.
-    TooWide { width: Length, capacity: Length },
 }
 
 impl fmt::Display for CutError {
@@ -68,11 +66,6 @@ impl fmt::Display for CutError {
             CutError::MissesBoard { setting, available } => write!(
                 f,
                 "the blade misses the board: set to {setting}, but the board is only {available}"
-            ),
-            CutError::TooWide { width, capacity } => write!(
-                f,
-                "the blade can't reach across {width} of board; it cuts boards up to {capacity} \
-                 wide"
             ),
         }
     }
@@ -197,11 +190,12 @@ impl TableSaw {
 /// Heights are above the saw's table; distances across it are out in front of the fence. The
 /// table turns about the point where the blade's stop-side face crosses the fence, so wherever
 /// it's turned, the cut leaves the board against the stop the same length along the fence.
+///
+/// How wide a board it cuts through is however far the blade reaches at the bottom of its
+/// stroke. A wider board it cuts as far as it reaches, and it stays in one piece.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MiterSaw {
     pub blade: Blade,
-    /// The widest board the blade can cut square across.
-    pub capacity: Length,
     /// How far the table is turned from square to the fence: positive when the blade's front
     /// swings toward the stop, so the board against the stop comes out shorter along its front
     /// edge than along the fence.
@@ -218,27 +212,38 @@ pub struct MiterSaw {
 }
 
 impl MiterSaw {
-    /// A 12" saw that doesn't slide, with a full-kerf blade. It cuts boards up to 7-1/2" wide.
+    /// A 12" saw that doesn't slide, with a full-kerf blade. All the way down, it reaches from
+    /// behind the fence to 7-1/2" in front of it.
     pub fn twelve_inch() -> MiterSaw {
         MiterSaw {
             blade: Blade {
                 diameter: Length::from_inches(12),
                 kerf: Blade::FULL_KERF,
             },
-            capacity: Length::from_inch_fraction(15, 2),
             miter: Angle::ZERO,
             max_miter: Angle::from_degrees(50),
-            pivot: (Length::from_inches(4), Length::from_inches(6)),
+            pivot: (Length::from_inches(5), Length::from_inches(6)),
             arm: Length::from_inches(8),
-            stroke: (Length::from_inch_fraction(9, 2), -Length::from_inches(3)),
+            stroke: (
+                Length::from_inch_fraction(9, 2),
+                -Length::from_inch_fraction(13, 5),
+            ),
         }
     }
 
-    /// The widest board the blade can cut across at its miter angle, to the 64th below: at an
-    /// angle, it reaches less far out from the fence.
+    /// How far out from the fence, along the blade, it cuts through the board's bottom face at
+    /// the bottom of its stroke: where its circle crosses the table.
+    pub fn reach(&self) -> Length {
+        let (out, height) = self.center(self.stroke.1);
+        let crossing = (self.blade.radius().squared() - height.squared()).max(0);
+        out + Length::from_nm(crossing.isqrt() as i64)
+    }
+
+    /// The widest board the blade cuts all the way across at its miter angle, to the 64th
+    /// below: at an angle, it reaches less far out from the fence.
     pub fn widest(&self) -> Length {
         let sixty_fourth = Length::from_inch_fraction(1, 64).as_nm();
-        let reach = self.capacity.as_nm() as f64 * self.miter.radians().cos();
+        let reach = self.reach().as_nm() as f64 * self.miter.radians().cos();
         Length::from_nm((reach / sixty_fourth as f64).floor() as i64 * sixty_fourth)
     }
 
@@ -279,13 +284,6 @@ impl MiterSaw {
         );
         let (across, across_backward) = lie.across();
         let span = across.of(board);
-        let widest = self.widest();
-        if span > widest {
-            return Err(CutError::TooWide {
-                width: span,
-                capacity: widest,
-            });
-        }
         let (along, _) = lie.along();
         let total = along.of(board);
         if length <= Length::ZERO {

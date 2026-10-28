@@ -54,7 +54,9 @@ const DEPTH_STEP: Length = Length::from_inch_fraction(1, 16);
 const DEPTH_BIG_STEP: Length = Length::from_inch_fraction(1, 4);
 const MITER_STEP: Angle = Angle::from_degrees(1);
 /// The miter scale's marks are this far out from where the table turns.
-const SCALE_RADIUS: f32 = inches(8.6);
+const SCALE_RADIUS: f32 = inches(9.6);
+/// The saw's base is a little below its turning table, and a little above the bench top.
+const BASE_TOP: f32 = inches(-0.025);
 
 /// Where the arm's pivot is, on a post behind the fence.
 fn pivot(saw: &MiterSaw) -> Vec3 {
@@ -212,24 +214,24 @@ fn spawn_miter_saw(
     ));
     station_part(entity, ShopView::MiterSaw);
 
-    // The saw: a dark base, with the miter scale's marks on its front, around a turntable.
+    // The saw: a dark base, with the miter scale's marks on its front, around a turntable. Each
+    // layer sits a hair above the one under it, the bench top, the base, the table's arm, and
+    // the table, so no two flicker against each other.
     spawn_box(
         &mut commands,
         &mut meshes,
         &dark,
         Vec3::new(inches(-7.0), inches(-1.0), inches(-6.0)),
-        Vec3::new(inches(7.0), inches(-0.05), inches(10.0)),
+        Vec3::new(inches(7.0), BASE_TOP, inches(10.0)),
     );
-    let mark = meshes.add(Cuboid::new(inches(0.12), inches(0.06), inches(0.7)));
+    let mark = meshes.add(Cuboid::new(inches(0.12), inches(0.06), inches(0.4)));
     for stop in MITER_STOPS.iter().flat_map(|&stop| [stop, -stop]) {
         let turn = Quat::from_rotation_y(stop.radians() as f32);
         commands.spawn((
             Mesh3d(mark.clone()),
             MeshMaterial3d(pull.clone()),
-            Transform::from_translation(
-                ORIGIN + turn * Vec3::new(0.0, inches(-0.05), SCALE_RADIUS),
-            )
-            .with_rotation(turn),
+            Transform::from_translation(ORIGIN + turn * Vec3::new(0.0, BASE_TOP, SCALE_RADIUS))
+                .with_rotation(turn),
             Pickable::IGNORE,
         ));
     }
@@ -267,7 +269,7 @@ fn spawn_miter_saw(
         &mut meshes,
         &steel,
         Vec3::new(inches(-1.4), inches(-0.5), inches(3.0)),
-        Vec3::new(inches(1.4), inches(-0.02), inches(9.4)),
+        Vec3::new(inches(1.4), inches(-0.012), inches(9.4)),
     );
     table_part(
         &mut commands,

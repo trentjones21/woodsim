@@ -56,12 +56,27 @@ fn stopping_short_leaves_a_scar_from_above() {
 #[test]
 fn the_blade_reaches_out_on_its_arc() {
     let saw = MiterSaw::twelve_inch();
-    // Level with the pivot, the blade's center reaches the arm's full 8" from it, 4" in front
+    // Level with the pivot, the blade's center reaches the arm's full 8" from it, 3" in front
     // of the fence; all the way down, it's swung back toward the fence.
-    assert_eq!(saw.center(Length::ZERO), (inches(4), inches(6)));
-    let (down, height) = saw.center(-inches(3));
-    assert_eq!(height, inches(3));
-    assert!(fraction(27, 8) < down && down < inches(4), "{down}");
+    assert_eq!(saw.center(Length::ZERO), (inches(3), inches(6)));
+    let (down, height) = saw.center(saw.stroke.1);
+    assert_eq!(height, inches(6) + saw.stroke.1);
+    assert!(fraction(5, 2) < down && down < inches(3), "{down}");
+}
+
+#[test]
+fn all_the_way_down_the_blade_cuts_from_behind_the_fence_to_seven_and_a_half_inches_out() {
+    let saw = MiterSaw::twelve_inch();
+    let (out, height) = saw.center(saw.stroke.1);
+    let squared = |length: Length| (length.as_nm() as i128).pow(2);
+    let crossing = (squared(saw.blade.radius()) - squared(height)).isqrt();
+    let crossing = Length::from_nm(crossing as i64);
+    assert!(
+        out < crossing,
+        "the blade stops {} in front of the fence",
+        out - crossing
+    );
+    assert_eq!(saw.widest(), fraction(15, 2));
 }
 
 #[test]

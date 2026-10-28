@@ -6,9 +6,7 @@ mod common;
 use common::CutApart;
 
 use proptest::prelude::*;
-use woodsim::{
-    Angle, Blade, Board, CutError, Length, MiterSaw, Orientation, Pass, Piece, TableSaw,
-};
+use woodsim::{Angle, Blade, Board, Length, MiterSaw, Orientation, Pass, Piece, TableSaw};
 
 fn inches(n: i64) -> Length {
     Length::from_inches(n)
@@ -147,28 +145,24 @@ fn turned_to_an_angle_the_blade_reaches_across_less() {
     let saw = mitered(45);
     // 7-1/2" times the cosine of 45°, to the 64th below.
     assert_eq!(saw.widest(), fraction(339, 64));
-    assert_eq!(
-        saw.crosscut(&one_by_eight, Orientation::default(), inches(12)),
-        Err(CutError::TooWide {
-            width: fraction(29, 4),
-            capacity: fraction(339, 64),
-        })
-    );
+    // The blade goes through as far as it reaches along its slant, short of the board's front
+    // edge, so the board stays in one piece.
+    let slotted = match saw.crosscut(&one_by_eight, Orientation::default(), inches(12)) {
+        Ok(Pass::Kerfed(board)) => board,
+        other => panic!("expected a cut stopped short of the front edge, got {other:?}"),
+    };
+    let slot = slotted.slot(&slotted.kerfs()[0]);
+    assert!(!slot.bottom.unwrap().end_to_end);
+    assert!(slotted.miters().is_empty());
     assert!(matches!(
         mitered(30).crosscut(&one_by_eight, Orientation::default(), inches(12)),
-        Err(CutError::TooWide { .. })
+        Ok(Pass::Kerfed(_))
     ));
-    // At 15°, 7-1/2" reaches 7-15/64" across, still short of a 1x8; at 10°, it's enough.
-    assert!(
-        mitered(15)
-            .crosscut(&one_by_eight, Orientation::default(), inches(12))
-            .is_err()
-    );
-    assert!(
-        mitered(10)
-            .crosscut(&one_by_eight, Orientation::default(), inches(12))
-            .is_ok()
-    );
+    // At 15°, it just reaches across a 1x8.
+    assert_eq!(mitered(15).widest(), fraction(29, 4));
+    mitered(15)
+        .crosscut(&one_by_eight, Orientation::default(), inches(12))
+        .cut_apart();
 }
 
 #[test]
@@ -193,10 +187,9 @@ fn stopped_short_at_an_angle_it_scars_the_board_on_the_slant() {
     assert!(size.bottom.is_none());
     let top = size.top.unwrap();
     assert!(!top.end_to_end);
-    // A 1/4"-deep scar from a 12" blade is about 3-7/16" long, and centered almost 4" out
-    // from the fence along its slant. The board's front edge is 4.95" out at 45°, so the scar
-    // runs off it, 2-11/16" in.
-    assert_eq!(top.length.rounded_to(fraction(1, 32)), fraction(43, 16));
+    // A 1/4"-deep scar from a 12" blade is about 3-7/16" long, centered about 3" out from the
+    // fence along its slant, and the board's front edge is 4.95" out along it at 45°.
+    assert_eq!(top.length.rounded_to(fraction(1, 32)), fraction(55, 16));
     // The board is still whole and square, with the scar in it.
     assert_eq!(board.to_string(), "3/4\" x 3-1/2\" x 24\"");
     assert!(board.miters().is_empty());

@@ -178,15 +178,17 @@ fn a_rip_and_a_crosscut_that_meet_cut_out_the_corner_between_them() {
 }
 
 #[test]
-fn a_miter_saw_cannot_cut_across_a_board_wider_than_it_reaches() {
+fn a_miter_saw_cuts_into_a_board_wider_than_it_reaches_and_leaves_it_whole() {
     let lie = unturned().turned_left();
-    assert_eq!(
-        miter_saw().crosscut(&one_by_eight(), lie, inches(4)),
-        Err(CutError::TooWide {
-            width: inches(24),
-            capacity: fraction(15, 2),
-        })
-    );
+    let slotted = kerfed(miter_saw().crosscut(&one_by_eight(), lie, inches(4)));
+
+    // Turned, the board is 24" across the saw; the blade goes through it for the 7-1/2" out
+    // from the fence that it reaches.
+    let slot = slotted.slot(&slotted.kerfs()[0]);
+    let bottom = slot.bottom.unwrap();
+    assert!(!bottom.end_to_end);
+    assert_eq!(bottom.length.rounded_to(fraction(1, 32)), fraction(15, 2));
+    assert_eq!(slotted.to_string(), one_by_eight().to_string());
 }
 
 #[test]

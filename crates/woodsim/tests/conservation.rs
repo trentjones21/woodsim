@@ -21,6 +21,18 @@ fn blade(kerf: i64) -> Blade {
     }
 }
 
+/// A 12" miter saw with a blade `kerf` nanometers thick.
+fn miter_saw(kerf: i64) -> MiterSaw {
+    let saw = MiterSaw::twelve_inch();
+    MiterSaw {
+        blade: Blade {
+            kerf: Length::from_nm(kerf),
+            ..saw.blade
+        },
+        ..saw
+    }
+}
+
 proptest! {
     #[test]
     fn rip_conserves_wood(width in 1..MAX_NM, fence in 1..MAX_NM, kerf in 1..INCH_NM) {
@@ -73,7 +85,7 @@ proptest! {
     #[test]
     fn crosscut_conserves_wood(length in 1..MAX_NM, at in 1..MAX_NM, kerf in 1..INCH_NM) {
         let board = Board::new(Length::from_nm(length), Length::from_inches(6), Length::from_inch_fraction(3, 4));
-        let saw = MiterSaw { blade: blade(kerf), ..MiterSaw::twelve_inch() };
+        let saw = miter_saw(kerf);
         let at = Length::from_nm(at);
 
         match saw.crosscut(&board, Orientation::default(), at) {
@@ -161,7 +173,7 @@ proptest! {
             _ => return Ok(()),
         };
         let at = Length::from_nm(at);
-        let cut = MiterSaw { blade: blade(INCH_NM / 8), ..MiterSaw::twelve_inch() }.crosscut(&slotted, Orientation::default(), at).cut_apart();
+        let cut = miter_saw(INCH_NM / 8).crosscut(&slotted, Orientation::default(), at).cut_apart();
         let pieces: Vec<&Piece> = std::iter::once(&cut.piece).chain(&cut.offcut).chain(&cut.loose).collect();
 
         // Every piece lies on the board, and no two share any wood.
