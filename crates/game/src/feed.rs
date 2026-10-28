@@ -10,9 +10,13 @@
 //! quarter turn, across it, crosscutting.
 
 use bevy::prelude::*;
-use woodsim::{Axis, Blade, Board, CutError, Length, Orientation, Pass, TableSaw};
+use woodsim::{Axis, Blade, Board, CutError, Length, Orientation, TableSaw};
 
-use crate::shop::{Part, Placed, SawBoards, describe_board, describe_cut, describe_kerf};
+use crate::{
+    hand::Workpiece,
+    shop::{Part, SawBoards, describe_kerf},
+    work::{self, Passed},
+};
 
 pub const FENCE_MIN: Length = Length::from_inch_fraction(1, 16);
 pub const FENCE_MAX: Length = Length::from_inches(24);
@@ -30,9 +34,9 @@ const START: Length = Length::from_inches(-6);
 #[derive(Resource)]
 pub struct TableSawStation {
     pub saw: TableSaw,
-    /// The board on the saw, with the slots earlier passes cut. During a pass, this is how it
-    /// was before the pass.
-    board: Board,
+    /// The board or glue-up on the saw, with the slots earlier passes cut. During a pass, this
+    /// is how it was before the pass.
+    board: Workpiece,
     /// How the board lies on the table.
     lie: Orientation,
     /// Where the blade's center is along the board, from its leading end: negative while the
@@ -53,7 +57,7 @@ struct Feeding {
     saw: TableSaw,
     /// The furthest back and forward the blade's center has been along the board.
     reached: (Length, Length),
-    result: Result<Pass, CutError>,
+    result: Result<Passed, CutError>,
     /// Whether pieces the cut set loose have been handed off to set aside.
     loose_set_aside: bool,
 }
@@ -70,7 +74,7 @@ impl Default for TableSawStation {
                 height: Length::from_inches(1),
                 miter_gauge: None,
             },
-            board: new_stock(),
+            board: Workpiece::Board(new_stock()),
             lie: Orientation::default(),
             advance: START,
             pass: None,
@@ -164,8 +168,11 @@ impl TableSawStation {
     }
 
     /// Stands the board up on an edge, with its bottom face toward the fence, or lays it back
-    /// down.
+    /// down. A glue-up stays flat.
     pub fn tip(&mut self) -> bool {
+        if matches!(self.board, Workpiece::GlueUp(_)) {
+            return false;
+        }
         self.relay(self.lie.tipped())
     }
 
@@ -210,13 +217,17 @@ impl TableSawStation {
         let pass = self.pass.get_or_insert(Feeding {
             saw: self.saw,
             reached: (self.advance, self.advance),
-            result: Ok(Pass::Missed),
+            result: Ok(Passed::Missed),
             loose_set_aside: false,
         });
         pass.reached = (pass.reached.0.min(advance), pass.reached.1.max(advance));
-        pass.result = pass
-            .saw
-            .feed(&self.board, self.lie, pass.reached.0, pass.reached.1);
+        pass.result = work::feed(
+            &pass.saw,
+            &self.board,
+            self.lie,
+            pass.reached.0,
+            pass.reached.1,
+        );
         self.advance = advance;
         // Pulled back clear of the blade, the board keeps whatever slot it got, and the fence
         // and blade are free to move for the next pass.
@@ -239,14 +250,13 @@ impl TableSawStation {
 
     /// Lifts a board off the saw to carry it elsewhere: the whole board, once it's clear of the
     /// blade, or a piece of one the blade cut apart, once it's past.
-    pub fn take(&mut self, part: Part) -> Option<Board> {
+    pub fn take(&mut self, part: Part) -> Option<Workpiece> {
         if !self.can_take(part) {
             return None;
         }
         let board = match (part, self.result()) {
-            (Part::Whole, _) => self.current_board(),
-            (Part::Piece, Some(Ok(Pass::Cut(cut)))) => cut.piece.board.clone(),
-            (Part::Offcut, Some(Ok(Pass::Cut(cut)))) => cut.offcut.as_ref()?.board.clone(),
+            (Part::Whole, _) => work::hand_off(self.current_board(), self.lie),
+            (_, Some(Ok(Passed::Cut(cut)))) => cut.take(part, self.lie)?,
             _ => return None,
         };
         self.taken.push(part);
@@ -259,10 +269,10 @@ impl TableSawStation {
             return false;
         }
         match (part, self.result()) {
-            (Part::Whole, Some(Ok(Pass::Cut(_)))) => false,
+            (Part::Whole, Some(Ok(Passed::Cut(_)))) => false,
             (Part::Whole, _) => !self.at_blade(),
-            (Part::Piece, Some(Ok(Pass::Cut(_)))) => self.past_blade(),
-            (Part::Offcut, Some(Ok(Pass::Cut(cut)))) => cut.offcut.is_some() && self.past_blade(),
+            (Part::Piece, Some(Ok(Passed::Cut(_)))) => self.past_blade(),
+            (Part::Offcut, Some(Ok(Passed::Cut(cut)))) => cut.has_offcut() && self.past_blade(),
             _ => false,
         }
     }
@@ -270,18 +280,19 @@ impl TableSawStation {
     /// Whether the last cut set pieces loose that haven't been handed off yet.
     pub fn has_loose(&self) -> bool {
         matches!(&self.pass, Some(pass) if !pass.loose_set_aside
-            && matches!(&pass.result, Ok(Pass::Cut(cut)) if !cut.loose.is_empty()))
+            && matches!(&pass.result, Ok(Passed::Cut(cut)) if cut.has_loose()))
     }
 
     /// Hands off the pieces the last cut set loose, once, to be set aside.
-    pub fn take_loose(&mut self) -> Vec<Board> {
+    pub fn take_loose(&mut self) -> Vec<Workpiece> {
         if !self.has_loose() {
             return Vec::new();
         }
+        let lie = self.lie;
         let pass = self.pass.as_mut().expect("loose pieces come from a pass");
         pass.loose_set_aside = true;
         match &pass.result {
-            Ok(Pass::Cut(cut)) => cut.loose.iter().map(|piece| piece.board.clone()).collect(),
+            Ok(Passed::Cut(cut)) => cut.loose(lie),
             _ => Vec::new(),
         }
     }
@@ -293,19 +304,16 @@ impl TableSawStation {
 
     /// Puts `board` against the fence, unturned and ready to rip, and hands back whatever was on
     /// the saw that wasn't carried off: the board, slots and all, or the pieces it was cut into.
-    pub fn load(&mut self, board: Board) -> Vec<Board> {
+    pub fn load(&mut self, board: Workpiece) -> Vec<Workpiece> {
         let mut leftovers = self.take_loose();
         leftovers.extend(match self.result() {
-            Some(Ok(Pass::Cut(cut))) => [
-                (Part::Piece, Some(&cut.piece)),
-                (Part::Offcut, cut.offcut.as_ref()),
-            ]
-            .into_iter()
-            .filter(|(part, _)| !self.taken.contains(part))
-            .filter_map(|(_, piece)| piece.map(|piece| piece.board.clone()))
-            .collect(),
+            Some(Ok(Passed::Cut(cut))) => [Part::Piece, Part::Offcut]
+                .into_iter()
+                .filter(|part| !self.taken.contains(part))
+                .filter_map(|part| cut.take(part, self.lie))
+                .collect(),
             _ if self.taken.contains(&Part::Whole) => Vec::new(),
-            _ => vec![self.current_board()],
+            _ => vec![work::hand_off(self.current_board(), self.lie)],
         });
         self.board = board;
         self.lie = Orientation::default();
@@ -327,26 +335,26 @@ impl TableSawStation {
 
     /// How far the board reaches along the table, from its leading end.
     fn reach(&self) -> Length {
-        self.lie.along().0.of(&self.board)
+        work::extent(&self.board, self.lie.along().0)
     }
 
     /// How far the board reaches across the table, from the fence.
     fn span(&self) -> Length {
-        self.lie.across().0.of(&self.board)
+        work::extent(&self.board, self.lie.across().0)
     }
 
     fn cut_apart(&self) -> bool {
-        matches!(self.result(), Some(Ok(Pass::Cut(_))))
+        matches!(self.result(), Some(Ok(Passed::Cut(_))))
     }
 
-    fn result(&self) -> Option<&Result<Pass, CutError>> {
+    fn result(&self) -> Option<&Result<Passed, CutError>> {
         self.pass.as_ref().map(|pass| &pass.result)
     }
 
     /// The board in one piece as it is now, with any slot the pass under way has cut.
-    fn current_board(&self) -> Board {
+    fn current_board(&self) -> Workpiece {
         match self.result() {
-            Some(Ok(Pass::Kerfed(board))) => board.clone(),
+            Some(Ok(Passed::Kerfed(board))) => board.clone(),
             _ => self.board.clone(),
         }
     }
@@ -362,11 +370,11 @@ impl TableSawStation {
         [Part::Whole, Part::Piece, Part::Offcut]
             .into_iter()
             .find(|&part| match (part, self.result()) {
-                (Part::Whole, Some(Ok(Pass::Cut(_)))) => false,
+                (Part::Whole, Some(Ok(Passed::Cut(_)))) => false,
                 (Part::Whole, _) => !self.taken.contains(&part),
-                (Part::Piece, Some(Ok(Pass::Cut(_)))) => !self.taken.contains(&part),
-                (Part::Offcut, Some(Ok(Pass::Cut(cut)))) => {
-                    cut.offcut.is_some() && !self.taken.contains(&part)
+                (Part::Piece, Some(Ok(Passed::Cut(_)))) => !self.taken.contains(&part),
+                (Part::Offcut, Some(Ok(Passed::Cut(cut)))) => {
+                    cut.has_offcut() && !self.taken.contains(&part)
                 }
                 _ => false,
             })
@@ -385,25 +393,30 @@ impl TableSawStation {
             0.0,
             (-self.advance).as_meters_f32(),
         );
-        let unless_taken =
-            |part: Part, placed: Placed| (!self.taken.contains(&part)).then_some(placed);
-        match self.result() {
-            Some(Ok(Pass::Cut(cut))) => {
-                // Each piece sits where it was on the board. Loose pieces are set aside.
-                let board = Placed::lying(&self.board, self.lie, near);
-                SawBoards {
-                    whole: None,
-                    piece: unless_taken(Part::Piece, board.piece(&cut.piece)),
-                    offcut: cut
-                        .offcut
-                        .as_ref()
-                        .and_then(|offcut| unless_taken(Part::Offcut, board.piece(offcut))),
-                }
+        let unless_taken = |part: Part, placed: Vec<_>| {
+            if self.taken.contains(&part) {
+                Vec::new()
+            } else {
+                placed
             }
+        };
+        match self.result() {
+            // Each piece sits where it was on the board. Loose pieces are set aside.
+            Some(Ok(Passed::Cut(cut))) => SawBoards {
+                whole: Vec::new(),
+                piece: unless_taken(
+                    Part::Piece,
+                    cut.placed(Part::Piece, &self.board, self.lie, near),
+                ),
+                offcut: unless_taken(
+                    Part::Offcut,
+                    cut.placed(Part::Offcut, &self.board, self.lie, near),
+                ),
+            },
             _ => SawBoards {
                 whole: unless_taken(
                     Part::Whole,
-                    Placed::lying(&self.current_board(), self.lie, near),
+                    work::placed(&self.current_board(), self.lie, near),
                 ),
                 ..default()
             },
@@ -424,27 +437,32 @@ impl TableSawStation {
         };
         match self.result() {
             Some(Err(error)) => format!("No cut: {error}."),
-            Some(Ok(Pass::Cut(cut))) if cut.loose.is_empty() => describe_cut(verb, cut),
-            Some(Ok(Pass::Cut(cut))) => format!(
+            Some(Ok(Passed::Cut(cut))) if !cut.has_loose() => cut.describe(verb, self.lie),
+            Some(Ok(Passed::Cut(cut))) => format!(
                 "{} Set aside on the pile by the miter saw.",
-                describe_cut(verb, cut)
+                cut.describe(verb, self.lie)
             ),
-            Some(Ok(Pass::Kerfed(board))) => {
-                let kerf = describe_kerf(board, board.kerfs().last().expect("a pass's slot"));
+            Some(Ok(Passed::Kerfed(board))) => {
+                let kerf = match board {
+                    Workpiece::Board(board) => {
+                        describe_kerf(board, board.kerfs().last().expect("a pass's slot"))
+                    }
+                    Workpiece::GlueUp(_) => "a slot into the glue-up".to_string(),
+                };
                 if self.at_blade() {
                     format!("Cutting. So far, {kerf}.{}", self.warning())
                 } else {
                     format!("Cut {kerf}. Press B to bring the board back around for another pass.")
                 }
             }
-            Some(Ok(Pass::Missed)) if self.past_blade() => {
+            Some(Ok(Passed::Missed)) if self.past_blade() => {
                 "The blade is below the table, so the board went over it uncut. \
                  Press B to bring it back around."
                     .to_string()
             }
             _ => format!(
-                "Board on the saw: {}. Drag it, or hold Space, to push it through.{}",
-                describe_board(&self.board),
+                "{}. Drag it, or hold Space, to push it through.{}",
+                work::on_the_saw(&self.board),
                 self.warning()
             ),
         }
@@ -472,7 +490,10 @@ impl TableSawStation {
 
 #[cfg(test)]
 mod tests {
+    use woodsim::Board;
+
     use super::*;
+    use crate::hand::Workpiece;
     use crate::shop::inches;
 
     fn assert_close(actual: f32, expected: f32) {
@@ -497,10 +518,10 @@ mod tests {
         let station = TableSawStation::default();
         let boards = station.boards();
 
-        let whole = boards.whole.unwrap();
+        let whole = boards.whole.into_iter().next().unwrap();
         assert_close(whole.corner.x, inches(6.0 - 7.25));
         assert_close(whole.corner.z, inches(6.0));
-        assert_eq!((boards.piece, boards.offcut), (None, None));
+        assert!(boards.piece.is_empty() && boards.offcut.is_empty());
         assert!(!station.at_blade());
     }
 
@@ -510,7 +531,7 @@ mod tests {
         push_to(&mut station, 10);
         let boards = station.boards();
 
-        let whole = boards.whole.unwrap();
+        let whole = boards.whole.into_iter().next().unwrap();
         assert_eq!(whole.board.kerfs().len(), 1);
         assert_close(whole.corner.z, inches(-10.0));
         assert!(station.at_blade());
@@ -544,11 +565,11 @@ mod tests {
         let boards = station.boards();
 
         assert!(station.past_blade() && !station.at_blade());
-        assert_eq!(boards.whole, None);
-        let piece = boards.piece.unwrap();
+        assert!(boards.whole.is_empty());
+        let piece = boards.piece.into_iter().next().unwrap();
         assert_eq!(piece.board.to_string(), "3/4\" x 6\" x 24\"");
         assert_close(piece.corner.x, 0.0);
-        let offcut = boards.offcut.unwrap();
+        let offcut = boards.offcut.into_iter().next().unwrap();
         assert_close(offcut.corner.x, inches(-1.25));
         assert!(offcut.corner.z + inches(24.0) < -inches(5.0));
         assert_eq!(
@@ -574,7 +595,10 @@ mod tests {
         station.set_fence(Length::from_inches(3));
 
         assert_eq!(station.saw.fence, Length::from_inches(3));
-        assert_close(station.boards().piece.unwrap().corner.x, 0.0);
+        assert_close(
+            station.boards().piece.into_iter().next().unwrap().corner.x,
+            0.0,
+        );
     }
 
     #[test]
@@ -606,7 +630,7 @@ mod tests {
         assert!(station.bring_back());
         station.set_fence(Length::from_inches(5));
         push_through(&mut station);
-        let whole = station.boards().whole.unwrap();
+        let whole = station.boards().whole.into_iter().next().unwrap();
         assert_eq!(whole.board.kerfs().len(), 2);
         assert!(station.can_take(Part::Whole));
     }
@@ -617,7 +641,17 @@ mod tests {
         station.set_height(Length::ZERO);
         push_through(&mut station);
 
-        assert!(station.boards().whole.unwrap().board.kerfs().is_empty());
+        assert!(
+            station
+                .boards()
+                .whole
+                .into_iter()
+                .next()
+                .unwrap()
+                .board
+                .kerfs()
+                .is_empty()
+        );
         assert!(station.status().starts_with("The blade is below the table"));
     }
 
@@ -627,7 +661,7 @@ mod tests {
         station.set_fence(Length::from_inches(8));
         push_through(&mut station);
 
-        assert!(station.boards().whole.is_some());
+        assert!(!station.boards().whole.is_empty());
         assert_eq!(
             station.status(),
             "No cut: the blade misses the board: set to 8\", but the board is only 7-1/4\"."
@@ -644,11 +678,11 @@ mod tests {
 
         push_through(&mut station);
         let piece = station.take(Part::Piece).unwrap();
-        assert_eq!(piece.to_string(), "3/4\" x 6\" x 24\"");
+        assert_eq!(piece.board().unwrap().to_string(), "3/4\" x 6\" x 24\"");
         assert_eq!(station.take(Part::Piece), None);
         let boards = station.boards();
-        assert_eq!(boards.piece, None);
-        assert!(boards.offcut.is_some());
+        assert!(boards.piece.is_empty());
+        assert!(!boards.offcut.is_empty());
     }
 
     #[test]
@@ -659,7 +693,7 @@ mod tests {
 
         station.move_to(START);
         let board = station.take(Part::Whole).unwrap();
-        assert_eq!(board.kerfs().len(), 1);
+        assert_eq!(board.board().unwrap().kerfs().len(), 1);
         assert_eq!(station.boards(), SawBoards::default());
         assert_eq!(
             station.status(),
@@ -671,7 +705,7 @@ mod tests {
     fn turned_a_quarter_turn_the_board_lies_across_the_table_and_crosscuts() {
         let mut station = TableSawStation::default();
         assert!(station.turn_left());
-        let (near, far) = station.boards().whole.unwrap().bounds();
+        let (near, far) = station.boards().whole.into_iter().next().unwrap().bounds();
         // 24" across the table, back from the fence at 6"; 7-1/4" along it.
         assert_close(far.x, inches(6.0));
         assert_close(far.x - near.x, inches(24.0));
@@ -690,7 +724,7 @@ mod tests {
              offcut. The blade turned 1/8\" to sawdust."
         );
         // The piece lies between the blade and the fence.
-        let (near, far) = station.boards().piece.unwrap().bounds();
+        let (near, far) = station.boards().piece.into_iter().next().unwrap().bounds();
         assert_close(near.x, 0.0);
         assert_close(far.x, inches(12.0));
     }
@@ -701,7 +735,7 @@ mod tests {
         assert!(station.turn_left() && station.switch_guide());
         assert!(!station.status().contains("Careful"));
         // The board's near end rests against the stop, 12" past the blade's far side.
-        let (near, _) = station.boards().whole.unwrap().bounds();
+        let (near, _) = station.boards().whole.into_iter().next().unwrap().bounds();
         assert_close(near.x, -inches(12.125));
 
         push_through(&mut station);
@@ -711,7 +745,7 @@ mod tests {
              offcut. The blade turned 1/8\" to sawdust."
         );
         // The piece lies between the stop and the blade.
-        let (near, far) = station.boards().piece.unwrap().bounds();
+        let (near, far) = station.boards().piece.into_iter().next().unwrap().bounds();
         assert_close(near.x, -inches(12.125));
         assert_close(far.x, -inches(0.125));
     }
@@ -771,7 +805,7 @@ mod tests {
         station.set_height(Length::from_inch_fraction(1, 4));
         push_through(&mut station);
 
-        let board = station.boards().whole.unwrap().board;
+        let board = station.boards().whole.into_iter().next().unwrap().board;
         assert!(!board.kerfs()[0].from_below());
     }
 
@@ -790,7 +824,10 @@ mod tests {
         assert!(station.has_loose());
         let loose = station.take_loose();
         assert_eq!(loose.len(), 1);
-        assert_eq!(loose[0].to_string(), "3/4\" x 1-1/8\" x 4-7/8\"");
+        assert_eq!(
+            loose[0].board().unwrap().to_string(),
+            "3/4\" x 1-1/8\" x 4-7/8\""
+        );
         assert!(!station.has_loose());
         assert!(
             station
@@ -805,10 +842,10 @@ mod tests {
         push_through(&mut station);
         station.take(Part::Piece);
         // The offcut left on the saw comes back, for the pile.
-        assert_eq!(station.load(new_stock()).len(), 1);
+        assert_eq!(station.load(Workpiece::Board(new_stock())).len(), 1);
 
         assert!(station.pass.is_none());
-        assert!(station.boards().whole.is_some());
+        assert!(!station.boards().whole.is_empty());
         assert!(station.taken.is_empty());
     }
 
@@ -832,10 +869,10 @@ mod tests {
     #[test]
     fn loading_a_board_hands_back_the_board_that_was_waiting() {
         let mut station = TableSawStation::default();
-        let leftovers = station.load(crosscut_piece());
+        let leftovers = station.load(Workpiece::Board(crosscut_piece()));
 
-        assert_eq!(leftovers, [new_stock()]);
-        assert_eq!(station.board, crosscut_piece());
+        assert_eq!(leftovers, [Workpiece::Board(new_stock())]);
+        assert_eq!(station.board, Workpiece::Board(crosscut_piece()));
         assert_eq!(
             station.status(),
             "Board on the saw: 3/4\" x 6\" x 12\". Drag it, or hold Space, to push it through."
@@ -846,10 +883,10 @@ mod tests {
     fn loading_a_board_hands_back_a_board_left_in_the_blade_with_its_slot() {
         let mut station = TableSawStation::default();
         push_to(&mut station, 10);
-        let leftovers = station.load(crosscut_piece());
+        let leftovers = station.load(Workpiece::Board(crosscut_piece()));
 
         assert_eq!(leftovers.len(), 1);
-        assert_eq!(leftovers[0].kerfs().len(), 1);
+        assert_eq!(leftovers[0].board().unwrap().kerfs().len(), 1);
     }
 
     #[test]
@@ -857,27 +894,65 @@ mod tests {
         let mut station = TableSawStation::default();
         push_through(&mut station);
         station.take(Part::Piece);
-        let leftovers = station.load(crosscut_piece());
+        let leftovers = station.load(Workpiece::Board(crosscut_piece()));
 
-        let widths: Vec<Length> = leftovers.iter().map(Board::width).collect();
+        let widths: Vec<Length> = leftovers
+            .iter()
+            .map(|part| part.board().unwrap().width())
+            .collect();
         assert_eq!(widths, [Length::from_inch_fraction(9, 8)]);
         assert!(station.pass.is_none());
         assert!(station.taken.is_empty());
     }
 
     #[test]
+    fn a_glue_up_rips_into_a_glued_piece_and_a_loose_strip_and_stays_flat() {
+        // Two 4" boards edge to edge, ripped 5" from the fence: the far board and an inch of
+        // the near one stay glued; the rest of the near one comes off on its own.
+        let mut station = TableSawStation::default();
+        let panel = crate::work::panel(&[Length::from_inches(4); 2], Length::from_inches(24));
+        station.load(Workpiece::GlueUp(panel));
+        assert!(!station.tip());
+        station.set_fence(Length::from_inches(5));
+        assert!(
+            station
+                .status()
+                .starts_with("On the saw: a glue-up of 2 parts, 3/4\" x 8\" x 24\"."),
+            "{}",
+            station.status()
+        );
+        push_through(&mut station);
+
+        let boards = station.boards();
+        assert_eq!((boards.piece.len(), boards.offcut.len()), (2, 1));
+        assert_eq!(
+            station.status(),
+            "Cut the glue-up apart: a glue-up of 2 parts, 3/4\" x 5\" x 24\", and 3/4\" x \
+             2-7/8\" x 24\"."
+        );
+        let Some(Workpiece::GlueUp(piece)) = station.take(Part::Piece) else {
+            panic!("expected the glued piece");
+        };
+        assert_eq!(piece.joints().len(), 1);
+        assert!(matches!(
+            station.take(Part::Offcut),
+            Some(Workpiece::Board(_))
+        ));
+    }
+
+    #[test]
     fn on_edge_a_narrow_board_resaws_into_two_thin_ones_side_by_side() {
         let mut station = TableSawStation::default();
-        station.load(Board::new(
+        station.load(Workpiece::Board(Board::new(
             Length::from_inches(24),
             Length::from_inches(3),
             Length::from_inch_fraction(3, 4),
-        ));
+        )));
         assert!(station.tip());
         station.set_fence(Length::from_inch_fraction(5, 16));
         station.set_height(HEIGHT_MAX);
         // Standing on edge, it's as tall as it was wide and as wide across as it was thick.
-        let standing = station.boards().whole.unwrap();
+        let standing = station.boards().whole.into_iter().next().unwrap();
         let (near, far) = standing.bounds();
         assert_close(far.y - near.y, inches(3.0));
         assert_close(far.x - near.x, inches(0.75));
@@ -891,8 +966,8 @@ mod tests {
         // The piece rides the fence; the offcut is a kerf away, toward the operator.
         let boards = station.boards();
         let (piece, offcut) = (
-            boards.piece.unwrap().bounds(),
-            boards.offcut.unwrap().bounds(),
+            boards.piece.into_iter().next().unwrap().bounds(),
+            boards.offcut.into_iter().next().unwrap().bounds(),
         );
         assert_close(piece.1.x, inches(5.0 / 16.0));
         assert_close(offcut.1.x, inches(-1.0 / 8.0));

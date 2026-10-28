@@ -12,14 +12,12 @@
 use std::f32::consts::FRAC_PI_2;
 
 use bevy::prelude::*;
-use woodsim::{Angle, Board, Cut, CutError, Length, MiterSaw, Orientation, Pass};
+use woodsim::{Angle, CutError, Length, MiterSaw, Orientation};
 
 use crate::{
-    hand::{Workpiece, describe_glue_up, place_glue_up},
-    shop::{
-        Block, Part, Placed, SawBoards, degrees, describe_board, describe_cut, describe_kerf,
-        inches,
-    },
+    hand::{Workpiece, describe_glue_up},
+    shop::{Block, Part, Placed, SawBoards, degrees, describe_board, describe_kerf, inches},
+    work::{self, Parted, Passed},
 };
 
 pub const STOP_MIN: Length = Length::from_inch_fraction(1, 16);
@@ -73,21 +71,21 @@ pub struct MiterSawStation {
 pub enum Work {
     /// Nothing on the saw.
     Empty,
-    /// A board against the stop block, waiting for the blade. `missed` says why the last
-    /// stroke didn't cut it, until the stop moves. `scarred` is the board as the blade has
+    /// A board or a glue-up against the stop block, waiting for the blade. `missed` says why
+    /// the last stroke didn't cut it, until the stop moves. `scarred` is it as the blade has
     /// scarred it on the stroke under way; the scar stays when the blade comes back up.
     Ready {
-        board: Board,
+        board: Workpiece,
         missed: Option<CutError>,
-        scarred: Option<Board>,
+        scarred: Option<Workpiece>,
     },
     /// A board the blade has cut, with the stop where it was at the time. While the blade is
     /// still down, `cut` follows it deeper; once it comes back up, the strips it set loose go
     /// on the pile.
     Cut {
-        board: Board,
+        board: Workpiece,
         stop: Length,
-        cut: Cut,
+        cut: Parted,
         loose_set_aside: bool,
     },
 }
@@ -108,8 +106,9 @@ impl Default for MiterSawStation {
 }
 
 impl MiterSawStation {
-    /// Puts `board` against the stop block, unturned, setting aside whatever was on the saw.
-    pub fn load(&mut self, board: Board) {
+    /// Puts `board`, a board or a glue-up, against the stop block, unturned, setting aside
+    /// whatever was on the saw.
+    pub fn load(&mut self, board: Workpiece) {
         self.clear_saw();
         self.lie = Orientation::default();
         self.work = Work::Ready {
@@ -136,8 +135,17 @@ impl MiterSawStation {
     }
 
     /// Stands the board up on an edge, with its bottom face toward the fence, or lays it back
-    /// down.
+    /// down. A glue-up stays flat.
     pub fn tip(&mut self) -> bool {
+        if matches!(
+            &self.work,
+            Work::Ready {
+                board: Workpiece::GlueUp(_),
+                ..
+            }
+        ) {
+            return false;
+        }
         self.relay(self.lie.tipped())
     }
 
@@ -207,8 +215,8 @@ impl MiterSawStation {
                 board,
                 missed,
                 scarred,
-            } => match self.saw.chop(board, self.lie, self.stop, bottom) {
-                Ok(Pass::Cut(cut)) => {
+            } => match work::chop(&self.saw, board, self.lie, self.stop, bottom) {
+                Ok(Passed::Cut(cut)) => {
                     self.work = Work::Cut {
                         board: board.clone(),
                         stop: self.stop,
@@ -216,14 +224,16 @@ impl MiterSawStation {
                         loose_set_aside: false,
                     }
                 }
-                Ok(Pass::Kerfed(scar)) => *scarred = Some(scar),
-                Ok(Pass::Missed) => {}
+                Ok(Passed::Kerfed(scar)) => *scarred = Some(scar),
+                Ok(Passed::Missed) => {}
                 Err(error) => *missed = Some(error),
             },
             Work::Cut {
                 board, stop, cut, ..
             } => {
-                if let Ok(Pass::Cut(deeper)) = self.saw.chop(board, self.lie, *stop, bottom) {
+                if let Ok(Passed::Cut(deeper)) =
+                    work::chop(&self.saw, board, self.lie, *stop, bottom)
+                {
                     *cut = deeper;
                 }
             }
@@ -251,11 +261,7 @@ impl MiterSawStation {
                 ..
             } if !*loose_set_aside => {
                 *loose_set_aside = true;
-                self.parts.extend(
-                    cut.loose
-                        .iter()
-                        .map(|piece| Workpiece::Board(piece.board.clone())),
-                );
+                self.parts.extend(cut.loose(self.lie));
             }
             _ => {}
         }
@@ -302,28 +308,27 @@ impl MiterSawStation {
         self.blade_up()
             && match (&self.work, part) {
                 (Work::Ready { .. }, Part::Whole) | (Work::Cut { .. }, Part::Piece) => true,
-                (Work::Cut { cut, .. }, Part::Offcut) => cut.offcut.is_some(),
+                (Work::Cut { cut, .. }, Part::Offcut) => cut.has_offcut(),
                 _ => false,
             }
     }
 
     /// Lifts a board off the saw to carry it elsewhere: the board against the stop, or one side
     /// of the last cut, with the other side set aside on the pile.
-    pub fn take(&mut self, part: Part) -> Option<Board> {
+    pub fn take(&mut self, part: Part) -> Option<Workpiece> {
         if !self.can_take(part) {
             return None;
         }
         match std::mem::replace(&mut self.work, Work::Empty) {
             Work::Empty => None,
-            Work::Ready { board, .. } => Some(board),
+            Work::Ready { board, .. } => Some(work::hand_off(board, self.lie)),
             Work::Cut { cut, .. } => {
-                let (taken, other) = match (part, cut.offcut) {
-                    (Part::Offcut, Some(offcut)) => (offcut, Some(cut.piece)),
-                    (_, offcut) => (cut.piece, offcut),
+                let (taken, other) = match part {
+                    Part::Offcut => (Part::Offcut, Part::Piece),
+                    _ => (Part::Piece, Part::Offcut),
                 };
-                self.parts
-                    .extend(other.map(|piece| Workpiece::Board(piece.board)));
-                Some(taken.board)
+                self.parts.extend(cut.take(other, self.lie));
+                cut.take(taken, self.lie)
             }
         }
     }
@@ -336,12 +341,11 @@ impl MiterSawStation {
     fn clear_saw(&mut self) {
         match std::mem::replace(&mut self.work, Work::Empty) {
             Work::Empty => {}
-            Work::Ready { board, .. } => self.parts.push(Workpiece::Board(board)),
+            Work::Ready { board, .. } => self.parts.push(work::hand_off(board, self.lie)),
             Work::Cut { cut, .. } => self.parts.extend(
-                [Some(cut.piece), cut.offcut]
+                [Part::Piece, Part::Offcut]
                     .into_iter()
-                    .flatten()
-                    .map(|piece| Workpiece::Board(piece.board)),
+                    .filter_map(|part| cut.take(part, self.lie)),
             ),
         }
     }
@@ -362,24 +366,21 @@ impl MiterSawStation {
         };
         // The board's far end along the fence rests against the stop block; the rest reaches
         // left past the blade. It reaches from the fence out toward the operator.
-        let (across, _) = self.lie.across();
-        let (along, _) = self.lie.along();
         let near = Vec3::new(
-            -across.of(board).as_meters_f32(),
+            -work::extent(board, self.lie.across().0).as_meters_f32(),
             0.0,
-            stop.as_meters_f32() - along.of(board).as_meters_f32(),
+            stop.as_meters_f32() - work::extent(board, self.lie.along().0).as_meters_f32(),
         );
-        let placed = Placed::lying(board, self.lie, near);
         match cut {
             None => SawBoards {
-                whole: Some(placed),
+                whole: work::placed(board, self.lie, near),
                 ..default()
             },
             // Each piece sits where it was on the board. Loose ones are on the pile.
             Some(cut) => SawBoards {
-                whole: None,
-                piece: Some(placed.piece(&cut.piece)),
-                offcut: cut.offcut.as_ref().map(|offcut| placed.piece(offcut)),
+                whole: Vec::new(),
+                piece: cut.placed(Part::Piece, board, self.lie, near),
+                offcut: cut.placed(Part::Offcut, board, self.lie, near),
             },
         }
     }
@@ -393,16 +394,10 @@ impl MiterSawStation {
         let mut pile = Vec::new();
         for (index, part) in self.parts.iter().enumerate() {
             let near = Vec3::new(-PILE_FRONT, bottom, PILE_LEFT);
-            let placed = match part {
-                Workpiece::Board(board) => vec![Placed {
-                    grain: Vec3::new(0.11, 0.0, 0.37) * index as f32,
-                    ..Placed::lying(board, Orientation::default(), near)
-                }],
-                Workpiece::GlueUp(assembly) => {
-                    let axes = |v: [f64; 3]| Vec3::new(v[1] as f32, v[2] as f32, v[0] as f32);
-                    place_glue_up(assembly, &axes, near)
-                }
-            };
+            let mut placed = work::placed(part, Orientation::default(), near);
+            if let [board] = placed.as_mut_slice() {
+                board.grain = Vec3::new(0.11, 0.0, 0.37) * index as f32;
+            }
             let top = placed
                 .iter()
                 .map(|placed| placed.bounds().1.y)
@@ -440,8 +435,12 @@ impl MiterSawStation {
 
     /// A warning if the blade won't reach all the way across `board` as it lies, at the miter
     /// angle: it cuts as far as it reaches and leaves the board in one piece.
-    fn reach_note(&self, board: &Board) -> String {
-        let span = self.lie.across().0.of(board);
+    fn reach_note(&self, board: &Workpiece) -> String {
+        let span = work::extent(board, self.lie.across().0);
+        let what = match board {
+            Workpiece::Board(_) => "board",
+            Workpiece::GlueUp(_) => "glue-up",
+        };
         let widest = self.saw.widest();
         if span <= widest {
             return String::new();
@@ -452,16 +451,16 @@ impl MiterSawStation {
         };
         format!(
             " The blade reaches only {widest} across{angle}, so it can't cut all the way \
-             through this {span} board."
+             through this {span} {what}."
         )
     }
 
     /// What the depth stop will do to `board`, if it's on.
-    fn depth_note(&self, board: &Board) -> String {
+    fn depth_note(&self, board: &Workpiece) -> String {
         let Some(stop) = self.depth_stop else {
             return String::new();
         };
-        let thickness = board.thickness();
+        let thickness = work::extent(board, self.lie.up().0);
         if stop >= thickness {
             " The depth stop keeps the blade above it.".to_string()
         } else {
@@ -481,26 +480,35 @@ impl MiterSawStation {
                 ..
             } => format!("No cut: {error}."),
             Work::Ready {
-                scarred: Some(scarred),
+                scarred: Some(Workpiece::Board(scarred)),
                 ..
             } => {
                 let scar = scarred.kerfs().last().expect("a scar");
                 format!("Cutting. So far, {}.", describe_kerf(scarred, scar))
             }
+            Work::Ready {
+                scarred: Some(Workpiece::GlueUp(_)),
+                ..
+            } => "Cutting into the glue-up.".to_string(),
             Work::Ready { board, .. } => format!(
-                "Board on the saw: {}. Hold Space to lower the blade.{}{}",
-                describe_board(board),
+                "{}. Hold Space to lower the blade.{}{}",
+                work::on_the_saw(board),
                 self.reach_note(board),
                 self.depth_note(board)
             ),
-            Work::Cut { cut, .. } if cut.loose.is_empty() => describe_cut("Cut", cut),
-            Work::Cut { cut, .. } => format!("{} Set aside on the pile.", describe_cut("Cut", cut)),
+            Work::Cut { cut, .. } if !cut.has_loose() => cut.describe("Cut", self.lie),
+            Work::Cut { cut, .. } => {
+                format!("{} Set aside on the pile.", cut.describe("Cut", self.lie))
+            }
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use woodsim::Board;
+
+    use crate::hand::Workpiece;
     use woodsim::Blade;
 
     use super::*;
@@ -523,7 +531,7 @@ mod tests {
 
     fn loaded() -> MiterSawStation {
         let mut station = MiterSawStation::default();
-        station.load(ripped_piece());
+        station.load(Workpiece::Board(ripped_piece()));
         station
     }
 
@@ -534,22 +542,48 @@ mod tests {
     }
 
     #[test]
+    fn a_glue_up_crosscuts_into_two_glue_ups_and_one_goes_on_the_pile() {
+        let mut station = MiterSawStation::default();
+        let panel = crate::work::panel(
+            &[Length::from_inch_fraction(5, 2); 2],
+            Length::from_inches(24),
+        );
+        station.load(Workpiece::GlueUp(panel));
+        assert!(!station.tip());
+        chop(&mut station);
+        assert_eq!(
+            station.status(),
+            "Cut the glue-up apart: a glue-up of 2 parts, 3/4\" x 5\" x 12\", and a glue-up of \
+             2 parts, 3/4\" x 5\" x 11-7/8\"."
+        );
+        let Some(Workpiece::GlueUp(piece)) = station.take(Part::Piece) else {
+            panic!("expected the glued piece");
+        };
+        assert_eq!(piece.joints().len(), 1);
+        assert!(matches!(station.parts[..], [Workpiece::GlueUp(_)]));
+    }
+
+    #[test]
     fn a_stroke_pulled_down_a_little_at_a_time_leaves_clean_mitered_ends() {
         // A narrow board, ripped off a wider one, comes apart before the blade's curve has
         // cleared the corners of a 45° cut; going on down, the blade clears them, as a full
         // stroke does, and both ends are flat.
         let mut station = MiterSawStation::default();
-        station.load(Board::new(
+        station.load(Workpiece::Board(Board::new(
             Length::from_inches(24),
             Length::from_inches(1),
             Length::from_inch_fraction(3, 4),
-        ));
+        )));
         station.set_miter(Angle::from_degrees(45));
         for _ in 0..250 {
             station.lower(0.004);
         }
         station.raise(1.0);
-        let Work::Cut { cut, .. } = &station.work else {
+        let Work::Cut {
+            cut: Parted::Board(cut),
+            ..
+        } = &station.work
+        else {
             panic!("expected the board cut apart");
         };
         for side in [Some(&cut.piece), cut.offcut.as_ref()] {
@@ -572,7 +606,7 @@ mod tests {
 
     #[test]
     fn loaded_board_rests_against_the_stop() {
-        let whole = loaded().boards().whole.unwrap();
+        let whole = loaded().boards().whole.into_iter().next().unwrap();
 
         assert_close(x_span(&whole).0, inches(-12.0));
         assert_close(x_span(&whole).1, inches(12.0));
@@ -590,11 +624,11 @@ mod tests {
 
         station.lower(0.5);
         let boards = station.boards();
-        assert_eq!(boards.whole, None);
-        let piece = boards.piece.unwrap();
+        assert!(boards.whole.is_empty());
+        let piece = boards.piece.into_iter().next().unwrap();
         assert_close(x_span(&piece).0, 0.0);
         assert_close(x_span(&piece).1, inches(12.0));
-        let offcut = boards.offcut.unwrap();
+        let offcut = boards.offcut.into_iter().next().unwrap();
         assert_close(x_span(&offcut).0, inches(-12.0));
         assert_close(x_span(&offcut).1, inches(-0.125));
         assert_eq!(
@@ -615,7 +649,10 @@ mod tests {
         station.set_stop(Length::from_inches(20));
         assert_eq!(station.stop, Length::from_inches(20));
         // The pieces already cut stay where they were cut.
-        assert_close(x_span(&station.boards().piece.unwrap()).1, inches(12.0));
+        assert_close(
+            x_span(&station.boards().piece.into_iter().next().unwrap()).1,
+            inches(12.0),
+        );
     }
 
     #[test]
@@ -632,14 +669,17 @@ mod tests {
         let mut station = loaded();
         station.set_stop(Length::from_inches(30));
         chop(&mut station);
-        assert!(station.boards().whole.is_some());
+        assert!(!station.boards().whole.is_empty());
         assert_eq!(
             station.status(),
             "No cut: the blade misses the board: set to 30\", but the board is only 24\"."
         );
 
         station.set_stop(Length::from_inches(12));
-        assert_close(x_span(&station.boards().whole.unwrap()).1, inches(12.0));
+        assert_close(
+            x_span(&station.boards().whole.into_iter().next().unwrap()).1,
+            inches(12.0),
+        );
         assert!(station.status().starts_with("Board on the saw"));
         chop(&mut station);
         assert!(matches!(station.work, Work::Cut { .. }));
@@ -652,7 +692,7 @@ mod tests {
         let offcut = station.take(Part::Offcut).unwrap();
         station.load(offcut);
 
-        let (start, end) = x_span(&station.boards().whole.unwrap());
+        let (start, end) = x_span(&station.boards().whole.into_iter().next().unwrap());
         assert_close(end, inches(12.0));
         assert_close(end - start, inches(11.875));
         assert_eq!(station.parts.len(), 1);
@@ -678,7 +718,10 @@ mod tests {
         let mut station = loaded();
 
         assert_eq!(station.take(Part::Piece), None);
-        assert_eq!(station.take(Part::Whole), Some(ripped_piece()));
+        assert_eq!(
+            station.take(Part::Whole),
+            Some(Workpiece::Board(ripped_piece()))
+        );
         assert!(matches!(station.work, Work::Empty));
         assert!(station.parts.is_empty());
     }
@@ -689,7 +732,7 @@ mod tests {
         chop(&mut station);
         let taken = station.take(Part::Piece).unwrap();
 
-        assert_eq!(taken.length(), Length::from_inches(12));
+        assert_eq!(taken.board().unwrap().length(), Length::from_inches(12));
         assert!(matches!(station.work, Work::Empty));
         assert_eq!(station.parts.len(), 1);
         assert_eq!(
@@ -722,7 +765,7 @@ mod tests {
         }
         chop(&mut station);
         let last = station.take(Part::Piece).unwrap();
-        station.parts.push(Workpiece::Board(last));
+        station.parts.push(last);
 
         assert!(matches!(station.work, Work::Empty));
         // Three 6" parts, what's left, and three kerfs add back up to the 24" board.
@@ -747,7 +790,7 @@ mod tests {
     fn loading_a_board_sets_aside_whatever_was_on_the_saw() {
         let mut station = loaded();
         chop(&mut station);
-        station.load(ripped_piece());
+        station.load(Workpiece::Board(ripped_piece()));
 
         assert!(matches!(station.work, Work::Ready { .. }));
         assert_eq!(station.parts.len(), 2);
@@ -758,7 +801,7 @@ mod tests {
         let mut station = loaded();
         chop(&mut station);
         let piece = station.take(Part::Piece).unwrap();
-        station.parts.push(Workpiece::Board(piece));
+        station.parts.push(piece);
         let pile: Vec<Placed> = station.pile().into_iter().map(|(_, part)| part).collect();
 
         assert_eq!(pile.len(), 2);
@@ -852,7 +895,7 @@ mod tests {
     #[test]
     fn a_crosscut_through_a_slot_sets_the_loose_strip_aside() {
         let mut station = MiterSawStation::default();
-        station.load(slotted_board());
+        station.load(Workpiece::Board(slotted_board()));
         station.set_stop(Length::from_inches(14));
         chop(&mut station);
 
@@ -867,7 +910,7 @@ mod tests {
              Set aside on the pile."
         ));
         // The offcut is the 6" strip, still against the fence where it was on the board.
-        let offcut = station.boards().offcut.unwrap();
+        let offcut = station.boards().offcut.into_iter().next().unwrap();
         assert_eq!(offcut.board.width(), Length::from_inches(6));
         let (near, far) = offcut.bounds();
         assert_close(far.x, 0.0);
@@ -888,13 +931,13 @@ mod tests {
         let Work::Ready { board, .. } = &station.work else {
             panic!("the board should still be whole against the stop");
         };
-        assert_eq!(board.kerfs().len(), 1);
+        assert_eq!(board.board().unwrap().kerfs().len(), 1);
     }
 
     #[test]
     fn turned_end_for_end_the_slotted_end_goes_against_the_stop() {
         let mut station = MiterSawStation::default();
-        station.load(slotted_board());
+        station.load(Workpiece::Board(slotted_board()));
         assert!(station.turn_left() && station.turn_left());
         station.set_stop(Length::from_inches(10));
         chop(&mut station);
@@ -905,7 +948,7 @@ mod tests {
             station.parts[0].board().unwrap().to_string(),
             "3/4\" x 1-1/8\" x 10\""
         );
-        let piece = station.boards().piece.unwrap();
+        let piece = station.boards().piece.into_iter().next().unwrap();
         assert_eq!(piece.board.to_string(), "3/4\" x 6\" x 10\"");
         assert_close(x_span(&piece).1, inches(10.0));
     }
@@ -932,7 +975,7 @@ mod tests {
         let Work::Ready { board, .. } = &station.work else {
             panic!("the scarred board should still be against the stop");
         };
-        assert_eq!(board.kerfs().len(), 1);
+        assert_eq!(board.board().unwrap().kerfs().len(), 1);
         assert!(station.status().starts_with(
             "Board on the saw: 3/4\" x 6\" x 24\", with a 1/8\"-wide, 1/4\"-deep dado 3-7/16\" long."
         ));
@@ -949,7 +992,7 @@ mod tests {
         let Work::Ready { board, .. } = &station.work else {
             panic!("the board should still be against the stop");
         };
-        assert_eq!(board.kerfs().len(), 2);
+        assert_eq!(board.board().unwrap().kerfs().len(), 2);
         assert!(station.status().starts_with(
             "Board on the saw: 3/4\" x 6\" x 24\", with a 1/4\"-wide, 1/4\"-deep dado 3-7/16\" long."
         ));
@@ -975,7 +1018,7 @@ mod tests {
         let Work::Ready { board, .. } = &station.work else {
             panic!("the board should still be against the stop");
         };
-        assert!(board.kerfs().is_empty());
+        assert!(board.board().unwrap().kerfs().is_empty());
     }
 
     #[test]
@@ -1019,7 +1062,11 @@ mod tests {
         let mut station = loaded();
         station.set_miter(Angle::from_degrees(30));
         chop(&mut station);
-        let Work::Cut { cut, .. } = &station.work else {
+        let Work::Cut {
+            cut: Parted::Board(cut),
+            ..
+        } = &station.work
+        else {
             panic!("the blade should have cut the board");
         };
         assert_eq!(cut.piece.board.miters(), [Angle::from_degrees(30)]);
@@ -1046,7 +1093,7 @@ mod tests {
         let Work::Ready { board, .. } = &station.work else {
             panic!("the board should still be whole against the stop");
         };
-        assert_eq!(board.kerfs().len(), 1);
+        assert_eq!(board.board().unwrap().kerfs().len(), 1);
         assert!(
             station
                 .status()
@@ -1059,14 +1106,18 @@ mod tests {
     #[test]
     fn on_edge_the_blade_chops_down_through_the_board() {
         let mut station = MiterSawStation::default();
-        station.load(Board::new(
+        station.load(Workpiece::Board(Board::new(
             Length::from_inches(24),
             Length::from_inch_fraction(7, 2),
             Length::from_inch_fraction(3, 4),
-        ));
+        )));
         assert!(station.tip());
         chop(&mut station);
-        let Work::Cut { cut, .. } = &station.work else {
+        let Work::Cut {
+            cut: Parted::Board(cut),
+            ..
+        } = &station.work
+        else {
             panic!("the blade should have cut the board");
         };
         assert_eq!(cut.piece.board.to_string(), "3/4\" x 3-1/2\" x 12\"");

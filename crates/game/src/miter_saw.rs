@@ -7,10 +7,10 @@ use woodsim::{Angle, Length, MiterSaw};
 
 use crate::{
     chop::{MITER_STOPS, MiterSawStation, PILE_TRAY, board_turn},
-    hand::{Gesture, Hand, Workpiece},
+    hand::{Gesture, Hand},
     meshes::{Grain, board_mesh, lumber_mesh, rounded_box},
     shop::{
-        Block, Part, Placed, Shape, ShopAssets, ShopView, Stations, inches, place_parts,
+        Block, Part, Placed, SawPart, Shape, ShopAssets, ShopView, Stations, inches, place_parts,
         pointer_on_plane, rounded_block, set_material_on, snap_to_sixteenth, station_part,
     },
 };
@@ -150,7 +150,6 @@ fn spawn_miter_saw(
     // The saw's housing: bright tool plastic.
     let body = paint(Color::srgb(0.08, 0.64, 0.66));
     let zero_clearance = paint(Color::srgb(0.92, 0.25, 0.22));
-    let wood = shop.wood.clone();
 
     let spawn_box = |commands: &mut Commands,
                      meshes: &mut Assets<Mesh>,
@@ -433,24 +432,6 @@ fn spawn_miter_saw(
         .observe(set_material_on::<PointerOver>(tray_hover))
         .observe(set_material_on::<PointerOut>(tray_color))
         .observe(tray_clicked);
-
-    for part in [Part::Whole, Part::Piece, Part::Offcut] {
-        // Each part gets its own mesh, rebuilt as the board is cut.
-        let mesh = meshes.add(rounded_box(Vec3::splat(0.01)));
-        commands
-            .spawn((
-                Mesh3d(mesh),
-                MeshMaterial3d(wood.clone()),
-                Transform::default(),
-                Visibility::Hidden,
-                part,
-                AtMiterSaw,
-                Shape::default(),
-            ))
-            .observe(highlight_takeable)
-            .observe(set_material_on::<PointerOut>(wood.clone()))
-            .observe(saw_part_clicked);
-    }
 }
 
 /// Q and E turn the board against the stop a quarter turn left and right, and F flips it over.
@@ -480,8 +461,7 @@ fn highlight_takeable(
     mut materials: Query<&mut MeshMaterial3d<StandardMaterial>>,
 ) {
     let clickable = |part: Part| match hand.0 {
-        Some(Workpiece::Board(_)) => station.can_load(),
-        Some(Workpiece::GlueUp(_)) => false,
+        Some(_) => station.can_load(),
         None => station.can_take(part),
     };
     if let Ok(part) = parts.get(over.entity)
@@ -510,7 +490,7 @@ fn saw_part_clicked(
     let handled = if stations.hand.0.is_some() {
         stations.set_down(ShopView::MiterSaw, None)
     } else {
-        stations.hand.0 = stations.miter_saw.take(part).map(Workpiece::Board);
+        stations.hand.0 = stations.miter_saw.take(part);
         stations.hand.0.is_some()
     };
     if handled && let Ok(mut material) = materials.get_mut(click.entity) {
@@ -653,17 +633,34 @@ fn set_depth_stop_with_keys(keys: Res<ButtonInput<KeyCode>>, mut station: ResMut
     }
 }
 
+/// Draws what's on the saw, each board with its own mesh, rebuilt as it's cut: a board, or
+/// every board of a glue-up.
 fn draw_board(
+    mut commands: Commands,
     station: Res<MiterSawStation>,
+    shop: Res<ShopAssets>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut parts: Query<
-        (&Part, &Mesh3d, &mut Transform, &mut Visibility, &mut Shape),
-        With<AtMiterSaw>,
-    >,
+    mut parts: Query<SawPart, With<AtMiterSaw>>,
 ) {
-    if station.is_changed() {
-        let boards = station.boards();
-        place_parts(&boards, ORIGIN, board_turn(), &mut meshes, &mut parts);
+    if !station.is_changed() {
+        return;
+    }
+    let boards = station.boards();
+    let missing = place_parts(&boards, ORIGIN, board_turn(), &mut meshes, &mut parts);
+    for (part, slot, pose, placed) in missing {
+        commands
+            .spawn((
+                Mesh3d(meshes.add(lumber_mesh(&placed.board, placed.grain))),
+                MeshMaterial3d(shop.wood.clone()),
+                pose,
+                part,
+                slot,
+                AtMiterSaw,
+                Shape::built(&placed),
+            ))
+            .observe(highlight_takeable)
+            .observe(set_material_on::<PointerOut>(shop.wood.clone()))
+            .observe(saw_part_clicked);
     }
 }
 

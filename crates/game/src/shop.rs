@@ -28,7 +28,7 @@ use crate::{
     bench::{self, BenchView},
     chop::MiterSawStation,
     feed::TableSawStation,
-    hand::{self, Gesture, Hand, Workpiece, set_down},
+    hand::{self, Gesture, Hand, set_down},
     join::BenchStation,
     meshes::{lumber_mesh, rounded_box},
     miter_saw,
@@ -140,20 +140,35 @@ fn lay(board: &Board, lie: Orientation) -> (Quat, Vec3) {
 /// What to draw on a saw: a board in one piece, or both sides of a cut that went through it.
 #[derive(Debug, Default, PartialEq)]
 pub struct SawBoards {
-    pub whole: Option<Placed>,
-    pub piece: Option<Placed>,
-    pub offcut: Option<Placed>,
+    pub whole: Vec<Placed>,
+    pub piece: Vec<Placed>,
+    pub offcut: Vec<Placed>,
 }
 
 impl SawBoards {
-    pub fn get(&self, part: Part) -> Option<&Placed> {
+    /// The boards of `part`: one for a board, one for each board of a glue-up, or none.
+    pub fn get(&self, part: Part) -> &[Placed] {
         match part {
-            Part::Whole => self.whole.as_ref(),
-            Part::Piece => self.piece.as_ref(),
-            Part::Offcut => self.offcut.as_ref(),
+            Part::Whole => &self.whole,
+            Part::Piece => &self.piece,
+            Part::Offcut => &self.offcut,
         }
     }
 }
+
+/// An entity drawing one board on a saw, with what `place_parts` keeps up to date on it.
+pub type SawPart = (
+    &'static Part,
+    &'static Slot,
+    &'static Mesh3d,
+    &'static mut Transform,
+    &'static mut Visibility,
+    &'static mut Shape,
+);
+
+/// Which of a part's boards an entity on a saw draws: a board, or one board of a glue-up.
+#[derive(Component, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Slot(pub usize);
 
 /// What the camera is showing: the whole shop, or one station up close. A station's keyboard
 /// controls only work while it's up close.
@@ -706,11 +721,6 @@ fn update_readout(
                 (Some(ShopView::TableSaw), false) => "Click to work at the table saw.",
                 (Some(ShopView::MiterSaw), false) => "Click to work at the miter saw.",
                 (Some(ShopView::Bench), false) => "Click to work at the workbench.",
-                (Some(ShopView::TableSaw | ShopView::MiterSaw), true)
-                    if matches!(hand.0, Some(Workpiece::GlueUp(_))) =>
-                {
-                    "The saws can't cut glue-ups yet: set it down at the workbench or on the pile."
-                }
                 (Some(ShopView::TableSaw), true) => "Click to set it down on the table saw.",
                 (Some(ShopView::MiterSaw), true) => "Click to set it down on the miter saw.",
                 (Some(ShopView::Bench), true) => "Click to set it down at the workbench.",
@@ -1030,9 +1040,10 @@ impl Shape {
     }
 }
 
-/// Places each part of a board on a saw, rebuilding its mesh to match the board and hiding the
-/// parts that aren't there. Each part needs its own mesh. `frame` turns the saw's own frame
-/// (across, up, along) into the station's coordinates, which start at `origin`.
+/// Places each board of each part on a saw, rebuilding its mesh to match the board and hiding
+/// the entities with no board to draw. Each board needs its own mesh. `frame` turns the saw's own
+/// frame (across, up, along) into the station's coordinates, which start at `origin`. Returns
+/// the boards no entity draws yet, with where each goes, for the station to spawn.
 pub fn place_parts<'a>(
     boards: &SawBoards,
     origin: Vec3,
@@ -1041,24 +1052,42 @@ pub fn place_parts<'a>(
     parts: impl IntoIterator<
         Item = (
             &'a Part,
+            &'a Slot,
             &'a Mesh3d,
             Mut<'a, Transform>,
             Mut<'a, Visibility>,
             Mut<'a, Shape>,
         ),
     >,
-) {
-    for (part, mesh, mut transform, mut visibility, mut shape) in parts {
-        match boards.get(*part) {
+) -> Vec<(Part, Slot, Transform, Placed)> {
+    let pose = |placed: &Placed| {
+        Transform::from_translation(origin + frame * placed.corner)
+            .with_rotation(frame * placed.rotation)
+    };
+    let mut drawn = Vec::new();
+    for (part, slot, mesh, mut transform, mut visibility, mut shape) in parts {
+        match boards.get(*part).get(slot.0) {
             Some(placed) => {
-                *transform = Transform::from_translation(origin + frame * placed.corner)
-                    .with_rotation(frame * placed.rotation);
+                *transform = pose(placed);
                 shape.update(placed, mesh, meshes);
                 *visibility = Visibility::Inherited;
+                drawn.push((*part, *slot));
             }
             None => *visibility = Visibility::Hidden,
         }
     }
+    [Part::Whole, Part::Piece, Part::Offcut]
+        .into_iter()
+        .flat_map(|part| {
+            boards
+                .get(part)
+                .iter()
+                .enumerate()
+                .map(move |(k, placed)| (part, Slot(k), placed))
+        })
+        .filter(|(part, slot, _)| !drawn.contains(&(*part, *slot)))
+        .map(|(part, slot, placed)| (part, slot, pose(placed), placed.clone()))
+        .collect()
 }
 
 /// A rounded box filling `block`, given in the coordinates of a station at `origin`.

@@ -4,13 +4,13 @@
 //! it down: a saw, the workbench, the pile, or the scrap bin to throw it away.
 
 use bevy::prelude::*;
-use woodsim::{Assembly, Board, Length, Surface, outline};
+use woodsim::{Assembly, Board, Length};
 
 use crate::{
     chop::MiterSawStation,
     feed::TableSawStation,
     join::BenchStation,
-    shop::{Placed, ShopView, describe_size, measured},
+    shop::{ShopView, describe_size, measured},
 };
 
 /// Wood to carry or set aside: one board, or boards fastened together.
@@ -80,10 +80,9 @@ pub fn from_rack(width: Length, thickness: Length) -> Board {
     Board::new(Length::from_inches(24), width, thickness)
 }
 
-/// Sets the wood in hand down at `station`: a board on a saw, ready to cut, with anything
-/// already on it going on the pile; anything on the workbench, loose, as near `near` (a point
-/// in the shop) as there's room. Returns false, still holding it, if there's nothing in hand or
-/// it can't go there: the saws don't cut glue-ups yet.
+/// Sets the wood in hand down at `station`: on a saw, ready to cut, with anything already on it
+/// going on the pile; on the workbench, loose, as near `near` (a point in the shop) as there's
+/// room. Returns false, still holding it, if there's nothing in hand or it can't go there.
 pub fn set_down(
     station: ShopView,
     near: Option<Vec3>,
@@ -95,23 +94,21 @@ pub fn set_down(
     let Some(work) = hand.0.take() else {
         return false;
     };
-    match (station, work) {
-        (ShopView::TableSaw, Workpiece::Board(board)) => {
-            let leftovers = table_saw.load(board);
-            miter_saw
-                .parts
-                .extend(leftovers.into_iter().map(Workpiece::Board));
+    match station {
+        ShopView::TableSaw => {
+            let leftovers = table_saw.load(work);
+            miter_saw.parts.extend(leftovers);
             true
         }
-        (ShopView::MiterSaw, Workpiece::Board(board)) => {
-            miter_saw.load(board);
+        ShopView::MiterSaw => {
+            miter_saw.load(work);
             true
         }
-        (ShopView::Bench, work) => {
+        ShopView::Bench => {
             bench.set_down(work, near.map(|point| (point - crate::bench::ORIGIN).xz()));
             true
         }
-        (_, work) => {
+        ShopView::Overview => {
             hand.0 = Some(work);
             false
         }
@@ -122,10 +119,7 @@ pub fn set_down(
 pub fn describe(hand: &Hand) -> String {
     match &hand.0 {
         Some(Workpiece::Board(board)) => format!("In hand: {}", describe_size(board)),
-        Some(Workpiece::GlueUp(assembly)) => format!(
-            "In hand: {}. The saws can't cut glue-ups yet.",
-            describe_glue_up(assembly)
-        ),
+        Some(Workpiece::GlueUp(assembly)) => format!("In hand: {}", describe_glue_up(assembly)),
         None => String::new(),
     }
 }
@@ -144,98 +138,15 @@ pub fn describe_glue_up(assembly: &Assembly) -> String {
     )
 }
 
-/// A point of an assembly in meters along its axes.
-fn meters(point: [Length; 3]) -> [f64; 3] {
-    point.map(|length| length.as_nm() as f64 / 1e9)
-}
-
-/// The box a glue-up fills in a station's frame, as `axes` turns the assembly's axes into it,
-/// as its least and most corners in meters from the assembly's origin.
-pub fn glue_up_bounds(assembly: &Assembly, axes: &dyn Fn([f64; 3]) -> Vec3) -> (Vec3, Vec3) {
-    assembly
-        .members()
-        .iter()
-        .flat_map(|member| {
-            [Surface::Bottom, Surface::Top]
-                .into_iter()
-                .flat_map(|surface| outline(&member.board, surface))
-                .flatten()
-                .map(|[l, w, t]| axes(meters(member.point(l, w, t))))
-                .collect::<Vec<_>>()
-        })
-        .fold((Vec3::MAX, Vec3::MIN), |(low, high), corner| {
-            (low.min(corner), high.max(corner))
-        })
-}
-
-/// Where each board of a glue-up sits in a station's frame, as `axes` turns the assembly's axes
-/// into it, with the least corner of the box it fills at `near`.
-pub fn place_glue_up(
-    assembly: &Assembly,
-    axes: &dyn Fn([f64; 3]) -> Vec3,
-    near: Vec3,
-) -> Vec<Placed> {
-    let (low, _) = glue_up_bounds(assembly, axes);
-    assembly
-        .members()
-        .iter()
-        .enumerate()
-        .map(|(index, member)| {
-            let [l, w, t] = member.axes().map(axes);
-            Placed {
-                board: member.board.clone(),
-                corner: near - low + axes(meters(member.at)),
-                rotation: Quat::from_mat3(&Mat3::from_cols(w, t, l)),
-                grain: Vec3::new(0.13, 0.0, 0.41) * index as f32,
-            }
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
-    use woodsim::{Fastener, Mating, surfaces};
+    use crate::shop::Placed;
 
     use super::*;
 
     /// Two 1x4s, 24" long, edge to edge: a panel 8" wide.
     fn panel() -> Assembly {
-        let board = Board::new(
-            Length::from_inches(24),
-            Length::from_inches(4),
-            Length::from_inch_fraction(3, 4),
-        );
-        let edge = |far: bool| {
-            surfaces(&board)
-                .into_iter()
-                .find(|surface| {
-                    matches!(surface, Surface::Side(edge) if edge.out.l == 0 && (edge.out.w > 0) == far)
-                })
-                .unwrap()
-        };
-        let mut panel = Assembly::of(board.clone());
-        let other = Assembly::of(board.clone());
-        // The way around that keeps the second board face up.
-        let mating = (0..4)
-            .map(|turn| Mating {
-                turn,
-                slide: [Length::ZERO; 2],
-            })
-            .find(|&mating| {
-                let motion = panel
-                    .mating((0, edge(true)), &other, (0, edge(false)), mating)
-                    .unwrap();
-                motion.rotation.apply([0.0, 0.0, 1.0])[2] > 0.999
-            })
-            .unwrap();
-        assert!(panel.attach(
-            (0, edge(true)),
-            &other,
-            (0, edge(false)),
-            mating,
-            Fastener::Glue
-        ));
-        panel
+        crate::work::panel(&[Length::from_inches(4); 2], Length::from_inches(24))
     }
 
     #[test]
@@ -248,9 +159,12 @@ mod tests {
 
     #[test]
     fn a_glue_up_is_placed_board_by_board_from_its_near_corner() {
-        // The assembly's x along z, y along x, and z up, the way a board lies on the pile.
-        let axes = |v: [f64; 3]| Vec3::new(v[1] as f32, v[2] as f32, v[0] as f32);
-        let placed = place_glue_up(&panel(), &axes, Vec3::ONE);
+        // Lying on a saw as it comes, the way a board does.
+        let placed = crate::work::placed(
+            &Workpiece::GlueUp(panel()),
+            woodsim::Orientation::default(),
+            Vec3::ONE,
+        );
         assert_eq!(placed.len(), 2);
         let (low, high) = placed
             .iter()
@@ -264,15 +178,15 @@ mod tests {
     }
 
     #[test]
-    fn the_saws_refuse_a_glue_up_but_the_bench_takes_it() {
-        let mut hand = Hand(Some(Workpiece::GlueUp(panel())));
+    fn a_glue_up_goes_on_either_saw_or_the_bench() {
         let (mut table_saw, mut miter_saw, mut bench) = (
             TableSawStation::default(),
             MiterSawStation::default(),
             BenchStation::default(),
         );
         for saw in [ShopView::TableSaw, ShopView::MiterSaw] {
-            assert!(!set_down(
+            let mut hand = Hand(Some(Workpiece::GlueUp(panel())));
+            assert!(set_down(
                 saw,
                 None,
                 &mut hand,
@@ -280,8 +194,9 @@ mod tests {
                 &mut miter_saw,
                 &mut bench
             ));
-            assert!(hand.0.is_some());
+            assert!(hand.0.is_none());
         }
+        let mut hand = Hand(Some(Workpiece::GlueUp(panel())));
         assert!(set_down(
             ShopView::Bench,
             None,

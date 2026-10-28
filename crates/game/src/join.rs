@@ -11,10 +11,7 @@ use woodsim::{
     Assembly, Board, Contact, Fastener, Length, Mating, Member, Motion, Rotation, Surface, surfaces,
 };
 
-use crate::{
-    hand::{Workpiece, glue_up_bounds},
-    shop::inches,
-};
+use crate::{hand::Workpiece, shop::inches, work::glue_up_bounds};
 
 /// Half the bench top's length and depth, in meters.
 pub const HALF_TOP: Vec2 = Vec2::new(inches(30.0), inches(15.0));

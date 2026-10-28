@@ -8,11 +8,11 @@ use woodsim::Length;
 use crate::{
     chop::MiterSawStation,
     feed::TableSawStation,
-    hand::{Hand, Workpiece},
-    meshes::{Grain, board_mesh, rounded_box},
+    hand::Hand,
+    meshes::{Grain, board_mesh, lumber_mesh, rounded_box},
     shop::{
-        Block, Part, Shape, ShopAssets, ShopView, Stations, inches, place_parts, pointer_on_plane,
-        rounded_block, set_material_on, snap, snap_to_sixteenth, station_part,
+        Block, Part, SawPart, Shape, ShopAssets, ShopView, Stations, inches, place_parts,
+        pointer_on_plane, rounded_block, set_material_on, snap, snap_to_sixteenth, station_part,
     },
 };
 
@@ -152,7 +152,6 @@ fn spawn_saw(
     let dark_metal = paint(Color::srgb(0.22, 0.24, 0.3));
     let safety_red = paint(Color::srgb(0.92, 0.25, 0.22));
     let tape_yellow = paint(Color::srgb(1.0, 0.88, 0.35));
-    let wood = shop.wood.clone();
 
     let spawn_box = |commands: &mut Commands,
                      meshes: &mut Assets<Mesh>,
@@ -378,25 +377,6 @@ fn spawn_saw(
         .observe(set_material_on::<PointerOut>(stop_color))
         .observe(grab_gauge_stop)
         .observe(drag_gauge_stop);
-
-    // Each part gets its own mesh, rebuilt as the board is cut.
-    for part in [Part::Whole, Part::Piece, Part::Offcut] {
-        commands
-            .spawn((
-                Mesh3d(meshes.add(rounded_box(Vec3::splat(0.01)))),
-                MeshMaterial3d(wood.clone()),
-                Transform::default(),
-                Visibility::Hidden,
-                part,
-                AtTableSaw,
-                Shape::default(),
-            ))
-            .observe(highlight_carryable)
-            .observe(set_material_on::<PointerOut>(wood.clone()))
-            .observe(board_clicked)
-            .observe(grab_board)
-            .observe(drag_board);
-    }
 }
 
 fn move_fence_with_keys(keys: Res<ButtonInput<KeyCode>>, mut station: ResMut<TableSawStation>) {
@@ -607,9 +587,7 @@ fn turn_with_keys(keys: Res<ButtonInput<KeyCode>>, mut station: ResMut<TableSawS
 fn set_loose_aside(mut table_saw: ResMut<TableSawStation>, mut miter_saw: ResMut<MiterSawStation>) {
     if table_saw.has_loose() {
         let loose = table_saw.take_loose();
-        miter_saw
-            .parts
-            .extend(loose.into_iter().map(Workpiece::Board));
+        miter_saw.parts.extend(loose);
     }
 }
 
@@ -631,7 +609,7 @@ fn board_clicked(
     let handled = if stations.hand.0.is_some() {
         stations.set_down(ShopView::TableSaw, None)
     } else {
-        stations.hand.0 = stations.table_saw.take(*part).map(Workpiece::Board);
+        stations.hand.0 = stations.table_saw.take(*part);
         stations.hand.0.is_some()
     };
     if handled && let Ok(mut material) = materials.get_mut(click.entity) {
@@ -650,8 +628,7 @@ fn highlight_carryable(
     mut materials: Query<&mut MeshMaterial3d<StandardMaterial>>,
 ) {
     let clickable = |part: Part| match hand.0 {
-        Some(Workpiece::Board(_)) => station.can_load(),
-        Some(Workpiece::GlueUp(_)) => false,
+        Some(_) => station.can_load(),
         None => station.can_take(part),
     };
     if let Ok(part) = parts.get(over.entity)
@@ -715,16 +692,35 @@ fn draw_blade(
     }
 }
 
+/// Draws what's on the saw, each board with its own mesh, rebuilt as it's cut: a board, or
+/// every board of a glue-up.
 fn draw_board(
+    mut commands: Commands,
     station: Res<TableSawStation>,
+    shop: Res<ShopAssets>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut parts: Query<
-        (&Part, &Mesh3d, &mut Transform, &mut Visibility, &mut Shape),
-        With<AtTableSaw>,
-    >,
+    mut parts: Query<SawPart, With<AtTableSaw>>,
 ) {
-    if station.is_changed() {
-        let boards = station.boards();
-        place_parts(&boards, ORIGIN, Quat::IDENTITY, &mut meshes, &mut parts);
+    if !station.is_changed() {
+        return;
+    }
+    let boards = station.boards();
+    let missing = place_parts(&boards, ORIGIN, Quat::IDENTITY, &mut meshes, &mut parts);
+    for (part, slot, pose, placed) in missing {
+        commands
+            .spawn((
+                Mesh3d(meshes.add(lumber_mesh(&placed.board, placed.grain))),
+                MeshMaterial3d(shop.wood.clone()),
+                pose,
+                part,
+                slot,
+                AtTableSaw,
+                Shape::built(&placed),
+            ))
+            .observe(highlight_carryable)
+            .observe(set_material_on::<PointerOut>(shop.wood.clone()))
+            .observe(board_clicked)
+            .observe(grab_board)
+            .observe(drag_board);
     }
 }

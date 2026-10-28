@@ -11,6 +11,7 @@ mod scenery;
 mod shop;
 mod table_saw;
 mod textures;
+mod work;
 
 use std::{path::PathBuf, time::Duration};
 
