@@ -12,7 +12,7 @@ use bevy::{
     },
     light::NotShadowCaster,
     mesh::Indices,
-    picking::pointer::PointerButton,
+    picking::{backend::HitData, pointer::PointerButton},
     prelude::*,
     render::render_resource::PrimitiveTopology,
 };
@@ -38,8 +38,9 @@ pub const BOUNDS: Block = Block {
 };
 
 pub const HELP: &str = "Click a surface of a part, then the surface it goes against\n\
-                        Q/E: turn it   F: flip it   Arrows: slide it (Shift: 1/16\")   \
-                        Enter: fasten it\n\
+                        Q/E: turn the part under the pointer, or around the joint   \
+                        F: flip it\n\
+                        Arrows: slide it across the joint (Shift: 1/16\")   Enter: fasten it\n\
                         1: glue   2: brads   3: screws   U: take the last joint apart\n\
                         Backspace: let go   Space: pick up a loose part\n\
                         Drag: look around   Scroll: zoom   Tab: go to the table saw   \
@@ -47,8 +48,10 @@ pub const HELP: &str = "Click a surface of a part, then the surface it goes agai
 
 const TOP_THICKNESS: f32 = inches(1.75);
 
-/// How far the sheet that lights up a surface stands off it, so it shows over the wood.
-const SHEET_LIFT: f32 = 0.0006;
+/// How far the sheet that lights up a surface stands off it, so it shows over the wood, and
+/// how far in from the surface's edges it stops, so it never pokes out past them.
+const SHEET_LIFT: f32 = 0.0003;
+const SHEET_INSET: f32 = 0.0004;
 
 pub struct BenchPlugin;
 
@@ -125,9 +128,12 @@ struct BenchPart {
     member: usize,
 }
 
-/// The surface under the pointer, if it's on a part on the bench.
+/// The part on the bench under the pointer, if any, and the surface of it, until it moves.
 #[derive(Resource, Default)]
-struct Pointing(Option<Spot>);
+struct Pointing {
+    part: Option<Entity>,
+    surface: Option<Surface>,
+}
 
 /// A sheet that lights up a surface: the one under the pointer, or the one picked.
 #[derive(Component, Clone, Copy, PartialEq, Eq)]
@@ -203,7 +209,8 @@ fn spawn_bench(
 #[derive(Resource)]
 struct MovingWood(Handle<StandardMaterial>);
 
-/// The two sheets that light up surfaces: pale yellow under the pointer, orange where picked.
+/// The two sheets that light up surfaces: pale yellow under the pointer, blue where picked, to
+/// stand out against the orange of the part that moves.
 fn spawn_marks(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -218,14 +225,13 @@ fn spawn_marks(
     })));
     for (mark, color) in [
         (Mark::Pointed, Color::srgb(1.0, 0.9, 0.35)),
-        (Mark::Picked, Color::srgb(1.0, 0.45, 0.1)),
+        (Mark::Picked, Color::srgb(0.15, 0.5, 1.0)),
     ] {
         commands.spawn((
             Mesh3d(meshes.add(sheet(&[]))),
             MeshMaterial3d(materials.add(StandardMaterial {
                 base_color: color,
                 unlit: true,
-                cull_mode: None,
                 ..default()
             })),
             Transform::default(),
@@ -295,6 +301,8 @@ fn arrow_slides(directions: [Vec3; 2], right: Vec3, up: Vec3) -> [(usize, bool);
 fn work_with_keys(
     keys: Res<ButtonInput<KeyCode>>,
     camera: Single<&GlobalTransform, With<ShopCamera>>,
+    pointing: Res<Pointing>,
+    parts: Query<&BenchPart>,
     mut bench: ResMut<BenchStation>,
     mut hand: ResMut<Hand>,
 ) {
@@ -307,20 +315,24 @@ fn work_with_keys(
             bench.fastener = fastener;
         }
     }
-    // Q and E turn a part a quarter turn, as seen from above or around the joint it's being
-    // lined up at; F flips it over.
+    // Q and E turn a part a quarter turn, seen from above: the part under the pointer, or else
+    // the picked one, or the part being lined up, around the joint. F flips it over.
+    let under_pointer = pointing
+        .part
+        .and_then(|entity| parts.get(entity).ok())
+        .map(|part| part.group);
     for (key, quarters) in [(KeyCode::KeyQ, 1), (KeyCode::KeyE, -1), (KeyCode::KeyF, 2)] {
         if !keys.just_pressed(key) {
             continue;
         }
         if bench.lining_up.is_some() {
             bench.turn_around_joint(quarters);
-        } else if bench.picked.is_some() {
+        } else if let Some(group) = under_pointer.or(bench.picked.map(|picked| picked.group)) {
             let rotation = match key {
                 KeyCode::KeyF => Rotation::quarter_turns(0, 2),
                 _ => Rotation::quarter_turns(2, quarters),
             };
-            bench.turn_picked(rotation);
+            bench.turn_group(group, rotation);
         }
     }
     if let Some(directions) = bench.slide_directions() {
@@ -379,8 +391,8 @@ fn draw_bench(
     if !bench.is_changed() {
         return;
     }
-    // Parts move and renumber; what was under the pointer may not be.
-    pointing.0 = None;
+    // Parts move; the surface under the pointer may not be the same one now.
+    pointing.surface = None;
     let shown = bench.shown();
     let placed = |slot: usize| {
         let part = &shown[slot];
@@ -428,7 +440,8 @@ fn draw_bench(
                 },
                 Shape::built(&placed),
             ))
-            .observe(point_at_part)
+            .observe(point_at_part::<PointerMove>)
+            .observe(point_at_part::<PointerOver>)
             .observe(point_away)
             .observe(part_clicked);
     }
@@ -439,7 +452,7 @@ fn draw_bench(
 fn surface_under(
     part: &BenchPart,
     transform: &GlobalTransform,
-    hit: &bevy::picking::backend::HitData,
+    hit: &HitData,
 ) -> Option<(Surface, Vec3)> {
     let (point, normal) = (hit.position?, hit.normal?);
     let inverse = transform.affine().inverse();
@@ -448,31 +461,46 @@ fn surface_under(
     Some((surface, local))
 }
 
-fn point_at_part(
-    moved: On<PointerMove>,
-    parts: Query<(&BenchPart, &GlobalTransform)>,
-    mut pointing: ResMut<Pointing>,
-) {
-    let Ok((part, transform)) = parts.get(moved.entity) else {
-        return;
-    };
-    let spot = surface_under(part, transform, &moved.hit).map(|(surface, _)| Spot {
-        group: part.group,
-        member: part.member,
-        surface,
-    });
-    if pointing.0 != spot {
-        pointing.0 = spot;
+/// A pointer event that says where it hit.
+trait Hits {
+    fn hit(&self) -> &HitData;
+}
+
+impl Hits for PointerMove {
+    fn hit(&self) -> &HitData {
+        &self.hit
     }
 }
 
-fn point_away(out: On<PointerOut>, parts: Query<&BenchPart>, mut pointing: ResMut<Pointing>) {
-    if let Ok(part) = parts.get(out.entity)
-        && pointing
-            .0
-            .is_some_and(|spot| spot.group == part.group && spot.member == part.member)
-    {
-        pointing.0 = None;
+impl Hits for PointerOver {
+    fn hit(&self) -> &HitData {
+        &self.hit
+    }
+}
+
+/// Notes the part under the pointer and the surface of it, as the pointer moves over it or
+/// it moves under the pointer.
+fn point_at_part<E: EntityEvent + Hits>(
+    event: On<E>,
+    parts: Query<(&BenchPart, &GlobalTransform)>,
+    mut pointing: ResMut<Pointing>,
+) {
+    let entity = event.event_target();
+    let Ok((part, transform)) = parts.get(entity) else {
+        return;
+    };
+    let surface = surface_under(part, transform, event.hit()).map(|(surface, _)| surface);
+    if pointing.part != Some(entity) || pointing.surface != surface {
+        *pointing = Pointing {
+            part: Some(entity),
+            surface,
+        };
+    }
+}
+
+fn point_away(out: On<PointerOut>, mut pointing: ResMut<Pointing>) {
+    if pointing.part == Some(out.entity) {
+        *pointing = Pointing::default();
     }
 }
 
@@ -524,7 +552,7 @@ fn mark_surfaces(
     bench: Res<BenchStation>,
     hand: Res<Hand>,
     view: Res<ShopView>,
-    parts: Query<(&BenchPart, &Transform), Without<Mark>>,
+    parts: Query<(Entity, &BenchPart, &Transform), Without<Mark>>,
     mut marks: Query<(
         &Mark,
         &Mesh3d,
@@ -537,7 +565,14 @@ fn mark_surfaces(
     for (mark, mesh, mut transform, mut visibility, mut shape) in &mut marks {
         let spot = match mark {
             Mark::Pointed => pointing
-                .0
+                .part
+                .and_then(|entity| parts.get(entity).ok())
+                .zip(pointing.surface)
+                .map(|((_, part, _), surface)| Spot {
+                    group: part.group,
+                    member: part.member,
+                    surface,
+                })
                 .filter(|_| hand.0.is_none() && *view == ShopView::Bench)
                 .filter(|&spot| Some(spot) != bench.picked),
             Mark::Picked => bench.picked,
@@ -545,8 +580,8 @@ fn mark_surfaces(
         let found = spot.and_then(|spot| {
             parts
                 .iter()
-                .find(|(part, _)| part.group == spot.group && part.member == spot.member)
-                .map(|(part, placed)| (spot.surface, part, placed))
+                .find(|(_, part, _)| part.group == spot.group && part.member == spot.member)
+                .map(|(_, part, placed)| (spot.surface, part, placed))
         });
         let Some((surface, part, placed)) = found else {
             if *visibility != Visibility::Hidden {
@@ -585,13 +620,19 @@ fn sheet(polygons: &[Vec<[woodsim::Length; 3]>]) -> Mesh {
         if points.len() < 3 {
             continue;
         }
-        // The outline goes counterclockwise seen from outside, so this faces out.
+        // The outline goes counterclockwise seen from outside, so this faces out, and the
+        // inside is to the left of each edge.
         let normal = (points[1] - points[0])
             .cross(points[2] - points[0])
             .normalize_or_zero();
+        let n = points.len();
         let first = positions.len() as u32;
-        for point in &points {
-            positions.push((*point + normal * SHEET_LIFT).to_array());
+        for (i, &point) in points.iter().enumerate() {
+            let inward = |edge: Vec3| normal.cross(edge).normalize_or_zero();
+            let before = inward(point - points[(i + n - 1) % n]);
+            let after = inward(points[(i + 1) % n] - point);
+            let inset = (before + after) * SHEET_INSET / (1.0 + before.dot(after)).max(0.1);
+            positions.push((point + inset + normal * SHEET_LIFT).to_array());
             normals.push(normal.to_array());
         }
         for k in 1..points.len() as u32 - 1 {
@@ -658,6 +699,10 @@ mod tests {
         assert_eq!(positions.len(), 4);
         for position in positions {
             assert!((position[1] - inches(0.75) - SHEET_LIFT).abs() < 1e-6);
+            // In from every edge: across the width (x) and along the length (z).
+            let inside = |at: f32, size: f32| (at.min(size - at) - SHEET_INSET).abs() < 1e-6;
+            assert!(inside(position[0], inches(4.0)), "{position:?}");
+            assert!(inside(position[2], inches(24.0)), "{position:?}");
         }
     }
 }

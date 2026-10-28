@@ -426,17 +426,17 @@ impl BenchStation {
         self.keep_slide_within_stops();
     }
 
-    /// Turns the picked part where it lies, about the bench's axes as an assembly's are set up
-    /// (`x` along the bench, `z` up), keeping it where it is on the top.
-    pub fn turn_picked(&mut self, rotation: Rotation) {
-        let Some(picked) = self.picked else {
+    /// Turns group `index` where it lies, about the bench's axes as an assembly's are set up
+    /// (`x` along the bench, `z` up), keeping it where it is on the top: to bring a surface
+    /// that faces away around into view.
+    pub fn turn_group(&mut self, index: usize, rotation: Rotation) {
+        let Some(group) = self.groups.get_mut(index) else {
             return;
         };
-        let group = &mut self.groups[picked.group];
         let middle = group.footprint().center();
         group.turn = group.turn.then(rotation);
         group.center_on(middle);
-        self.make_room(picked.group);
+        self.make_room(index);
     }
 
     /// Lets go of the joint being lined up, or else of the picked surface.
@@ -581,7 +581,8 @@ impl BenchStation {
                 .map(|index| describe_fit(&self.groups[index].assembly, 0))
                 .unwrap_or_default();
             return format!(
-                "Click the surface of a part to move it: an end, an edge, or a face.{fit}"
+                "Click the surface of a part to move it: an end, an edge, or a face. Q/E turn \
+                 the part under the pointer to bring a side facing away around.{fit}"
             );
         };
         let mine = name(picked.surface);
@@ -591,15 +592,28 @@ impl BenchStation {
             } else {
                 ""
             };
-            return format!("Moving its {mine}. Click the surface it goes against.{take}");
+            return format!(
+                "Moving its {mine}. Click the surface it goes against; if it faces away, Q/E \
+                 turn the part under the pointer.{take}"
+            );
         };
         let theirs = name(lining_up.onto.surface);
         let lined_up = self.stops().map_or(String::new(), |stops| {
             describe_slide(lining_up.mating.slide, stops)
         });
         let first = self.groups[lining_up.onto.group].assembly.members().len();
+        // Two halves of one miter cut, both face up, go back together into the board they
+        // were cut from; flipping one over makes the corner.
+        let members = preview.assembly.members();
+        let [a, b] = [lining_up.onto.member, first + picked.member].map(|k| members[k].axes()[0]);
+        let in_line = (a[0] * b[0] + a[1] * b[1] + a[2] * b[2]).abs() > 0.999;
+        let flip = if in_line && mine == "mitered end" && theirs == "mitered end" {
+            " They run on in a straight line; F flips it over to make a corner."
+        } else {
+            ""
+        };
         format!(
-            "Its {mine} against the {theirs}{lined_up}. Enter fastens it with {}.{}",
+            "Its {mine} against the {theirs}{lined_up}.{flip} Enter fastens it with {}.{}",
             fastened(self.fastener),
             describe_fit(&preview.assembly, first)
         )
@@ -731,6 +745,7 @@ pub fn name(surface: Surface) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use bevy::mesh::{Indices, VertexAttributeValues};
     use woodsim::{Angle, Length, MiterSaw, Orientation, Pass, surfaces};
 
     use super::*;
@@ -867,11 +882,7 @@ mod tests {
         assert!(bench.glue());
         assert_eq!(bench.groups.len(), 1);
         assert_eq!(bench.groups[0].assembly.members().len(), 2);
-        assert_eq!(
-            bench.status(None),
-            "Click the surface of a part to move it: an end, an edge, or a face. Every joint is \
-             tight."
-        );
+        assert!(bench.status(None).ends_with("Every joint is tight."));
     }
 
     #[test]
@@ -966,11 +977,10 @@ mod tests {
     }
 
     #[test]
-    fn a_picked_part_turns_and_flips_where_it_lies() {
+    fn a_part_turns_and_flips_where_it_lies() {
         let mut bench = bench_with(&[plain()]);
-        click(&mut bench, spot(0, 0, Surface::Top));
         let middle = bench.groups[0].footprint().center();
-        bench.turn_picked(Rotation::quarter_turns(2, 1));
+        bench.turn_group(0, Rotation::quarter_turns(2, 1));
         let (rotation, _) = bench.groups[0].pose(0);
         // Its length now runs away from the operator, and it's still where it was.
         assert!((rotation * Vec3::Z).abs_diff_eq(Vec3::NEG_Z, 1e-6));
@@ -980,7 +990,7 @@ mod tests {
                 .center()
                 .abs_diff_eq(middle, 1e-6)
         );
-        bench.turn_picked(Rotation::quarter_turns(0, 2));
+        bench.turn_group(0, Rotation::quarter_turns(0, 2));
         let (rotation, corner) = bench.groups[0].pose(0);
         assert!((rotation * Vec3::Y).abs_diff_eq(Vec3::NEG_Y, 1e-6));
         // Upside down, its corner is on top: its thickness above the bench.
@@ -1007,6 +1017,100 @@ mod tests {
         let fit = bench.groups[0].assembly.fit();
         assert_eq!(fit.len(), 4);
         assert!(fit.iter().all(Contact::is_tight));
+    }
+
+    #[test]
+    fn every_surface_of_both_halves_of_a_miter_cut_can_be_found_on_its_mesh() {
+        let board = Board::new(
+            Length::from_inches(24),
+            Length::from_inch_fraction(7, 2),
+            Length::from_inch_fraction(3, 4),
+        );
+        for degrees in [45, -45] {
+            let saw = MiterSaw {
+                miter: Angle::from_degrees(degrees),
+                ..MiterSaw::twelve_inch()
+            };
+            let Ok(Pass::Cut(cut)) =
+                saw.crosscut(&board, Orientation::default(), Length::from_inches(12))
+            else {
+                panic!("expected the board cut in two");
+            };
+            for half in [cut.piece.board, cut.offcut.unwrap().board] {
+                let mesh = crate::meshes::lumber_mesh(&half, Vec3::ZERO);
+                let (Some(VertexAttributeValues::Float32x3(positions)), Some(normals)) = (
+                    mesh.attribute(Mesh::ATTRIBUTE_POSITION),
+                    mesh.attribute(Mesh::ATTRIBUTE_NORMAL),
+                ) else {
+                    panic!("expected positions and normals");
+                };
+                let VertexAttributeValues::Float32x3(normals) = normals else {
+                    panic!("expected normals");
+                };
+                let Some(Indices::U32(indices)) = mesh.indices() else {
+                    panic!("expected indices");
+                };
+                let mut found = Vec::new();
+                for triangle in indices.chunks(3) {
+                    let middle = triangle
+                        .iter()
+                        .map(|&i| Vec3::from(positions[i as usize]))
+                        .sum::<Vec3>()
+                        / 3.0;
+                    let normal = Vec3::from(normals[triangle[0] as usize]);
+                    let surface = surface_at(&half, middle, normal);
+                    assert!(surface.is_some(), "nothing at {middle} facing {normal}");
+                    found.extend(surface);
+                }
+                for surface in surfaces(&half) {
+                    assert!(found.contains(&surface), "{surface:?} at {degrees}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn two_halves_of_one_miter_cut_make_a_corner_once_one_is_flipped() {
+        let saw = MiterSaw {
+            miter: Angle::from_degrees(45),
+            ..MiterSaw::twelve_inch()
+        };
+        let Ok(Pass::Cut(cut)) = saw.crosscut(&plain(), Orientation::default(), inches_of(12))
+        else {
+            panic!("expected the board cut in two");
+        };
+        let (piece, offcut) = (cut.piece.board, cut.offcut.unwrap().board);
+        let slanted = |board: &Board| {
+            surfaces(board)
+                .into_iter()
+                .find(|surface| {
+                    matches!(surface, Surface::Side(edge) if edge.out.l != 0 && edge.out.w != 0)
+                })
+                .unwrap()
+        };
+        let mut bench = bench_with(&[piece.clone(), offcut.clone()]);
+        click(&mut bench, spot(1, 0, slanted(&offcut)));
+        click(&mut bench, spot(0, 0, slanted(&piece)));
+        assert!(
+            bench
+                .status(None)
+                .contains("F flips it over to make a corner.")
+        );
+        bench.turn_around_joint(2);
+        let status = bench.status(None);
+        assert!(!status.contains("F flips"), "{status}");
+        assert!(status.ends_with("Every joint is tight."), "{status}");
+        let shown = bench.shown();
+        assert!(
+            (shown[0].rotation * Vec3::Z)
+                .dot(shown[1].rotation * Vec3::Z)
+                .abs()
+                < 1e-6
+        );
+    }
+
+    fn inches_of(n: i64) -> Length {
+        Length::from_inches(n)
     }
 
     #[test]
