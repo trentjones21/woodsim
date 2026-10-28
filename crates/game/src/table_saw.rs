@@ -627,7 +627,7 @@ fn board_clicked(
         return;
     };
     let handled = if stations.hand.0.is_some() {
-        stations.set_down(ShopView::TableSaw)
+        stations.set_down(ShopView::TableSaw, None)
     } else {
         stations.hand.0 = stations.table_saw.take(*part);
         stations.hand.0.is_some()

@@ -1,12 +1,12 @@
-//! Putting parts together: a picture frame of four mitered pieces that closes, or doesn't, and a
-//! butt joint.
+//! Putting parts together: a picture frame of four mitered pieces that closes, or doesn't, two
+//! halves of a frame put together, a butt joint, and boards edge to edge.
 
 mod common;
 
 use common::CutApart;
 
 use woodsim::{
-    Angle, Assembly, Board, Corner, Fastener, Length, MiterSaw, Orientation, Surface, surfaces,
+    Angle, Assembly, Board, Fastener, Length, Mating, MiterSaw, Orientation, Surface, surfaces,
 };
 
 fn inches(n: i64) -> Length {
@@ -58,6 +58,53 @@ fn miter(board: &Board, far_end: bool) -> Surface {
         .expect("a mitered end")
 }
 
+/// The end of a square-cut board at its `l = length` end.
+fn far_end(board: &Board) -> Surface {
+    surfaces(board)
+        .into_iter()
+        .find(|surface| matches!(surface, Surface::Side(edge) if edge.out.l > 0))
+        .unwrap()
+}
+
+/// The way `other`'s `surface` goes against `onto` that keeps it face up, flush at the least
+/// sides.
+fn face_up(
+    assembly: &Assembly,
+    onto: (usize, Surface),
+    other: &Assembly,
+    surface: (usize, Surface),
+) -> Mating {
+    lying(assembly, onto, other, surface, 1.0)
+}
+
+/// The way `other`'s `surface` goes against `onto` that leaves its top facing `up` (1 for up,
+/// -1 for down), flush at the least sides.
+fn lying(
+    assembly: &Assembly,
+    onto: (usize, Surface),
+    other: &Assembly,
+    surface: (usize, Surface),
+    up: f64,
+) -> Mating {
+    (0..4)
+        .map(|turn| Mating {
+            turn,
+            slide: [Length::ZERO; 2],
+        })
+        .find(|&mating| {
+            let motion = assembly.mating(onto, other, surface, mating).unwrap();
+            motion.rotation.apply([0.0, 0.0, 1.0])[2] * up > 0.999
+        })
+        .expect("a way that lies that way up")
+}
+
+/// Puts `piece`'s `surface` against `onto`, face up and flush.
+fn add(assembly: &mut Assembly, onto: (usize, Surface), piece: &Board, surface: Surface) {
+    let other = Assembly::of(piece.clone());
+    let mating = face_up(assembly, onto, &other, (0, surface));
+    assert!(assembly.attach(onto, &other, (0, surface), mating, Fastener::Glue));
+}
+
 /// Puts the pieces together into a frame, each one's first miter against the last one's
 /// second.
 fn frame(pieces: [Board; 4]) -> Assembly {
@@ -66,10 +113,7 @@ fn frame(pieces: [Board; 4]) -> Assembly {
     for piece in rest {
         let last = assembly.members().len() - 1;
         let onto = (last, miter(&assembly.members()[last].board, true));
-        let member = assembly
-            .place(&piece, miter(&piece, false), onto, 0, Corner(0))
-            .unwrap();
-        assembly.join(member, miter(&piece, false), onto, Fastener::Glue);
+        add(&mut assembly, onto, &piece, miter(&piece, false));
     }
     assembly
 }
@@ -86,6 +130,14 @@ fn closing(assembly: &Assembly) -> (Length, Length) {
     (contact.least, contact.most)
 }
 
+/// The angle between two members' lengths, in degrees.
+fn between(assembly: &Assembly, a: usize, b: usize) -> f64 {
+    let [first, second] = [a, b].map(|k| assembly.members()[k].axes()[0]);
+    (first[0] * second[0] + first[1] * second[1] + first[2] * second[2])
+        .acos()
+        .to_degrees()
+}
+
 #[test]
 fn four_matching_pieces_close_into_a_square() {
     let piece = frame_piece(inches(10), 4500, 4500);
@@ -97,7 +149,7 @@ fn four_matching_pieces_close_into_a_square() {
     // Four joints, all in the frame's plane: each piece is face up like the first.
     assert_eq!(assembly.joints().len(), 3);
     for member in assembly.members() {
-        assert_eq!(member.turn.columns()[2], [0, 0, 1]);
+        assert_eq!(member.axes()[2], [0.0, 0.0, 1.0]);
     }
     // Around a 10" square, the far corners are 10" apart.
     let outside = |member: usize, l: Length| {
@@ -130,76 +182,125 @@ fn a_miter_off_by_a_degree_closes_but_leaves_the_corner_out_of_square() {
     let piece = frame_piece(inches(10), 4500, 4500);
     let off = frame_piece(inches(10), 4500, 4600);
     let mut assembly = Assembly::of(piece.clone());
-    let onto = (0, miter(&piece, true));
-    let (surface, way) = assembly.ways(&off, onto)[0];
-    assert_eq!(surface, miter(&off, false));
-    let member = assembly.place(&off, surface, onto, way, Corner(0)).unwrap();
-    assembly.join(member, surface, onto, Fastener::Brads);
+    add(
+        &mut assembly,
+        (0, miter(&piece, true)),
+        &off,
+        miter(&off, false),
+    );
 
     // Clamped together, the joint closes, the way a real one would, and the corner is 91°
     // (or 89°) instead of square: the error shows up across the frame.
     assert!(assembly.fit().iter().all(|contact| contact.is_tight()));
-    let [first, second] = [0, 1].map(|k| assembly.members()[k].axes()[0]);
-    let between = (first[0] * second[0] + first[1] * second[1])
-        .acos()
-        .to_degrees();
+    let corner = between(&assembly, 0, 1);
     assert!(
-        (between - 91.0).abs() < 1e-4 || (between - 89.0).abs() < 1e-4,
-        "{between}"
+        (corner - 91.0).abs() < 1e-4 || (corner - 89.0).abs() < 1e-4,
+        "{corner}"
     );
 }
 
 #[test]
-fn an_end_butts_against_a_face() {
+fn two_halves_of_a_frame_close_into_a_square() {
+    let piece = frame_piece(inches(10), 4500, 4500);
+    let half = |piece: &Board| {
+        let mut half = Assembly::of(piece.clone());
+        add(
+            &mut half,
+            (0, miter(piece, true)),
+            piece,
+            miter(piece, false),
+        );
+        half
+    };
+    let mut assembly = half(&piece);
+    let other = half(&piece);
+    // The second half's first piece goes against the first half's last.
+    let onto = (1, miter(&piece, true));
+    let surface = (0, miter(&piece, false));
+    let mating = face_up(&assembly, onto, &other, surface);
+    assert!(assembly.attach(onto, &other, surface, mating, Fastener::Glue));
+
+    assert_eq!(assembly.members().len(), 4);
+    // Its own joint comes along, renumbered, and the new one joins the halves.
+    assert_eq!(assembly.joints().len(), 3);
+    assert_eq!(assembly.joints()[1].between[0].0, 2);
+    assert_eq!(assembly.joints()[2].between, [onto, (2, surface.1)]);
+    assert_eq!(closing(&assembly), (Length::ZERO, Length::ZERO));
+    assert!(assembly.fit().iter().all(|contact| contact.is_tight()));
+}
+
+#[test]
+fn an_end_butts_against_a_face_where_it_is_slid() {
     let base = Board::new(inches(12), inches(4), fraction(3, 4));
     let upright = Board::new(inches(6), inches(4), fraction(3, 4));
-    let end = surfaces(&upright)
-        .into_iter()
-        .find(|surface| matches!(surface, Surface::Side(edge) if edge.out.l > 0))
-        .unwrap();
-    let mut assembly = Assembly::of(base.clone());
-    let member = assembly
-        .place(&upright, end, (0, Surface::Top), 0, Corner(0))
-        .unwrap();
-    // Standing on its end on the base's top, flush with the base's corner.
+    let end = far_end(&upright);
+    let assembly = Assembly::of(base.clone());
+    let other = Assembly::of(upright.clone());
+    let onto = (0, Surface::Top);
+
+    // Across the base's top, along its length and its width.
+    let extent = assembly.extent(onto).unwrap();
     assert_eq!(
-        member.point(inches(6), Length::ZERO, Length::ZERO)[2],
-        fraction(3, 4)
+        extent.reach,
+        [(Length::ZERO, inches(12)), (Length::ZERO, inches(4))]
     );
-    assembly.join(member, end, (0, Surface::Top), Fastener::Screws);
-    let contact = assembly.fit()[0];
+    // One way around, the upright's width runs along the base's length; a quarter turn on, its
+    // thickness does. Either way, it can sit flush at one side, centered, or flush at the other.
+    let stops = |turn| assembly.stops(onto, &other, (0, end), turn).unwrap();
+    let along_length = (0..4)
+        .find(|&turn| stops(turn)[0][2] == inches(8))
+        .expect("a way with the width along the length");
+    assert_eq!(
+        stops(along_length),
+        [
+            [Length::ZERO, inches(4), inches(8)],
+            [Length::ZERO, fraction(13, 8), fraction(13, 4)]
+        ]
+    );
+    let across = (along_length + 1) % 4;
+    assert_eq!(stops(across)[0][2], inches(12) - fraction(3, 4));
+
+    // Centered along the length and flush with the far edge.
+    let mating = Mating {
+        turn: along_length,
+        slide: [inches(4), fraction(13, 4)],
+    };
+    let mut glued = assembly.clone();
+    assert!(glued.attach(onto, &other, (0, end), mating, Fastener::Screws));
+    let member = &glued.members()[1];
+    // Standing on its end on the base's top, between 4" and 8" along it.
+    let foot = [Length::ZERO, upright.width()].map(|w| member.point(inches(6), w, Length::ZERO));
+    for corner in foot {
+        assert_eq!(corner[2], fraction(3, 4));
+    }
+    let mut along: Vec<Length> = foot.iter().map(|corner| corner[0]).collect();
+    along.sort();
+    assert_eq!(along, [inches(4), inches(8)]);
+    let contact = glued.fit()[0];
     assert!(contact.is_tight());
     assert_eq!(contact.between, [(0, Surface::Top), (1, end)]);
 }
 
 #[test]
-fn the_last_member_can_come_back_out() {
-    let piece = frame_piece(inches(10), 4500, 4500);
-    let mut assembly = frame([piece.clone(), piece.clone(), piece.clone(), piece]);
-    assert!(assembly.remove_last().is_some());
-    assert_eq!(assembly.members().len(), 3);
-    assert_eq!(assembly.joints().len(), 2);
-}
+fn boards_edge_to_edge_make_a_panel() {
+    let board = Board::new(inches(24), inches(4), fraction(3, 4));
+    let edge = |far: bool| {
+        surfaces(&board)
+            .into_iter()
+            .find(|surface| {
+                matches!(surface, Surface::Side(edge) if edge.out.l == 0 && (edge.out.w > 0) == far)
+            })
+            .unwrap()
+    };
+    let mut panel = Assembly::of(board.clone());
+    add(&mut panel, (0, edge(true)), &board, edge(false));
+    add(&mut panel, (1, edge(true)), &board, edge(false));
 
-#[test]
-fn the_best_way_on_for_a_frame_piece_is_its_matching_miter_face_up() {
-    let piece = frame_piece(inches(10), 4500, 4500);
-    let assembly = Assembly::of(piece.clone());
-    let ways = assembly.ways(&piece, (0, miter(&piece, true)));
-    assert_eq!(ways[0], (miter(&piece, false), 0));
-}
-
-#[test]
-fn the_best_way_on_for_a_board_on_a_board_is_flat() {
-    let board = Board::new(inches(12), inches(4), fraction(3, 4));
-    let assembly = Assembly::of(board.clone());
-    let ways = assembly.ways(&board, (0, Surface::Top));
-    assert_eq!(ways[0].0, Surface::Bottom);
-    // Its ends and edges can go against it too, further down the list.
-    assert!(
-        ways.iter()
-            .any(|(surface, _)| matches!(surface, Surface::Side(_)))
-    );
+    assert!(panel.fit().iter().all(|contact| contact.is_tight()));
+    assert_eq!(panel.fit().len(), 2);
+    // Three 4" boards side by side, ends flush: 12" across.
+    let far = panel.members()[2].point(inches(24), inches(4), Length::ZERO);
+    assert_eq!(far, [inches(24), inches(12), Length::ZERO]);
 }
 
 #[test]
@@ -210,13 +311,22 @@ fn two_fifty_degree_miters_meet_flush_at_eighty_degrees() {
         .cut_apart();
     let (piece, offcut) = (cut.piece.board, cut.offcut.unwrap().board);
     let mut assembly = Assembly::of(piece.clone());
-    let onto = (0, miter(&piece, false));
-    // The best way the offcut goes on makes a corner, not the board it was cut from.
-    let (surface, way) = assembly.ways(&offcut, onto)[0];
-    let member = assembly
-        .place(&offcut, surface, onto, way, Corner(0))
+    let offcut_miter = surfaces(&offcut)
+        .into_iter()
+        .find(
+            |surface| matches!(surface, Surface::Side(edge) if edge.out.l != 0 && edge.out.w != 0),
+        )
         .unwrap();
-    assembly.join(member, surface, onto, Fastener::Glue);
+    let onto = (0, miter(&piece, false));
+    let other = Assembly::of(offcut);
+    // Face up, the offcut's miter against the piece's puts back the board they were cut from.
+    let mut uncut = assembly.clone();
+    let mating = face_up(&uncut, onto, &other, (0, offcut_miter));
+    uncut.attach(onto, &other, (0, offcut_miter), mating, Fastener::Glue);
+    assert!(between(&uncut, 0, 1) < 1e-4);
+    // Flipped over, it makes a corner.
+    let mating = lying(&assembly, onto, &other, (0, offcut_miter), -1.0);
+    assembly.attach(onto, &other, (0, offcut_miter), mating, Fastener::Glue);
 
     assert!(
         assembly.fit().iter().all(|contact| contact.is_tight()),
@@ -224,13 +334,10 @@ fn two_fifty_degree_miters_meet_flush_at_eighty_degrees() {
         assembly.fit()
     );
     // The two lengths are 80° apart (or 100°, the other way around the corner).
-    let [first, second] = [0, 1].map(|k| assembly.members()[k].axes()[0]);
-    let between = (first[0] * second[0] + first[1] * second[1])
-        .acos()
-        .to_degrees();
+    let corner = between(&assembly, 0, 1);
     assert!(
-        (between - 80.0).abs() < 1e-4 || (between - 100.0).abs() < 1e-4,
-        "{between}"
+        (corner - 80.0).abs() < 1e-4 || (corner - 100.0).abs() < 1e-4,
+        "{corner}"
     );
 }
 
@@ -240,11 +347,7 @@ fn eight_pieces_mitered_at_22_and_a_half_degrees_close_into_an_octagon() {
     let mut assembly = Assembly::of(piece.clone());
     for last in 0..7 {
         let onto = (last, miter(&assembly.members()[last].board, true));
-        let (surface, way) = assembly.ways(&piece, onto)[0];
-        let member = assembly
-            .place(&piece, surface, onto, way, Corner(0))
-            .unwrap();
-        assembly.join(member, surface, onto, Fastener::Glue);
+        add(&mut assembly, onto, &piece, miter(&piece, false));
     }
     // The last piece meets the first within a micron.
     assert!(

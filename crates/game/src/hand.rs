@@ -1,6 +1,7 @@
 //! Carrying wood around the shop. Click a piece of wood to pick it up, wherever it is: on a saw,
-//! on the pile, on the workbench, or a new board off the lumber rack. Then click where it goes
-//! to set it down: a saw, the workbench, the pile, or the scrap bin to throw it away.
+//! on the pile, or a new board off the lumber rack; at the workbench, where clicks pick
+//! surfaces to put together, Space picks up a loose part. Then click where it goes to set it
+//! down: a saw, the workbench, the pile, or the scrap bin to throw it away.
 
 use bevy::prelude::*;
 use woodsim::{Board, Length};
@@ -55,11 +56,12 @@ pub fn from_rack(width: Length, thickness: Length) -> Board {
 }
 
 /// Sets the board in hand down at `station`: on a saw, ready to cut, with anything already on
-/// it going on the pile; on the bare workbench, to start putting parts together. Returns false,
-/// still holding it, if there's nothing in hand or it can't go there: on a workbench that has
-/// parts on it already, it goes against one of them instead.
+/// it going on the pile; on the workbench, loose, as near `near` (a point in the shop) as
+/// there's room. Returns false, still holding it, if there's nothing in hand or it can't go
+/// there.
 pub fn set_down(
     station: ShopView,
+    near: Option<Vec3>,
     hand: &mut Hand,
     table_saw: &mut TableSawStation,
     miter_saw: &mut MiterSawStation,
@@ -78,13 +80,10 @@ pub fn set_down(
             miter_saw.load(board);
             true
         }
-        ShopView::Bench => match bench.put(board, None) {
-            Ok(()) => true,
-            Err(board) => {
-                hand.0 = Some(board);
-                false
-            }
-        },
+        ShopView::Bench => {
+            bench.set_down(board, near.map(|point| (point - crate::bench::ORIGIN).xz()));
+            true
+        }
         ShopView::Overview => {
             hand.0 = Some(board);
             false

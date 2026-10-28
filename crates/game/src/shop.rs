@@ -25,7 +25,7 @@ use bevy::{
 use woodsim::{Across, Angle, Board, Cut, Kerf, Length, Orientation, Piece, Run};
 
 use crate::{
-    bench,
+    bench::{self, BenchView},
     chop::MiterSawStation,
     feed::TableSawStation,
     hand::{self, Gesture, Hand, set_down},
@@ -252,7 +252,7 @@ struct HoveredStation {
 }
 
 #[derive(Component)]
-struct ShopCamera;
+pub struct ShopCamera;
 
 #[derive(Component)]
 enum ReadoutLine {
@@ -423,7 +423,7 @@ pub fn station_part(mut entity: EntityCommands, station: ShopView) {
             }
             // Holding a board, a click on a station sets it down there.
             if stations.hand.0.is_some() {
-                stations.set_down(station);
+                stations.set_down(station, click.hit.position);
             }
             if *stations.view != station {
                 *stations.view = station;
@@ -444,10 +444,12 @@ pub struct Stations<'w> {
 }
 
 impl Stations<'_> {
-    /// Sets the board in hand down at `station`, as `hand::set_down` does.
-    pub fn set_down(&mut self, station: ShopView) -> bool {
+    /// Sets the board in hand down at `station`, near `near` if it's somewhere in the shop
+    /// the station has room, as `hand::set_down` does.
+    pub fn set_down(&mut self, station: ShopView, near: Option<Vec3>) -> bool {
         set_down(
             station,
+            near,
             &mut self.hand,
             &mut self.table_saw,
             &mut self.miter_saw,
@@ -525,8 +527,8 @@ fn drag_floor(drag: On<PointerDrag>, view: Res<ShopView>, mut overview: ResMut<O
     overview.pan(along * scale);
 }
 
-/// Where the operator stands at each station (in front, a little to the side, looking down),
-/// and how far away the work they're looking at is.
+/// Where the operator stands at each saw (in front, a little to the side, looking down), and
+/// how far away the work they're looking at is. At the bench, the view turns; see `BenchView`.
 fn station_pose(station: ShopView) -> Option<Transform> {
     let (origin, eye, target) = match station {
         ShopView::Overview => return None,
@@ -540,11 +542,7 @@ fn station_pose(station: ShopView) -> Option<Transform> {
             Vec3::new(0.0, 0.7, 1.2),
             Vec3::new(0.0, 0.12, 0.0),
         ),
-        ShopView::Bench => (
-            bench::ORIGIN,
-            Vec3::new(-0.05, 0.62, 0.68),
-            Vec3::new(-0.05, 0.0, -0.06),
-        ),
+        ShopView::Bench => return None,
     };
     Some(Transform::from_translation(origin + eye).looking_at(origin + target, Vec3::Y))
 }
@@ -553,10 +551,14 @@ fn station_pose(station: ShopView) -> Option<Transform> {
 fn follow_view(
     view: Res<ShopView>,
     overview: Res<OverviewCamera>,
+    bench_view: Res<BenchView>,
     time: Res<Time>,
     mut camera: Single<&mut Transform, With<ShopCamera>>,
 ) {
-    let goal = station_pose(*view).unwrap_or_else(|| overview.pose());
+    let goal = match *view {
+        ShopView::Bench => bench_view.pose(),
+        _ => station_pose(*view).unwrap_or_else(|| overview.pose()),
+    };
     let t = 1.0 - (-6.0 * time.delta_secs()).exp();
     camera.translation = camera.translation.lerp(goal.translation, t);
     camera.rotation = camera.rotation.slerp(goal.rotation, t);

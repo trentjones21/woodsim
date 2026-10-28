@@ -503,7 +503,7 @@ fn saw_part_clicked(
         return;
     };
     let handled = if stations.hand.0.is_some() {
-        stations.set_down(ShopView::MiterSaw)
+        stations.set_down(ShopView::MiterSaw, None)
     } else {
         stations.hand.0 = stations.miter_saw.take(part);
         stations.hand.0.is_some()

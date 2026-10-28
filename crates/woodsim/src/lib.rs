@@ -14,7 +14,10 @@ mod orientation;
 mod saw;
 
 pub use angle::Angle;
-pub use assembly::{Assembly, Contact, Corner, Fastener, Joint, Member, Surface, Turn, surfaces};
+pub use assembly::{
+    Assembly, Contact, Extent, Fastener, Joint, Mating, Member, Motion, Rotation, Surface, outline,
+    surfaces,
+};
 pub use board::{Board, Piece, Run, SlotSize};
 pub use face::{Direction, Edge, Region};
 pub use kerf::{Across, Kerf};

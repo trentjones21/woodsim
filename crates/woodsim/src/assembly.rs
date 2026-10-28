@@ -1,123 +1,86 @@
-//! Putting boards together: each board in an assembly is turned square one of 24 ways and set
-//! with its corner at an exact point, and boards go together surface to surface: an end
-//! against a face, a miter against a miter. Where surfaces meet or nearly do, the assembly
-//! measures how well: tight, open, or running into each other.
+//! Putting boards together. Each board in an assembly is turned and set with its corner at an
+//! exact point. Two assemblies go together surface to surface, as the player chooses: which
+//! surface of each, which of the four ways around the joint one faces the other, and where
+//! across the joint it sits. Where surfaces meet or nearly do, the assembly measures how well:
+//! tight, open, or running into each other.
 
 use crate::{Board, Length, face::Edge};
 
-/// A point or a direction in an assembly, along its `x`, `y`, and `z`.
-pub type Vector = [i128; 3];
-
-/// One of the 24 ways to turn a board square without mirroring it: each of the board's axes
-/// (`l`, `w`, `t`) onto one of the assembly's, one way or the other.
+/// A turn in space, as where it turns each of three axes: whole numbers over 2^40, so quarter
+/// turns are exact and any other turn is within a trillionth of a radian.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct Turn {
-    /// Where each of the board's axes points in the assembly: `columns[0]` for `l`, `[1]` for
-    /// `w`, `[2]` for `t`.
-    columns: [[i8; 3]; 3],
+pub struct Rotation {
+    columns: [[i64; 3]; 3],
 }
 
-impl Turn {
-    /// Not turned: `l`, `w`, and `t` along `x`, `y`, and `z`.
-    pub const NONE: Turn = Turn {
-        columns: [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+const ROTATION_UNIT: f64 = (1u64 << 40) as f64;
+
+impl Rotation {
+    pub const NONE: Rotation = Rotation {
+        columns: [[1 << 40, 0, 0], [0, 1 << 40, 0], [0, 0, 1 << 40]],
     };
 
-    /// All 24 turns.
-    pub fn all() -> impl Iterator<Item = Turn> {
-        let axes = [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
-        let signed = move |axis: usize, sign: i8| axes[axis].map(|v: i8| v * sign);
-        (0..3)
-            .flat_map(move |l| (0..3).filter(move |&w| w != l).map(move |w| (l, w)))
-            .flat_map(move |(l, w)| {
-                [1, -1].into_iter().flat_map(move |sl| {
-                    [1, -1].into_iter().map(move |sw| {
-                        let (l, w) = (signed(l, sl), signed(w, sw));
-                        // The thickness is square to both, the way that doesn't mirror.
-                        let t = [
-                            l[1] * w[2] - l[2] * w[1],
-                            l[2] * w[0] - l[0] * w[2],
-                            l[0] * w[1] - l[1] * w[0],
-                        ];
-                        Turn { columns: [l, w, t] }
-                    })
-                })
-            })
-    }
-
-    /// Where each of the board's axes points in the assembly: `l`, `w`, and `t`.
-    pub fn columns(self) -> [[i8; 3]; 3] {
-        self.columns
-    }
-
-    /// `v`, in the board's own axes, in the assembly's.
-    fn apply_f64(self, v: [f64; 3]) -> [f64; 3] {
-        let mut out = [0.0; 3];
-        for (axis, column) in self.columns.iter().enumerate() {
-            for (row, &entry) in column.iter().enumerate() {
-                out[row] += f64::from(entry) * v[axis];
-            }
+    /// The rotation that turns `x`, `y`, and `z` to `columns`, three directions of unit length,
+    /// square to each other, and not mirrored.
+    fn from_columns(columns: [[f64; 3]; 3]) -> Rotation {
+        Rotation {
+            columns: columns.map(|column| column.map(|v| (v * ROTATION_UNIT).round() as i64)),
         }
-        out
     }
 
-    /// `v`, in the board's own axes, in the assembly's.
-    pub fn apply(self, v: Vector) -> Vector {
-        let mut out = [0; 3];
-        for (axis, column) in self.columns.iter().enumerate() {
-            for (row, &entry) in column.iter().enumerate() {
-                out[row] += entry as i128 * v[axis];
-            }
-        }
-        out
-    }
-}
-
-/// A turn about the assembly's `z`, its up, for setting a part at an angle no square turn
-/// reaches: two 50° miters meet at 80°, and an octagon's sides at 135°. Its cosine and sine, as
-/// whole numbers over 2^30, within a billionth of a radian of the angle; quarter turns are
-/// exact.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct Spin {
-    cos: i64,
-    sin: i64,
-}
-
-const SPIN_UNIT: i64 = 1 << 30;
-
-impl Spin {
-    pub const NONE: Spin = Spin {
-        cos: SPIN_UNIT,
-        sin: 0,
-    };
-
-    /// The spin that turns the direction `from` to point along `to`, both across the
-    /// assembly's `x` and `y`.
-    fn between(from: [f64; 2], to: [f64; 2]) -> Spin {
-        let angle = to[1].atan2(to[0]) - from[1].atan2(from[0]);
-        let (sin, cos) = angle.sin_cos();
-        // Quarter turns come out of the arithmetic a hair off; make them exact.
-        let snap = |v: f64| {
-            let whole = v.round();
-            if (v - whole).abs() < 1e-12 { whole } else { v }
+    /// `turns` quarter turns about `x`, `y`, or `z` (`axis` 0, 1, or 2), counterclockwise
+    /// looking back down it.
+    pub fn quarter_turns(axis: usize, turns: i32) -> Rotation {
+        let (cos, sin) = match turns.rem_euclid(4) {
+            0 => (1, 0),
+            1 => (0, 1),
+            2 => (-1, 0),
+            _ => (0, -1),
         };
-        Spin {
-            cos: (snap(cos) * SPIN_UNIT as f64).round() as i64,
-            sin: (snap(sin) * SPIN_UNIT as f64).round() as i64,
+        let (a, b) = ((axis + 1) % 3, (axis + 2) % 3);
+        let mut columns = [[0i64; 3]; 3];
+        columns[axis][axis] = 1;
+        columns[a][a] = cos;
+        columns[a][b] = sin;
+        columns[b][a] = -sin;
+        columns[b][b] = cos;
+        Rotation {
+            columns: columns.map(|column| column.map(|v| v << 40)),
         }
     }
 
-    /// The angle it turns, counterclockwise seen from above, in radians.
-    pub fn radians(self) -> f64 {
-        (self.sin as f64).atan2(self.cos as f64)
+    /// Where it turns `x`, `y`, and `z`.
+    pub fn columns(self) -> [[f64; 3]; 3] {
+        self.columns
+            .map(|column| column.map(|v| v as f64 / ROTATION_UNIT))
     }
 
-    fn rotate(self, v: [f64; 3]) -> [f64; 3] {
-        let (cos, sin) = (
-            self.cos as f64 / SPIN_UNIT as f64,
-            self.sin as f64 / SPIN_UNIT as f64,
-        );
-        [v[0] * cos - v[1] * sin, v[0] * sin + v[1] * cos, v[2]]
+    /// `v`, turned.
+    pub fn apply(self, v: [f64; 3]) -> [f64; 3] {
+        let columns = self.columns();
+        [0, 1, 2].map(|row| (0..3).map(|k| columns[k][row] * v[k]).sum())
+    }
+
+    /// This turn, then `next`.
+    pub fn then(self, next: Rotation) -> Rotation {
+        Rotation::from_columns(self.columns().map(|column| next.apply(column)))
+    }
+
+    /// The turn that undoes this one.
+    pub fn inverse(self) -> Rotation {
+        let c = self.columns;
+        Rotation {
+            columns: [0, 1, 2].map(|i| [0, 1, 2].map(|j| c[j][i])),
+        }
+    }
+
+    /// How far it turns, about whatever axis it turns about, in degrees.
+    pub fn degrees(self) -> f64 {
+        let c = self.columns();
+        ((c[0][0] + c[1][1] + c[2][2] - 1.0) / 2.0)
+            .clamp(-1.0, 1.0)
+            .acos()
+            .to_degrees()
     }
 }
 
@@ -139,13 +102,12 @@ pub enum Surface {
     Side(Edge),
 }
 
-/// A board in an assembly: turned square, then spun about the assembly's up, then set with its
-/// corner (`l = w = t = 0`) at `at`, to the nanometer.
+/// A board in an assembly: turned (`rotation` takes its `l`, `w`, and `t` to the assembly's
+/// axes), then set with its corner (`l = w = t = 0`) at `at`, to the nanometer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Member {
     pub board: Board,
-    pub turn: Turn,
-    pub spin: Spin,
+    pub rotation: Rotation,
     pub at: [Length; 3],
 }
 
@@ -173,6 +135,31 @@ impl Contact {
     }
 }
 
+/// How one assembly goes against another, once a surface of each is chosen: `turn` is which of
+/// the four ways around the joint, a quarter turn apart, it faces the other, and `slide` is how
+/// far across the joint it sits, along each of the directions `Assembly::extent` gives, from
+/// where the two surfaces' least sides line up.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Mating {
+    pub turn: u8,
+    pub slide: [Length; 2],
+}
+
+/// A move of a whole assembly: turned about its origin, then shifted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Motion {
+    pub rotation: Rotation,
+    pub shift: [Length; 3],
+}
+
+/// A surface's two directions across it, which a `Mating` slides along, in its assembly's axes,
+/// and how far the surface reaches along each: least and most.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Extent {
+    pub directions: [[f64; 3]; 2],
+    pub reach: [(Length, Length); 2],
+}
+
 /// Surfaces this far apart, or this far into each other, still count as meeting.
 const NEAR: Length = Length::from_inch_fraction(1, 8);
 /// Surfaces turned more than this from facing each other don't meet.
@@ -185,19 +172,13 @@ pub struct Assembly {
     joints: Vec<Joint>,
 }
 
-/// One of the four corners of a surface to line another up against, around it from where both
-/// of its directions are least.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub struct Corner(pub u8);
-
 impl Assembly {
     /// An assembly of one board, as it is.
     pub fn of(board: Board) -> Assembly {
         Assembly {
             members: vec![Member {
                 board,
-                turn: Turn::NONE,
-                spin: Spin::NONE,
+                rotation: Rotation::NONE,
                 at: [Length::ZERO; 3],
             }],
             joints: Vec::new(),
@@ -212,148 +193,140 @@ impl Assembly {
         &self.joints
     }
 
-    /// Where `board` goes to put its `surface` against `onto`, a member's surface: turned the
-    /// `way`th of the ways the two can face each other (`ways_to_face`), then slid flush
-    /// against it with their `corner`s lined up. If the surfaces aren't quite parallel, it
-    /// touches at one point and opens from there. `None` if the surfaces can't face each other.
-    pub fn place(
-        &self,
-        board: &Board,
-        surface: Surface,
-        onto: (usize, Surface),
-        way: usize,
-        corner: Corner,
-    ) -> Option<Member> {
-        let target = self.members.get(onto.0)?;
-        let theirs = target.patch(onto.1)?;
-        let mine = patch(board, surface)?;
-        let ways = ways_to_face(&mine, &theirs);
-        let &(turn, spin) = ways.get(way % ways.len().max(1))?;
-
-        let corners: Vec<[f64; 3]> = mine
-            .corners
-            .iter()
-            .map(|&p| spin.rotate(turn.apply_f64(p)))
-            .collect();
-        let normal = unit(theirs.normal);
-        let (u, v) = target.in_plane(normal, onto.1);
-        let pick = |points: &[[f64; 3]], along: [f64; 3], high: bool| {
-            let values = points.iter().map(|&p| dot(along, p));
-            if high {
-                values.fold(f64::MIN, f64::max)
-            } else {
-                values.fold(f64::MAX, f64::min)
-            }
-        };
-        let (high_u, high_v) = match corner.0 % 4 {
-            0 => (false, false),
-            1 => (true, false),
-            2 => (true, true),
-            _ => (false, true),
-        };
-        // Along the target's normal, up to where the nearest point touches; across it, the
-        // chosen corners together.
-        let plane = dot(normal, theirs.corners[0]);
-        let shift = [
-            (normal, plane - pick(&corners, normal, false)),
-            (
-                u,
-                pick(&theirs.corners, u, high_u) - pick(&corners, u, high_u),
-            ),
-            (
-                v,
-                pick(&theirs.corners, v, high_v) - pick(&corners, v, high_v),
-            ),
-        ];
-        let mut offset = [0.0f64; 3];
-        for (direction, amount) in shift {
-            for k in 0..3 {
-                offset[k] += amount * direction[k];
-            }
+    /// The assembly, moved as a whole.
+    pub fn moved(&self, motion: Motion) -> Assembly {
+        let shift = motion.shift.map(|length| length.as_nm() as f64);
+        Assembly {
+            members: self
+                .members
+                .iter()
+                .map(|member| {
+                    let at = motion
+                        .rotation
+                        .apply(member.at.map(|length| length.as_nm() as f64));
+                    Member {
+                        board: member.board.clone(),
+                        rotation: member.rotation.then(motion.rotation),
+                        at: [0, 1, 2].map(|k| Length::from_nm((at[k] + shift[k]).round() as i64)),
+                    }
+                })
+                .collect(),
+            joints: self.joints.clone(),
         }
-        Some(Member {
-            board: board.clone(),
-            turn,
-            spin,
-            at: offset.map(|nm| Length::from_nm(nm.round() as i64)),
+    }
+
+    /// The directions across `onto`, a member's surface, that a `Mating` slides along, and how
+    /// far the surface reaches along them.
+    pub fn extent(&self, onto: (usize, Surface)) -> Option<Extent> {
+        let patch = self.members.get(onto.0)?.patch(onto.1)?;
+        let reach = [patch.u, patch.v].map(|along| {
+            let (least, most) = span(&patch.corners, along);
+            (nm(least), nm(most))
+        });
+        Some(Extent {
+            directions: [patch.u, patch.v],
+            reach,
         })
     }
 
-    /// The ways `board` can go against `onto`, a member's surface, best first: which of its
-    /// surfaces, and which way that surface turns to face (as `place` counts them). Best is
-    /// facing most nearly, then the same kind of surface (a miter against a miter, a face
-    /// against a face), then making a corner rather than running on in a line, then keeping the
-    /// board face up like the member, then the surface most nearly the same size: a frame
-    /// piece's miter against the next one's, a board's bottom flat on another's top.
-    pub fn ways(&self, board: &Board, onto: (usize, Surface)) -> Vec<(Surface, usize)> {
-        let Some(target) = self.members.get(onto.0) else {
-            return Vec::new();
+    /// How `other` moves to put its member's `surface` against `onto`, one of this assembly's,
+    /// as `mating` says. `None` if either surface isn't there.
+    pub fn mating(
+        &self,
+        onto: (usize, Surface),
+        other: &Assembly,
+        surface: (usize, Surface),
+        mating: Mating,
+    ) -> Option<Motion> {
+        let theirs = self.members.get(onto.0)?.patch(onto.1)?;
+        let mine = other.members.get(surface.0)?.patch(surface.1)?;
+        let rotation = facing(&mine, &theirs, mating.turn);
+        let turned: Vec<[f64; 3]> = mine.corners.iter().map(|&p| rotation.apply(p)).collect();
+        // Along their normal, flush with their surface; across it, our least sides on theirs,
+        // then slid.
+        let mean = |points: &[[f64; 3]], along: [f64; 3]| {
+            points.iter().map(|&p| dot(p, along)).sum::<f64>() / points.len() as f64
         };
-        let Some(theirs) = target.patch(onto.1) else {
-            return Vec::new();
-        };
-        let up = target.rotate([0.0, 0.0, 1.0]);
-        let length = target.rotate([1.0, 0.0, 0.0]);
-        let their_size = size(&theirs, target.in_plane(unit(theirs.normal), onto.1));
-        let mut ways: Vec<(Rank, Surface, usize)> = Vec::new();
-        for surface in surfaces(board) {
-            let Some(mine) = patch(board, surface) else {
-                continue;
-            };
-            let mine_axes = Member {
-                board: board.clone(),
-                turn: Turn::NONE,
-                spin: Spin::NONE,
-                at: [Length::ZERO; 3],
-            };
-            let my_size = size(&mine, mine_axes.in_plane(unit(mine.normal), surface));
-            let alike = (their_size.min(my_size) / their_size.max(my_size) * 1e6).round() as i64;
-            for (way, (turn, spin)) in ways_to_face(&mine, &theirs).into_iter().enumerate() {
-                let turned = |v: [f64; 3]| spin.rotate(turn.apply_f64(v));
-                let how = facing(turned(mine.normal), theirs.normal);
-                let in_line = dot(turned([1.0, 0.0, 0.0]), length).abs() > 0.999;
-                let upside_down = dot(turned([0.0, 0.0, 1.0]), up) < 0.999;
-                let rank = (
-                    -(how * 1e9).round() as i64,
-                    kind(surface) != kind(onto.1),
-                    in_line,
-                    upside_down,
-                    -alike,
-                );
-                ways.push((rank, surface, way));
+        let shifts = [
+            (
+                theirs.normal,
+                mean(&theirs.corners, theirs.normal) - mean(&turned, theirs.normal),
+            ),
+            (
+                theirs.u,
+                span(&theirs.corners, theirs.u).0 + mating.slide[0].as_nm() as f64
+                    - span(&turned, theirs.u).0,
+            ),
+            (
+                theirs.v,
+                span(&theirs.corners, theirs.v).0 + mating.slide[1].as_nm() as f64
+                    - span(&turned, theirs.v).0,
+            ),
+        ];
+        let mut shift = [0.0f64; 3];
+        for (direction, amount) in shifts {
+            for k in 0..3 {
+                shift[k] += amount * direction[k];
             }
         }
-        ways.sort_by_key(|(rank, ..)| *rank);
-        ways.into_iter()
-            .map(|(_, surface, way)| (surface, way))
-            .collect()
+        Some(Motion {
+            rotation,
+            shift: shift.map(nm),
+        })
     }
 
-    /// Adds `member`, put against another's surface as `place` worked out, held by
-    /// `fastener`.
-    pub fn join(
-        &mut self,
-        member: Member,
-        surface: Surface,
+    /// Where `other`'s `surface` can sit across `onto` facing it the `turn`th way, along each
+    /// of the joint's two directions, as a `Mating`'s slide: flush with `onto`'s least side,
+    /// centered on it, and flush with its most side.
+    pub fn stops(
+        &self,
         onto: (usize, Surface),
+        other: &Assembly,
+        surface: (usize, Surface),
+        turn: u8,
+    ) -> Option<[[Length; 3]; 2]> {
+        let theirs = self.members.get(onto.0)?.patch(onto.1)?;
+        let mine = other.members.get(surface.0)?.patch(surface.1)?;
+        let rotation = facing(&mine, &theirs, turn);
+        let turned: Vec<[f64; 3]> = mine.corners.iter().map(|&p| rotation.apply(p)).collect();
+        Some([theirs.u, theirs.v].map(|along| {
+            let (least, most) = span(&theirs.corners, along);
+            let (low, high) = span(&turned, along);
+            let room = (most - least) - (high - low);
+            [0.0, room / 2.0, room].map(nm)
+        }))
+    }
+
+    /// Adds `other`, moved where `mating` puts it, with its member's `surface` against `onto`,
+    /// held by `fastener`. Its members follow this assembly's, in the same order. Returns false,
+    /// leaving the assembly as it was, if either surface isn't there.
+    pub fn attach(
+        &mut self,
+        onto: (usize, Surface),
+        other: &Assembly,
+        surface: (usize, Surface),
+        mating: Mating,
         fastener: Fastener,
-    ) {
-        self.members.push(member);
+    ) -> bool {
+        let Some(motion) = self.mating(onto, other, surface, mating) else {
+            return false;
+        };
+        let moved = other.moved(motion);
+        let first = self.members.len();
+        self.members.extend(moved.members);
+        self.joints.extend(moved.joints.iter().map(|joint| {
+            Joint {
+                between: joint
+                    .between
+                    .map(|(member, surface)| (member + first, surface)),
+                fastener: joint.fastener,
+            }
+        }));
         self.joints.push(Joint {
-            between: [onto, (self.members.len() - 1, surface)],
+            between: [onto, (surface.0 + first, surface.1)],
             fastener,
         });
-    }
-
-    /// Takes the last member back out, with the joints that hold it.
-    pub fn remove_last(&mut self) -> Option<Member> {
-        if self.members.len() <= 1 {
-            return None;
-        }
-        let last = self.members.len() - 1;
-        self.joints
-            .retain(|joint| joint.between.iter().all(|(member, _)| *member != last));
-        self.members.pop()
+        true
     }
 
     /// Every place two members' surfaces meet or nearly do, facing each other, with how far
@@ -382,67 +355,37 @@ impl Assembly {
 }
 
 impl Member {
-    /// `v`, in the board's own axes, in the assembly's.
-    fn rotate(&self, v: [f64; 3]) -> [f64; 3] {
-        self.spin.rotate(self.turn.apply_f64(v))
-    }
-
     /// Where each of the board's axes points in the assembly: `l`, `w`, and `t`.
     pub fn axes(&self) -> [[f64; 3]; 3] {
-        [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]].map(|axis| self.rotate(axis))
+        self.rotation.columns()
     }
 
     /// One of the board's surfaces, in the assembly.
     fn patch(&self, surface: Surface) -> Option<Patch> {
         let local = patch(&self.board, surface)?;
         let at = self.at.map(|length| length.as_nm() as f64);
+        let turn = |v| self.rotation.apply(v);
         Some(Patch {
-            normal: self.rotate(local.normal),
+            normal: turn(local.normal),
+            u: turn(local.u),
+            v: turn(local.v),
             corners: local
                 .corners
                 .iter()
                 .map(|&p| {
-                    let p = self.rotate(p);
+                    let p = turn(p);
                     [p[0] + at[0], p[1] + at[1], p[2] + at[2]]
                 })
                 .collect(),
         })
     }
 
-    /// Two directions square to `normal` and each other, along one of this member's surfaces:
-    /// on a side, along the side and up the board's thickness; on a face, along the board's
-    /// length and width.
-    fn in_plane(&self, normal: [f64; 3], surface: Surface) -> ([f64; 3], [f64; 3]) {
-        match surface {
-            Surface::Side(_) => {
-                let up = self.rotate([0.0, 0.0, 1.0]);
-                (unit(cross(normal, up)), up)
-            }
-            Surface::Bottom | Surface::Top => {
-                (self.rotate([1.0, 0.0, 0.0]), self.rotate([0.0, 1.0, 0.0]))
-            }
-        }
-    }
-
     /// Where the point `(l, w, t)` of the board is in the assembly, to the nanometer.
     pub fn point(&self, l: Length, w: Length, t: Length) -> [Length; 3] {
-        let p = self.rotate([l, w, t].map(|length| length.as_nm() as f64));
-        [0, 1, 2].map(|k| self.at[k] + Length::from_nm(p[k].round() as i64))
-    }
-}
-
-/// How good a way on is, lowest best: how nearly it faces (negated, in billionths), whether
-/// it's a different kind of surface, whether it runs on in a line, whether it's upside down,
-/// and how nearly the same size the surfaces are (negated, in millionths).
-type Rank = (i64, bool, bool, bool, i64);
-
-/// What kind of surface this is: a face, a square end, an edge along the length, or a miter.
-fn kind(surface: Surface) -> u8 {
-    match surface {
-        Surface::Bottom | Surface::Top => 0,
-        Surface::Side(edge) if edge.out.w == 0 => 1,
-        Surface::Side(edge) if edge.out.l == 0 => 2,
-        Surface::Side(_) => 3,
+        let p = self
+            .rotation
+            .apply([l, w, t].map(|length| length.as_nm() as f64));
+        [0, 1, 2].map(|k| self.at[k] + nm(p[k]))
     }
 }
 
@@ -467,52 +410,121 @@ pub fn surfaces(board: &Board) -> Vec<Surface> {
         .collect()
 }
 
-/// A flat surface, as the way it faces (out of the board) and its corners, in nanometers.
-struct Patch {
-    normal: [f64; 3],
-    corners: Vec<[f64; 3]>,
-}
-
-/// One of `board`'s surfaces, in its own axes: `l`, `w`, `t`.
-fn patch(board: &Board, surface: Surface) -> Option<Patch> {
-    let nm = |length: Length| length.as_nm() as f64;
-    let face_corners = |t: Length| -> Vec<[f64; 3]> {
-        board
+/// The outline of one of `board`'s surfaces, in its own axes (`l`, `w`, `t`): flat polygons,
+/// each going around counterclockwise seen from outside the board. Empty if it has no such
+/// surface.
+pub fn outline(board: &Board, surface: Surface) -> Vec<Vec<[Length; 3]>> {
+    let thickness = board.thickness();
+    match surface {
+        Surface::Bottom | Surface::Top => board
             .face()
             .iter()
-            .flat_map(|region| region.corners())
-            .map(|(l, w)| [nm(l), nm(w), nm(t)])
-            .collect()
-    };
-    match surface {
-        Surface::Bottom => Some(Patch {
-            normal: [0.0, 0.0, -1.0],
-            corners: face_corners(Length::ZERO),
-        }),
-        Surface::Top => Some(Patch {
-            normal: [0.0, 0.0, 1.0],
-            corners: face_corners(board.thickness()),
-        }),
-        Surface::Side(side) => {
-            let mut corners = Vec::new();
-            for region in board.face() {
+            .map(|region| {
+                let t = if surface == Surface::Top {
+                    thickness
+                } else {
+                    Length::ZERO
+                };
+                let mut corners: Vec<[Length; 3]> = region
+                    .corners()
+                    .into_iter()
+                    .map(|(l, w)| [l, w, t])
+                    .collect();
+                if surface == Surface::Bottom {
+                    corners.reverse();
+                }
+                corners
+            })
+            .collect(),
+        Surface::Side(side) => board
+            .face()
+            .iter()
+            .flat_map(|region| {
                 let edges = region.edges();
                 let points = region.corners();
                 let n = edges.len();
-                for i in (0..n).filter(|&i| edges[i] == side) {
-                    for (l, w) in [points[i], points[(i + 1) % n]] {
-                        for t in [Length::ZERO, board.thickness()] {
-                            corners.push([nm(l), nm(w), nm(t)]);
-                        }
-                    }
-                }
-            }
-            (!corners.is_empty()).then_some(Patch {
-                normal: unit([side.out.l as f64, side.out.w as f64, 0.0]),
-                corners,
+                (0..n).filter(move |&i| edges[i] == side).map(move |i| {
+                    let ((l0, w0), (l1, w1)) = (points[i], points[(i + 1) % n]);
+                    vec![
+                        [l0, w0, Length::ZERO],
+                        [l1, w1, Length::ZERO],
+                        [l1, w1, thickness],
+                        [l0, w0, thickness],
+                    ]
+                })
             })
-        }
+            .collect(),
     }
+}
+
+/// A flat surface: the way it faces (out of the board), two directions across it (`u` and
+/// `v`, turning counterclockwise from one to the other seen from outside), and its corners, in
+/// nanometers.
+struct Patch {
+    normal: [f64; 3],
+    u: [f64; 3],
+    v: [f64; 3],
+    corners: Vec<[f64; 3]>,
+}
+
+/// One of `board`'s surfaces, in its own axes: `l`, `w`, `t`. Across a face, `u` runs along
+/// the length; across a side, along the side, with `v` up the thickness.
+fn patch(board: &Board, surface: Surface) -> Option<Patch> {
+    let corners: Vec<[f64; 3]> = outline(board, surface)
+        .into_iter()
+        .flatten()
+        .map(|p| p.map(|length| length.as_nm() as f64))
+        .collect();
+    if corners.is_empty() {
+        return None;
+    }
+    let (normal, u, v) = match surface {
+        Surface::Bottom => ([0.0, 0.0, -1.0], [1.0, 0.0, 0.0], [0.0, -1.0, 0.0]),
+        Surface::Top => ([0.0, 0.0, 1.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]),
+        Surface::Side(side) => {
+            let n = unit([side.out.l as f64, side.out.w as f64, 0.0]);
+            (n, [-n[1], n[0], 0.0], [0.0, 0.0, 1.0])
+        }
+    };
+    Some(Patch {
+        normal,
+        u,
+        v,
+        corners,
+    })
+}
+
+/// The turn that brings `mine` around to face back against `theirs`, the `turn`th of the four
+/// ways around: each a quarter turn further about their normal.
+fn facing(mine: &Patch, theirs: &Patch, turn: u8) -> Rotation {
+    let (u, v) = (theirs.u, theirs.v);
+    let back = |d: [f64; 3]| d.map(|c| -c);
+    let [a, b] = match turn % 4 {
+        0 => [u, back(v)],
+        1 => [v, u],
+        2 => [back(u), v],
+        _ => [back(v), back(u)],
+    };
+    let to = [back(theirs.normal), a, b];
+    let from = [mine.normal, mine.u, mine.v];
+    Rotation::from_columns(
+        [0, 1, 2].map(|j| [0, 1, 2].map(|row| (0..3).map(|i| to[i][row] * from[i][j]).sum())),
+    )
+}
+
+/// The least and most of `points` along `along`.
+fn span(points: &[[f64; 3]], along: [f64; 3]) -> (f64, f64) {
+    points
+        .iter()
+        .map(|&p| dot(p, along))
+        .fold((f64::MAX, f64::MIN), |(low, high), x| {
+            (low.min(x), high.max(x))
+        })
+}
+
+/// A distance in nanometers, to the nearest one.
+fn nm(x: f64) -> Length {
+    Length::from_nm(x.round() as i64)
 }
 
 fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
@@ -533,69 +545,15 @@ fn unit(v: [f64; 3]) -> [f64; 3] {
 }
 
 /// How nearly `mine` faces straight back against `theirs`: 1 when exactly.
-fn facing(mine: [f64; 3], theirs: [f64; 3]) -> f64 {
+fn facing_back(mine: [f64; 3], theirs: [f64; 3]) -> f64 {
     -dot(unit(mine), unit(theirs))
-}
-
-/// Whether a direction lies flat, across the assembly's `x` and `y`.
-fn level(v: [f64; 3]) -> bool {
-    v[2].abs() < 1e-9 * (v[0].abs() + v[1].abs()).max(1e-300)
-}
-
-/// The ways a surface facing `mine.normal` can turn to face back against `theirs`: each square
-/// turn that faces it within 10°, and any that, spun about the
-/// assembly's up, faces it exactly, the way two level sides always can. Ways that end up
-/// turned alike count once, with the least spin.
-fn ways_to_face(mine: &Patch, theirs: &Patch) -> Vec<(Turn, Spin)> {
-    let least = MOST_TILT_DEGREES.to_radians().cos();
-    let back = theirs.normal.map(|c| -c);
-    let mut ways: Vec<(Turn, Spin)> = Vec::new();
-    for turn in Turn::all() {
-        let turned = turn.apply_f64(mine.normal);
-        let spin = if level(turned) && level(back) {
-            Spin::between([turned[0], turned[1]], [back[0], back[1]])
-        } else if facing(turned, theirs.normal) >= least {
-            Spin::NONE
-        } else {
-            continue;
-        };
-        let axes = |turn: Turn, spin: Spin| {
-            [[1.0, 0.0, 0.0], [0.0, 0.0, 1.0]].map(|axis| spin.rotate(turn.apply_f64(axis)))
-        };
-        let same = |a: [[f64; 3]; 2], b: [[f64; 3]; 2]| {
-            a.iter()
-                .zip(&b)
-                .all(|(x, y)| x.iter().zip(y).all(|(p, q)| (p - q).abs() < 1e-9))
-        };
-        match ways
-            .iter()
-            .position(|&(t, s)| same(axes(t, s), axes(turn, spin)))
-        {
-            Some(index) if spin == Spin::NONE => ways[index] = (turn, spin),
-            Some(_) => {}
-            None => ways.push((turn, spin)),
-        }
-    }
-    ways
-}
-
-/// How big a surface is: its extent along one direction across it times the other.
-fn size(patch: &Patch, (u, v): ([f64; 3], [f64; 3])) -> f64 {
-    let extent = |along: [f64; 3]| {
-        let values = patch.corners.iter().map(|&p| dot(along, p));
-        let (low, high) = values.fold((f64::MAX, f64::MIN), |(low, high), x| {
-            (low.min(x), high.max(x))
-        });
-        high - low
-    };
-    extent(u) * extent(v)
 }
 
 /// How far apart `b` is from `a`, along `a`'s normal, at the corners of where they overlap
 /// across it, if they face each other and are near: least and most, negative where `b` runs
 /// into `a`.
 fn gap(a: &Patch, b: &Patch) -> Option<(Length, Length)> {
-    if facing(b.normal, a.normal) < MOST_TILT_DEGREES.to_radians().cos() {
+    if facing_back(b.normal, a.normal) < MOST_TILT_DEGREES.to_radians().cos() {
         return None;
     }
     let n = unit(a.normal);
@@ -607,17 +565,8 @@ fn gap(a: &Patch, b: &Patch) -> Option<(Length, Length)> {
     };
     let u = unit(cross(n, helper));
     let v = unit(cross(n, u));
-    let span = |patch: &Patch, along: [f64; 3]| {
-        patch
-            .corners
-            .iter()
-            .map(|&p| dot(p, along))
-            .fold((f64::MAX, f64::MIN), |(low, high), x| {
-                (low.min(x), high.max(x))
-            })
-    };
-    let (au, bu) = (span(a, u), span(b, u));
-    let (av, bv) = (span(a, v), span(b, v));
+    let (au, bu) = (span(&a.corners, u), span(&b.corners, u));
+    let (av, bv) = (span(&a.corners, v), span(&b.corners, v));
     let across = (au.0.max(bu.0), au.1.min(bu.1));
     let up = (av.0.max(bv.0), av.1.min(bv.1));
     // Overlapping by more than a micron each way, not just touching along an edge.
@@ -638,34 +587,78 @@ fn gap(a: &Patch, b: &Patch) -> Option<(Length, Length)> {
     let least = distances.iter().copied().fold(f64::MAX, f64::min);
     let most = distances.iter().copied().fold(f64::MIN, f64::max);
     let near = NEAR.as_nm() as f64;
-    (least <= near && most >= -near).then(|| {
-        let nm = |x: f64| Length::from_nm(x.round() as i64);
-        (nm(least), nm(most))
-    })
+    (least <= near && most >= -near).then(|| (nm(least), nm(most)))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn board() -> Board {
+        Board::new(
+            Length::from_inches(24),
+            Length::from_inches(4),
+            Length::from_inch_fraction(3, 4),
+        )
+    }
+
     #[test]
-    fn there_are_twenty_four_turns_and_none_mirror() {
-        let turns: Vec<Turn> = Turn::all().collect();
-        assert_eq!(turns.len(), 24);
-        assert!(turns.contains(&Turn::NONE));
-        for turn in turns {
-            let [l, w, t] = turn.columns().map(|c| c.map(f64::from));
-            assert_eq!(cross(l, w), t);
+    fn quarter_turns_are_exact_and_four_go_all_the_way_around() {
+        for axis in 0..3 {
+            let quarter = Rotation::quarter_turns(axis, 1);
+            assert_eq!(quarter.degrees(), 90.0);
+            let around = (0..4).fold(Rotation::NONE, |turned, _| turned.then(quarter));
+            assert_eq!(around, Rotation::NONE);
+            assert_eq!(quarter.then(quarter.inverse()), Rotation::NONE);
+        }
+        // A quarter turn about z takes x to y.
+        assert_eq!(
+            Rotation::quarter_turns(2, 1).apply([1.0, 0.0, 0.0]),
+            [0.0, 1.0, 0.0]
+        );
+    }
+
+    #[test]
+    fn a_plain_board_has_six_surfaces_each_with_one_outline() {
+        let board = board();
+        let surfaces = surfaces(&board);
+        assert_eq!(surfaces.len(), 6);
+        for surface in surfaces {
+            assert_eq!(outline(&board, surface).len(), 1);
+            // Its directions across lie flat on it, square to the way it faces.
+            let patch = patch(&board, surface).unwrap();
+            assert_eq!(cross(patch.u, patch.v), patch.normal);
         }
     }
 
     #[test]
-    fn a_plain_board_has_six_surfaces() {
-        let board = Board::new(
-            Length::from_inches(24),
-            Length::from_inches(4),
-            Length::from_inch_fraction(3, 4),
-        );
-        assert_eq!(surfaces(&board).len(), 6);
+    fn the_four_ways_around_a_joint_are_a_quarter_turn_apart() {
+        let board = board();
+        let assembly = Assembly::of(board.clone());
+        let ways: Vec<Rotation> = (0..4)
+            .map(|turn| {
+                assembly
+                    .mating(
+                        (0, Surface::Top),
+                        &assembly,
+                        (0, Surface::Bottom),
+                        Mating {
+                            turn,
+                            slide: [Length::ZERO; 2],
+                        },
+                    )
+                    .unwrap()
+                    .rotation
+            })
+            .collect();
+        // Bottom on top, the first way keeps it as it was; each next way is a quarter turn
+        // further about the joint, which here is straight up.
+        assert_eq!(ways[0], Rotation::NONE);
+        for turn in 1..4 {
+            assert_eq!(
+                ways[turn - 1].then(Rotation::quarter_turns(2, 1)),
+                ways[turn]
+            );
+        }
     }
 }
