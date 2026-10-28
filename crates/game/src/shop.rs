@@ -25,8 +25,10 @@ use bevy::{
 use woodsim::{Across, Angle, Board, Cut, Kerf, Length, Orientation, Piece, Run};
 
 use crate::{
+    bench,
     chop::MiterSawStation,
     feed::TableSawStation,
+    join::BenchStation,
     meshes::{lumber_mesh, rounded_box},
     miter_saw,
     scenery::SKY,
@@ -160,6 +162,7 @@ pub enum ShopView {
     Overview,
     TableSaw,
     MiterSaw,
+    Bench,
 }
 
 pub const OVERVIEW_HELP: &str = "W/A/S/D or arrows: pan   Drag the floor: pan   \
@@ -415,7 +418,8 @@ pub fn station_part(mut entity: EntityCommands, station: ShopView) {
         });
 }
 
-/// Esc backs out to the overview; Tab goes from one saw to the other.
+/// Esc backs out to the overview; Tab goes around the stations: the table saw, the miter saw,
+/// the workbench.
 fn switch_view(keys: Res<ButtonInput<KeyCode>>, mut view: ResMut<ShopView>) {
     if keys.just_pressed(KeyCode::Escape) && *view != ShopView::Overview {
         *view = ShopView::Overview;
@@ -423,7 +427,8 @@ fn switch_view(keys: Res<ButtonInput<KeyCode>>, mut view: ResMut<ShopView>) {
     if keys.just_pressed(KeyCode::Tab) {
         *view = match *view {
             ShopView::TableSaw => ShopView::MiterSaw,
-            ShopView::Overview | ShopView::MiterSaw => ShopView::TableSaw,
+            ShopView::MiterSaw => ShopView::Bench,
+            ShopView::Overview | ShopView::Bench => ShopView::TableSaw,
         };
     }
 }
@@ -497,6 +502,11 @@ fn station_pose(station: ShopView) -> Option<Transform> {
             Vec3::new(0.0, 0.7, 1.2),
             Vec3::new(0.0, 0.12, 0.0),
         ),
+        ShopView::Bench => (
+            bench::ORIGIN,
+            Vec3::new(-0.05, 0.62, 0.68),
+            Vec3::new(-0.05, 0.0, -0.06),
+        ),
     };
     Some(Transform::from_translation(origin + eye).looking_at(origin + target, Vec3::Y))
 }
@@ -522,6 +532,7 @@ fn outline_hovered_station(view: Res<ShopView>, hovered: Res<HoveredStation>, mu
     let outline = match hovered.station {
         Some(ShopView::TableSaw) => block_transform(table_saw::BOUNDS, table_saw::ORIGIN),
         Some(ShopView::MiterSaw) => block_transform(miter_saw::BOUNDS, miter_saw::ORIGIN),
+        Some(ShopView::Bench) => block_transform(bench::BOUNDS, bench::ORIGIN),
         _ => return,
     };
     gizmos.cube(outline, Color::srgb(1.0, 0.85, 0.3));
@@ -619,12 +630,14 @@ fn update_readout(
     hovered: Res<HoveredStation>,
     table_saw: Res<TableSawStation>,
     miter_saw: Res<MiterSawStation>,
-    mut lines: Query<(&ReadoutLine, &mut Text)>,
+    bench: Res<BenchStation>,
+    mut lines: Query<(&ReadoutLine, &mut Text, &mut Node)>,
 ) {
     if !(view.is_changed()
         || hovered.is_changed()
         || table_saw.is_changed()
-        || miter_saw.is_changed())
+        || miter_saw.is_changed()
+        || bench.is_changed())
     {
         return;
     }
@@ -637,6 +650,7 @@ fn update_readout(
             match hovered.station {
                 Some(ShopView::TableSaw) => "Click to work at the table saw.",
                 Some(ShopView::MiterSaw) => "Click to work at the miter saw.",
+                Some(ShopView::Bench) => "Click to work at the workbench.",
                 _ => "Click a saw to work at it.",
             }
             .to_string(),
@@ -666,8 +680,21 @@ fn update_readout(
             miter_saw.status(),
             miter_saw::HELP,
         ),
+        ShopView::Bench => (
+            bench::reading(&bench),
+            bench.status(miter_saw.parts.len()),
+            bench::HELP,
+        ),
     };
-    for (line, mut text) in &mut lines {
+    for (line, mut text, mut node) in &mut lines {
+        // At the bench, the pile's parts are listed to click instead of the cut list.
+        if let ReadoutLine::CutList = line {
+            node.display = if *view == ShopView::Bench {
+                Display::None
+            } else {
+                Display::Flex
+            };
+        }
         text.0 = match line {
             ReadoutLine::Reading => reading.clone(),
             ReadoutLine::Status => status.clone(),

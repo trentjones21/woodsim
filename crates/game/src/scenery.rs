@@ -832,43 +832,4 @@ fn spawn_furnishings(
             Pickable::IGNORE,
         ));
     }
-
-    // A pair of sawhorses out on the open floor, holding a 2x10.
-    let horse_z = 1.5;
-    for center_x in [1.3, 2.4] {
-        let beam = Vec3::new(0.04, 0.09, 0.9);
-        commands.spawn((
-            Mesh3d(meshes.add(board_mesh(beam, Vec3::new(center_x, 0.0, 0.0), Grain::Z))),
-            MeshMaterial3d(shop.wood.clone()),
-            Transform::from_xyz(center_x - 0.02, 0.62, horse_z - 0.45),
-            Pickable::IGNORE,
-        ));
-        // Splayed legs: each is a board standing on end, tipped in toward the beam.
-        let leg = meshes.add(board_mesh(
-            Vec3::new(0.035, 0.09, 0.66),
-            Vec3::new(center_x, 0.0, 0.3),
-            Grain::Z,
-        ));
-        for end in [horse_z - 0.4, horse_z + 0.31] {
-            for side in [-1.0_f32, 1.0] {
-                let foot = Vec3::new(center_x + side * 0.17 - 0.0175, 0.0, end + 0.09);
-                commands.spawn((
-                    Mesh3d(leg.clone()),
-                    MeshMaterial3d(shop.wood.clone()),
-                    Transform::from_translation(foot).with_rotation(
-                        Quat::from_rotation_z(side * 0.26)
-                            * Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2),
-                    ),
-                    Pickable::IGNORE,
-                ));
-            }
-        }
-    }
-    let plank = Vec3::new(1.6, 0.038, 0.235);
-    commands.spawn((
-        Mesh3d(meshes.add(board_mesh(plank, Vec3::new(0.9, 0.0, 0.07), Grain::X))),
-        MeshMaterial3d(shop.wood.clone()),
-        Transform::from_xyz(1.08, 0.71, horse_z - 0.2),
-        Pickable::IGNORE,
-    ));
 }

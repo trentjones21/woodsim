@@ -1,7 +1,9 @@
 //! Woodshop Simulator. Bevy draws the shop; `woodsim` owns every board's real dimensions.
 
+mod bench;
 mod chop;
 mod feed;
+mod join;
 mod meshes;
 mod miter_saw;
 mod scenery;
@@ -25,6 +27,7 @@ use bevy::{
     winit::WinitPlugin,
 };
 
+use bench::BenchPlugin;
 use miter_saw::MiterSawPlugin;
 use scenery::ScenePlugin;
 use shop::ShopPlugin;
@@ -83,6 +86,7 @@ fn main() {
         ScenePlugin,
         TableSawPlugin,
         MiterSawPlugin,
+        BenchPlugin,
     ));
 
     if let Some(path) = screenshot {

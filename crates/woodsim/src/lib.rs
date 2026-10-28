@@ -5,6 +5,7 @@
 //! this crate reports, so everything here can be tested with plain `cargo test`.
 
 mod angle;
+mod assembly;
 mod board;
 mod face;
 mod kerf;
@@ -13,6 +14,7 @@ mod orientation;
 mod saw;
 
 pub use angle::Angle;
+pub use assembly::{Assembly, Contact, Corner, Fastener, Joint, Member, Surface, Turn, surfaces};
 pub use board::{Board, Piece, Run, SlotSize};
 pub use face::{Direction, Edge, Region};
 pub use kerf::{Across, Kerf};

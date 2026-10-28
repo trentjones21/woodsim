@@ -37,7 +37,7 @@ pub const HELP: &str = "Left/Right: move the stop 1/16\"   Shift+Left/Right: 1\"
                         Click a part on the pile: put it back on the saw   \
                         S: set everything on the saw aside\n\
                         Right-click a piece or press T: carry it to the table saw\n\
-                        Tab: go to the table saw   Esc: back to the shop";
+                        Tab: go to the workbench   Esc: back to the shop";
 
 const FENCE_HEIGHT: f32 = inches(3.0);
 const BENCH_HALF_LENGTH: f32 = inches(40.0);
