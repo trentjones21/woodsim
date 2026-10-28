@@ -126,26 +126,27 @@ fn a_long_side_leaves_the_last_corner_open() {
 }
 
 #[test]
-fn a_miter_off_by_a_degree_opens_its_joint() {
+fn a_miter_off_by_a_degree_closes_but_leaves_the_corner_out_of_square() {
     let piece = frame_piece(inches(10), 4500, 4500);
     let off = frame_piece(inches(10), 4500, 4600);
     let mut assembly = Assembly::of(piece.clone());
     let onto = (0, miter(&piece, true));
-    let member = assembly
-        .place(&off, miter(&off, false), onto, 0, Corner(0))
-        .unwrap();
-    assembly.join(member, miter(&off, false), onto, Fastener::Brads);
+    let (surface, way) = assembly.ways(&off, onto)[0];
+    assert_eq!(surface, miter(&off, false));
+    let member = assembly.place(&off, surface, onto, way, Corner(0)).unwrap();
+    assembly.join(member, surface, onto, Fastener::Brads);
 
-    let contact = assembly
-        .fit()
-        .into_iter()
-        .find(|contact| contact.between == [onto, (1, miter(&off, false))])
-        .unwrap();
-    // It touches at one end of the joint and opens toward the other, about the joint's
-    // 2-1/8" length times the tangent of 1°.
-    assert!(contact.least.as_nm().abs() < 1_000, "{contact:?}");
-    let open = contact.most.as_nm() as f64 / fraction(1, 1).as_nm() as f64;
-    assert!((0.03..0.045).contains(&open), "{open}\"");
+    // Clamped together, the joint closes, the way a real one would, and the corner is 91°
+    // (or 89°) instead of square: the error shows up across the frame.
+    assert!(assembly.fit().iter().all(|contact| contact.is_tight()));
+    let [first, second] = [0, 1].map(|k| assembly.members()[k].axes()[0]);
+    let between = (first[0] * second[0] + first[1] * second[1])
+        .acos()
+        .to_degrees();
+    assert!(
+        (between - 91.0).abs() < 1e-4 || (between - 89.0).abs() < 1e-4,
+        "{between}"
+    );
 }
 
 #[test]
@@ -199,4 +200,57 @@ fn the_best_way_on_for_a_board_on_a_board_is_flat() {
         ways.iter()
             .any(|(surface, _)| matches!(surface, Surface::Side(_)))
     );
+}
+
+#[test]
+fn two_fifty_degree_miters_meet_flush_at_eighty_degrees() {
+    let saw = mitered(5000);
+    let cut = saw
+        .crosscut(&one_by_two(), Orientation::default(), inches(12))
+        .cut_apart();
+    let (piece, offcut) = (cut.piece.board, cut.offcut.unwrap().board);
+    let mut assembly = Assembly::of(piece.clone());
+    let onto = (0, miter(&piece, false));
+    // The best way the offcut goes on makes a corner, not the board it was cut from.
+    let (surface, way) = assembly.ways(&offcut, onto)[0];
+    let member = assembly
+        .place(&offcut, surface, onto, way, Corner(0))
+        .unwrap();
+    assembly.join(member, surface, onto, Fastener::Glue);
+
+    assert!(
+        assembly.fit().iter().all(|contact| contact.is_tight()),
+        "{:?}",
+        assembly.fit()
+    );
+    // The two lengths are 80° apart (or 100°, the other way around the corner).
+    let [first, second] = [0, 1].map(|k| assembly.members()[k].axes()[0]);
+    let between = (first[0] * second[0] + first[1] * second[1])
+        .acos()
+        .to_degrees();
+    assert!(
+        (between - 80.0).abs() < 1e-4 || (between - 100.0).abs() < 1e-4,
+        "{between}"
+    );
+}
+
+#[test]
+fn eight_pieces_mitered_at_22_and_a_half_degrees_close_into_an_octagon() {
+    let piece = frame_piece(inches(6), 2250, 2250);
+    let mut assembly = Assembly::of(piece.clone());
+    for last in 0..7 {
+        let onto = (last, miter(&assembly.members()[last].board, true));
+        let (surface, way) = assembly.ways(&piece, onto)[0];
+        let member = assembly
+            .place(&piece, surface, onto, way, Corner(0))
+            .unwrap();
+        assembly.join(member, surface, onto, Fastener::Glue);
+    }
+    // The last piece meets the first within a micron.
+    assert!(
+        assembly.fit().iter().all(|contact| contact.is_tight()),
+        "{:?}",
+        assembly.fit()
+    );
+    assert_eq!(assembly.fit().len(), 8);
 }

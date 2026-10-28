@@ -214,10 +214,7 @@ fn onto_bench(v: [f32; 3]) -> Vec3 {
 /// How a member sits on the bench: the rotation that turns its mesh (`w`, `t`, `l` along x,
 /// y, z) into place, and where its corner is, in meters from the assembly's origin.
 pub fn member_pose(member: &Member) -> (Quat, Vec3) {
-    let [l, w, t] = member
-        .turn
-        .columns()
-        .map(|column| onto_bench(column.map(f32::from)));
+    let [l, w, t] = member.axes().map(|axis| onto_bench(axis.map(|v| v as f32)));
     let rotation = Quat::from_mat3(&Mat3::from_cols(w, t, l));
     (rotation, onto_bench(member.at.map(Length::as_meters_f32)))
 }
