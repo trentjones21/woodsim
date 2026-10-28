@@ -2,6 +2,10 @@
 //! original board, and only the dimension being cut changes. A pass that doesn't cut the board
 //! apart leaves it the same size, with one more slot in it.
 
+mod common;
+
+use common::CutApart;
+
 use proptest::prelude::*;
 use woodsim::{Blade, Board, CutError, Length, MiterSaw, Orientation, Pass, Piece, TableSaw};
 
@@ -69,11 +73,11 @@ proptest! {
     #[test]
     fn crosscut_conserves_wood(length in 1..MAX_NM, at in 1..MAX_NM, kerf in 1..INCH_NM) {
         let board = Board::new(Length::from_nm(length), Length::from_inches(6), Length::from_inch_fraction(3, 4));
-        let saw = MiterSaw { blade: blade(kerf), capacity: Length::from_inch_fraction(15, 2) };
+        let saw = MiterSaw { blade: blade(kerf), ..MiterSaw::twelve_inch() };
         let at = Length::from_nm(at);
 
         match saw.crosscut(&board, Orientation::default(), at) {
-            Ok(cut) => {
+            Ok(Pass::Cut(cut)) => {
                 let offcut = cut.offcut.as_ref().map_or(Length::ZERO, |offcut| offcut.board.length());
                 prop_assert_eq!(cut.piece.board.length() + offcut + cut.waste, board.length());
                 prop_assert_eq!(cut.piece.board.length(), at);
@@ -82,6 +86,7 @@ proptest! {
                     prop_assert_eq!(piece, &Board::new(piece.length(), board.width(), board.thickness()));
                 }
             }
+            Ok(pass) => prop_assert!(false, "all the way down, the blade left {:?}", pass),
             Err(error) => {
                 prop_assert!(at >= board.length());
                 prop_assert_eq!(error, CutError::MissesBoard { setting: at, available: board.length() });
@@ -156,7 +161,7 @@ proptest! {
             _ => return Ok(()),
         };
         let at = Length::from_nm(at);
-        let cut = MiterSaw { blade: blade(INCH_NM / 8), capacity: Length::from_inch_fraction(15, 2) }.crosscut(&slotted, Orientation::default(), at).unwrap();
+        let cut = MiterSaw { blade: blade(INCH_NM / 8), ..MiterSaw::twelve_inch() }.crosscut(&slotted, Orientation::default(), at).cut_apart();
         let pieces: Vec<&Piece> = std::iter::once(&cut.piece).chain(&cut.offcut).chain(&cut.loose).collect();
 
         // Every piece lies on the board, and no two share any wood.

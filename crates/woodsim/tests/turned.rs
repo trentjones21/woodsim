@@ -1,6 +1,10 @@
 //! Boards lying other ways on the saws: turned a quarter turn to crosscut on the table saw,
 //! turned end for end, and flipped over. And slots in two directions that meet.
 
+mod common;
+
+use common::CutApart;
+
 use proptest::prelude::*;
 use woodsim::{
     Axis, Blade, Board, Cut, CutError, Cutaway, Length, MiterSaw, Orientation, Pass, Piece,
@@ -35,13 +39,7 @@ fn table_saw(fence: Length, height: Length) -> TableSaw {
 
 /// A 12" miter saw that doesn't slide.
 fn miter_saw() -> MiterSaw {
-    MiterSaw {
-        blade: Blade {
-            diameter: inches(12),
-            kerf: Blade::FULL_KERF,
-        },
-        capacity: fraction(15, 2),
-    }
+    MiterSaw::twelve_inch()
 }
 
 fn unturned() -> Orientation {
@@ -207,7 +205,7 @@ fn turned_end_for_end_the_other_end_goes_against_the_stop() {
     let end_for_end = unturned().turned_left().turned_left();
     let cut = miter_saw()
         .crosscut(&slotted, end_for_end, inches(10))
-        .unwrap();
+        .cut_apart();
 
     // The 10" against the stop is from the slotted end, so it falls apart along the slot.
     assert_eq!(cut.piece.l, Length::ZERO);

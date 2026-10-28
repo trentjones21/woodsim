@@ -1,6 +1,10 @@
 //! Cuts that don't go all the way: stopping partway through, and a blade set lower than the
 //! board is thick. They leave slots in the board, which come along when it's cut apart later.
 
+mod common;
+
+use common::CutApart;
+
 use woodsim::{Blade, Board, Kerf, Length, MiterSaw, Orientation, Pass, TableSaw};
 
 fn inches(n: i64) -> Length {
@@ -180,16 +184,10 @@ fn slots_come_along_when_the_board_is_cut_apart() {
     assert_eq!((groove.near, groove.far), (fraction(31, 8), inches(4)));
     assert!(ripped.offcut.unwrap().board.kerfs().is_empty());
 
-    let miter_saw = MiterSaw {
-        blade: Blade {
-            diameter: inches(12),
-            kerf: Blade::FULL_KERF,
-        },
-        capacity: Length::from_inch_fraction(15, 2),
-    };
+    let miter_saw = MiterSaw::twelve_inch();
     let crosscut = miter_saw
         .crosscut(&ripped.piece.board, Orientation::default(), inches(12))
-        .unwrap();
+        .cut_apart();
     // Both ends of the crosscut keep the groove, which still runs their full length.
     for part in [
         &crosscut.piece.board,
@@ -218,13 +216,7 @@ fn stopped_cut() -> Board {
 }
 
 fn miter_saw() -> MiterSaw {
-    MiterSaw {
-        blade: Blade {
-            diameter: inches(12),
-            kerf: Blade::FULL_KERF,
-        },
-        capacity: Length::from_inch_fraction(15, 2),
-    }
+    MiterSaw::twelve_inch()
 }
 
 #[test]
@@ -232,7 +224,7 @@ fn crosscutting_where_a_slot_goes_through_splits_off_a_strip() {
     // The far end against the stop, cut 14" long: the other 9-7/8" is all slotted through.
     let cut = miter_saw()
         .crosscut(&stopped_cut(), Orientation::default(), inches(14))
-        .unwrap();
+        .cut_apart();
 
     // The 14" piece holds together; the slot's end is still notched into it from below.
     assert_eq!(cut.piece.board.to_string(), "3/4\" x 7-1/4\" x 14\"");
@@ -255,7 +247,7 @@ fn a_slot_that_stops_short_of_the_cut_holds_the_offcut_together() {
     // Cut 12" long, the other side is 11-7/8": the slot stops about 5/16" short of its end.
     let cut = miter_saw()
         .crosscut(&stopped_cut(), Orientation::default(), inches(12))
-        .unwrap();
+        .cut_apart();
 
     let offcut = cut.offcut.unwrap();
     assert_eq!(offcut.board.to_string(), "3/4\" x 7-1/4\" x 11-7/8\"");

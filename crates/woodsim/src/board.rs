@@ -61,14 +61,6 @@ impl Board {
         board
     }
 
-    /// The part of this board from `from` to `to` on `axis`, as a board of its own.
-    pub(crate) fn slice(&self, axis: Axis, from: Length, to: Length) -> Board {
-        match axis {
-            Axis::Length => self.part(from, Length::ZERO, to - from, self.width),
-            Axis::Width => self.part(Length::ZERO, from, self.length, to - from),
-        }
-    }
-
     /// The separate pieces this board is in. Wherever slots, alone or together, go all the
     /// way through the board, they divide it: a slot the length of the board splits it in two,
     /// and a rip and a crosscut that meet cut out the corner between them. Wood the slots took
@@ -266,13 +258,6 @@ impl Piece {
     /// Where the piece's corner was on `axis` of the board it came from.
     pub fn at(&self, axis: Axis) -> Length {
         axis.pick(self.l, self.w)
-    }
-
-    pub(crate) fn shift(&mut self, axis: Axis, by: Length) {
-        match axis {
-            Axis::Length => self.l = self.l + by,
-            Axis::Width => self.w = self.w + by,
-        }
     }
 }
 

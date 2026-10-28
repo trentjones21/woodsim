@@ -12,12 +12,14 @@
 use std::f32::consts::FRAC_PI_2;
 
 use bevy::prelude::*;
-use woodsim::{Blade, Board, Cut, CutError, Length, MiterSaw, Orientation};
+use woodsim::{Board, Cut, CutError, Length, MiterSaw, Orientation, Pass};
 
-use crate::shop::{Part, Placed, SawBoards, describe_board, describe_cut, inches};
+use crate::shop::{Part, Placed, SawBoards, describe_board, describe_cut, describe_kerf, inches};
 
 pub const STOP_MIN: Length = Length::from_inch_fraction(1, 16);
 pub const STOP_MAX: Length = Length::from_inches(36);
+/// The highest the depth stop can hold the blade above the table.
+const DEPTH_STOP_MAX: Length = Length::from_inches(4);
 
 /// The parts pile is stacked flat behind the fence, starting near the bench's left end.
 const PILE_LEFT: f32 = inches(-38.0);
@@ -39,6 +41,10 @@ pub struct MiterSawStation {
     pub work: Work,
     /// How far down the blade is, from 0 (all the way up) to 1 (through the table).
     pub lowered: f32,
+    /// How far down the blade has been on the stroke under way, the same way.
+    deepest: f32,
+    /// How high above the table the depth stop holds the blade's lowest point, if it's on.
+    pub depth_stop: Option<Length>,
     /// Finished parts set aside behind the fence, in the order they were set there.
     pub parts: Vec<Board>,
     /// How the board on the saw lies.
@@ -49,10 +55,12 @@ pub enum Work {
     /// Nothing on the saw.
     Empty,
     /// A board against the stop block, waiting for the blade. `missed` says why the last
-    /// stroke didn't cut it, until the stop moves.
+    /// stroke didn't cut it, until the stop moves. `scarred` is the board as the blade has
+    /// scarred it on the stroke under way; the scar stays when the blade comes back up.
     Ready {
         board: Board,
         missed: Option<CutError>,
+        scarred: Option<Board>,
     },
     /// A board the blade has cut, with the stop where it was at the time.
     Cut {
@@ -65,16 +73,12 @@ pub enum Work {
 impl Default for MiterSawStation {
     fn default() -> MiterSawStation {
         MiterSawStation {
-            saw: MiterSaw {
-                blade: Blade {
-                    diameter: Length::from_inches(12),
-                    kerf: Blade::FULL_KERF,
-                },
-                capacity: Length::from_inch_fraction(15, 2),
-            },
+            saw: MiterSaw::twelve_inch(),
             stop: Length::from_inches(12),
             work: Work::Empty,
             lowered: 0.0,
+            deepest: 0.0,
+            depth_stop: None,
             parts: Vec::new(),
             lie: Orientation::default(),
         }
@@ -89,6 +93,7 @@ impl MiterSawStation {
         self.work = Work::Ready {
             board,
             missed: None,
+            scarred: None,
         };
     }
 
@@ -131,16 +136,24 @@ impl MiterSawStation {
         }
     }
 
-    /// Lowers the blade by `amount` of its travel. Reaching the bottom cuts the board. Strips a
-    /// slot sets loose fall onto the parts pile.
+    /// Lowers the blade by `amount` of its travel, as far as the depth stop lets it go. Into
+    /// the board, it scars it; all the way through, it cuts it. Strips a slot sets loose fall
+    /// onto the parts pile.
     pub fn lower(&mut self, amount: f32) {
-        self.lowered = (self.lowered + amount).min(1.0);
-        if self.lowered < 1.0 {
+        self.lowered = (self.lowered + amount).min(self.lowest());
+        if self.lowered <= self.deepest {
             return;
         }
-        if let Work::Ready { board, missed } = &mut self.work {
-            match self.saw.crosscut(board, self.lie, self.stop) {
-                Ok(cut) => {
+        self.deepest = self.lowered;
+        let bottom = self.bottom();
+        if let Work::Ready {
+            board,
+            missed,
+            scarred,
+        } = &mut self.work
+        {
+            match self.saw.chop(board, self.lie, self.stop, bottom) {
+                Ok(Pass::Cut(cut)) => {
                     self.parts
                         .extend(cut.loose.iter().map(|piece| piece.board.clone()));
                     self.work = Work::Cut {
@@ -149,14 +162,57 @@ impl MiterSawStation {
                         cut,
                     }
                 }
+                Ok(Pass::Kerfed(scar)) => *scarred = Some(scar),
+                Ok(Pass::Missed) => {}
                 Err(error) => *missed = Some(error),
             }
         }
     }
 
-    /// Raises the blade by `amount` of its travel.
+    /// Raises the blade by `amount` of its travel. Back at the top, the stroke is over, and any
+    /// scar it left stays in the board.
     pub fn raise(&mut self, amount: f32) {
         self.lowered = (self.lowered - amount).max(0.0);
+        if self.lowered > 0.0 {
+            return;
+        }
+        self.deepest = 0.0;
+        if let Work::Ready { board, scarred, .. } = &mut self.work
+            && let Some(scar) = scarred.take()
+        {
+            *board = scar;
+        }
+    }
+
+    /// How far down the blade can go, as a fraction of its travel: to the depth stop, or all
+    /// the way.
+    pub fn lowest(&self) -> f32 {
+        let Some(stop) = self.depth_stop else {
+            return 1.0;
+        };
+        let (up, down) = self.saw.stroke;
+        ((up - stop).as_nm() as f64 / (up - down).as_nm() as f64).clamp(0.0, 1.0) as f32
+    }
+
+    /// How high above the table the blade's lowest point is now. Against the depth stop, it's
+    /// exactly the stop's setting.
+    pub fn bottom(&self) -> Length {
+        if let Some(stop) = self.depth_stop
+            && self.lowered >= self.lowest()
+        {
+            return stop;
+        }
+        let (up, down) = self.saw.stroke;
+        let travel = (down - up).as_nm() as f64 * self.lowered as f64;
+        up + Length::from_nm(travel.round() as i64)
+    }
+
+    /// Sets the depth stop: how high above the table the blade's lowest point stops, from the
+    /// table up to 4", or `None` to let it go all the way down. Only with the blade up.
+    pub fn set_depth_stop(&mut self, stop: Option<Length>) {
+        if self.blade_up() {
+            self.depth_stop = stop.map(|stop| stop.clamp(Length::ZERO, DEPTH_STOP_MAX));
+        }
     }
 
     /// Whether `part` is on the saw and can be handled: only with the blade up.
@@ -208,6 +264,7 @@ impl MiterSawStation {
         self.work = Work::Ready {
             board: picked,
             missed: None,
+            scarred: None,
         };
         true
     }
@@ -262,7 +319,9 @@ impl MiterSawStation {
     pub fn boards(&self) -> SawBoards {
         let (board, stop, cut) = match &self.work {
             Work::Empty => return SawBoards::default(),
-            Work::Ready { board, .. } => (board, self.stop, None),
+            Work::Ready { board, scarred, .. } => {
+                (scarred.as_ref().unwrap_or(board), self.stop, None)
+            }
             Work::Cut { board, stop, cut } => (board, *stop, Some(cut)),
         };
         // The board's far end along the fence rests against the stop block; the rest reaches
@@ -331,6 +390,19 @@ impl MiterSawStation {
         list
     }
 
+    /// What the depth stop will do to `board`, if it's on.
+    fn depth_note(&self, board: &Board) -> String {
+        let Some(stop) = self.depth_stop else {
+            return String::new();
+        };
+        let thickness = board.thickness();
+        if stop >= thickness {
+            " The depth stop keeps the blade above it.".to_string()
+        } else {
+            format!(" The depth stop will cut {} into it.", thickness - stop)
+        }
+    }
+
     /// One line describing what's on the saw.
     pub fn status(&self) -> String {
         match &self.work {
@@ -345,9 +417,17 @@ impl MiterSawStation {
                 missed: Some(error),
                 ..
             } => format!("No cut: {error}."),
+            Work::Ready {
+                scarred: Some(scarred),
+                ..
+            } => {
+                let scar = scarred.kerfs().last().expect("a scar");
+                format!("Cutting. So far, {}.", describe_kerf(scarred, scar))
+            }
             Work::Ready { board, .. } => format!(
-                "Board on the saw: {}. Hold Space to lower the blade.",
-                describe_board(board)
+                "Board on the saw: {}. Hold Space to lower the blade.{}",
+                describe_board(board),
+                self.depth_note(board)
             ),
             Work::Cut { cut, .. } if cut.loose.is_empty() => describe_cut("Cut", cut),
             Work::Cut { cut, .. } => format!("{} Set aside on the pile.", describe_cut("Cut", cut)),
@@ -357,6 +437,8 @@ impl MiterSawStation {
 
 #[cfg(test)]
 mod tests {
+    use woodsim::Blade;
+
     use super::*;
 
     fn assert_close(actual: f32, expected: f32) {
@@ -690,6 +772,81 @@ mod tests {
         let piece = station.boards().piece.unwrap();
         assert_eq!(piece.board.to_string(), "3/4\" x 6\" x 10\"");
         assert_close(x_span(&piece).1, inches(10.0));
+    }
+
+    #[test]
+    fn stopping_short_scars_the_board_and_the_scar_stays() {
+        let mut station = loaded();
+        station.set_depth_stop(Some(Length::from_inch_fraction(1, 2)));
+        assert!(
+            station
+                .status()
+                .ends_with("The depth stop will cut 1/4\" into it.")
+        );
+
+        station.lower(1.0);
+        assert!(station.lowered < 1.0);
+        assert_eq!(station.bottom(), Length::from_inch_fraction(1, 2));
+        assert_eq!(
+            station.status(),
+            "Cutting. So far, a 1/8\"-wide, 1/4\"-deep dado 3-7/16\" long."
+        );
+
+        station.raise(1.0);
+        let Work::Ready { board, .. } = &station.work else {
+            panic!("the scarred board should still be against the stop");
+        };
+        assert_eq!(board.kerfs().len(), 1);
+        assert!(station.status().starts_with(
+            "Board on the saw: 3/4\" x 6\" x 24\", with a 1/8\"-wide, 1/4\"-deep dado 3-7/16\" long."
+        ));
+    }
+
+    #[test]
+    fn side_by_side_strokes_nibble_out_a_wider_scar() {
+        let mut station = loaded();
+        station.set_depth_stop(Some(Length::from_inch_fraction(1, 2)));
+        chop(&mut station);
+        station.set_stop(Length::from_inches(12) + Length::from_inch_fraction(1, 8));
+        chop(&mut station);
+
+        let Work::Ready { board, .. } = &station.work else {
+            panic!("the board should still be against the stop");
+        };
+        assert_eq!(board.kerfs().len(), 2);
+        assert!(station.status().starts_with(
+            "Board on the saw: 3/4\" x 6\" x 24\", with a 1/4\"-wide, 1/4\"-deep dado 3-7/16\" long."
+        ));
+    }
+
+    #[test]
+    fn the_depth_stop_changes_only_with_the_blade_up() {
+        let mut station = loaded();
+        station.lower(0.1);
+        station.set_depth_stop(Some(Length::from_inch_fraction(1, 2)));
+        assert_eq!(station.depth_stop, None);
+
+        station.raise(1.0);
+        station.set_depth_stop(Some(Length::from_inches(9)));
+        assert_eq!(station.depth_stop, Some(DEPTH_STOP_MAX));
+        // Above the board, the blade can't reach it.
+        assert!(
+            station
+                .status()
+                .ends_with("The depth stop keeps the blade above it.")
+        );
+        chop(&mut station);
+        let Work::Ready { board, .. } = &station.work else {
+            panic!("the board should still be against the stop");
+        };
+        assert!(board.kerfs().is_empty());
+    }
+
+    #[test]
+    fn all_the_way_down_the_blade_reaches_through_the_table() {
+        let mut station = loaded();
+        station.lower(1.0);
+        assert_eq!(station.bottom(), -Length::from_inches(3));
     }
 
     #[test]

@@ -42,7 +42,7 @@ impl Kerf {
         let across = self.near < span && self.far > Length::ZERO;
         let along = gap(self.start, self.end, Length::ZERO, reach);
         let up = gap(self.center, self.center, Length::ZERO, thickness);
-        across && square(along) + square(up) < square(self.radius)
+        across && along.squared() + up.squared() < self.radius.squared()
     }
 
     /// Where along the slot it goes all the way through a board `thickness` thick, or `None` if
@@ -59,8 +59,8 @@ impl Kerf {
     /// it. The round blade cuts a stopped slot longer on the face it came through than on the
     /// other. Rounded in to the nanometer.
     pub fn span_at(&self, t: Length) -> Option<(Length, Length)> {
-        let up = square(t - self.center);
-        let reach = square(self.radius);
+        let up = (t - self.center).squared();
+        let reach = self.radius.squared();
         (up <= reach).then(|| {
             let half = Length::from_nm((reach - up).isqrt() as i64);
             (self.start - half, self.end + half)
@@ -109,12 +109,6 @@ fn gap(a_low: Length, a_high: Length, b_low: Length, b_high: Length) -> Length {
     } else {
         Length::ZERO
     }
-}
-
-/// Squares in `i128`: a length in nanometers can approach 10^10, and its square overflows `i64`.
-fn square(length: Length) -> i128 {
-    let nm = length.as_nm() as i128;
-    nm * nm
 }
 
 #[cfg(test)]

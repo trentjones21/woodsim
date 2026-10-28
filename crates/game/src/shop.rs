@@ -645,7 +645,10 @@ fn update_readout(
             table_saw::HELP,
         ),
         ShopView::MiterSaw => (
-            format!("Length: {}", miter_saw.stop),
+            match miter_saw.depth_stop {
+                Some(stop) => format!("Length: {}   Depth stop: {stop} up", miter_saw.stop),
+                None => format!("Length: {}   Depth stop: off", miter_saw.stop),
+            },
             miter_saw.status(),
             miter_saw::HELP,
         ),
@@ -709,24 +712,74 @@ pub fn describe_cut(verb: &str, cut: &Cut) -> String {
 }
 
 /// Describes a board and the slots sawn into it, e.g. "3/4" x 7-1/4" x 24", with a stopped cut
-/// 11-9/16" long on top and 13" on the bottom".
+/// 11-9/16" long on top and 13" on the bottom". Slots that match once measured are counted
+/// rather than listed: "with three 3/4"-wide, 1/4"-deep dados all the way across".
 pub fn describe_board(board: &Board) -> String {
-    let kerfs: Vec<String> = board
-        .kerfs()
+    let mut groups: Vec<(String, Kerf, usize)> = Vec::new();
+    for slot in slots(board) {
+        let description = describe_slots(board, &slot, 1);
+        match groups.iter_mut().find(|(seen, ..)| *seen == description) {
+            Some((_, _, count)) => *count += 1,
+            None => groups.push((description, slot, 1)),
+        }
+    }
+    let slots: Vec<String> = groups
         .iter()
-        .map(|kerf| describe_kerf(board, kerf))
+        .map(|(description, slot, count)| match count {
+            1 => description.clone(),
+            _ => describe_slots(board, slot, *count),
+        })
         .collect();
-    if kerfs.is_empty() {
+    if slots.is_empty() {
         board.to_string()
     } else {
-        format!("{board}, with {}", kerfs.join(" and "))
+        format!("{board}, with {}", slots.join(" and "))
     }
 }
 
-/// Describes a slot sawn into `board` from below, the way a table saw cuts: a stopped cut if it
-/// goes through, otherwise a groove (or a rabbet, along an edge). Lengths are rounded to 1/32",
-/// as you'd measure them.
+/// The slots in `board` as you'd see them. Kerfs cut side by side the same way (the blade at
+/// the same height, its center traveling the same distance) whose faces touch or overlap are
+/// one wider slot: a dado nibbled out a stroke at a time, say.
+fn slots(board: &Board) -> Vec<Kerf> {
+    let mut slots: Vec<Kerf> = Vec::new();
+    for kerf in board.kerfs() {
+        let mut slot = *kerf;
+        slots.retain(|other| {
+            let beside = Kerf {
+                near: slot.near,
+                far: slot.far,
+                ..*other
+            } == slot
+                && other.near <= slot.far
+                && slot.near <= other.far;
+            if beside {
+                slot.near = slot.near.min(other.near);
+                slot.far = slot.far.max(other.far);
+            }
+            !beside
+        });
+        slots.push(slot);
+    }
+    slots
+}
+
+/// Describes a slot sawn into `board`: a stopped cut if it goes through, otherwise a groove or
+/// dado (or a rabbet, along an edge or across an end). Lengths are rounded to 1/32", as you'd
+/// measure them.
 pub fn describe_kerf(board: &Board, kerf: &Kerf) -> String {
+    describe_slots(board, kerf, 1)
+}
+
+/// Describes `count` slots shaped like `kerf`: "a 1/4"-deep groove", "two 1/4"-deep grooves".
+fn describe_slots(board: &Board, kerf: &Kerf, count: usize) -> String {
+    const NUMBERS: [&str; 9] = [
+        "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+    ];
+    let (a, s) = match count {
+        1 => ("a".to_string(), ""),
+        2..=10 => (NUMBERS[count - 2].to_string(), "s"),
+        _ => (count.to_string(), "s"),
+    };
     let thirty_second = Length::from_inch_fraction(1, 32);
     let span = |t: Length| {
         kerf.span_at(t).map_or(Length::ZERO, |(start, end)| {
@@ -739,15 +792,17 @@ pub fn describe_kerf(board: &Board, kerf: &Kerf) -> String {
     if kerf.depth(thickness) >= thickness {
         // A slot through the board's whole length would have cut it apart, so this one stops.
         let (top, bottom) = (span(thickness), span(Length::ZERO));
-        return format!("a stopped cut {top} long on top and {bottom} on the bottom");
+        return format!("{a} stopped cut{s} {top} long on top and {bottom} on the bottom");
     }
     let depth = kerf.depth(thickness).rounded_to(thirty_second);
-    let at_edge = kerf.near <= Length::ZERO || kerf.far >= kerf.across.of(board);
+    let extent = kerf.across.of(board);
+    let width = (kerf.far.min(extent) - kerf.near.max(Length::ZERO)).rounded_to(thirty_second);
+    let at_edge = kerf.near <= Length::ZERO || kerf.far >= extent;
     let kind = match (kerf.across, at_edge) {
-        (Axis::Width, false) => "groove",
-        (Axis::Width, true) => "rabbet",
-        (Axis::Length, false) => "dado",
-        (Axis::Length, true) => "rabbet across the end",
+        (Axis::Width, false) => format!("groove{s}"),
+        (Axis::Width, true) => format!("rabbet{s}"),
+        (Axis::Length, false) => format!("dado{s}"),
+        (Axis::Length, true) => format!("rabbet{s} across the end"),
     };
     // How far it runs on the face the blade came through.
     let face = if kerf.from_below() {
@@ -759,10 +814,11 @@ pub fn describe_kerf(board: &Board, kerf: &Kerf) -> String {
     let all_the_way = kerf
         .span_at(face)
         .is_some_and(|(start, end)| start <= Length::ZERO && end >= reach);
+    let size = format!("{a} {width}-wide, {depth}-deep {kind}");
     match (all_the_way, kerf.across) {
-        (true, Axis::Width) => format!("a {depth}-deep {kind} the full length"),
-        (true, Axis::Length) => format!("a {depth}-deep {kind} all the way across"),
-        (false, _) => format!("a {depth}-deep {kind} {} long", span(face)),
+        (true, Axis::Width) => format!("{size} the full length"),
+        (true, Axis::Length) => format!("{size} all the way across"),
+        (false, _) => format!("{size} {} long", span(face)),
     }
 }
 
@@ -848,6 +904,7 @@ pub fn set_material_on<E: EntityEvent>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use woodsim::{MiterSaw, Pass};
 
     #[test]
     fn overview_pans_relative_to_where_the_camera_faces() {
@@ -890,5 +947,45 @@ mod tests {
         let to_focus = (overview.focus - pose.translation).normalize();
         assert!(looking.abs_diff_eq(to_focus, 1e-5));
         assert!(pose.translation.y > overview.focus.y);
+    }
+
+    /// A 1x8, 24" long, chopped 1/4" deep on the miter saw against the stop at each of `stops`
+    /// (in sixteenths of an inch).
+    fn scarred(stops: &[i64]) -> Board {
+        let saw = MiterSaw::twelve_inch();
+        let bottom = Length::from_inch_fraction(1, 2);
+        let mut board = Board::new(
+            Length::from_inches(24),
+            Length::from_inch_fraction(29, 4),
+            Length::from_inch_fraction(3, 4),
+        );
+        for &stop in stops {
+            let stop = Length::from_inch_fraction(stop, 16);
+            board = match saw.chop(&board, Orientation::default(), stop, bottom) {
+                Ok(Pass::Kerfed(board)) => board,
+                other => panic!("expected a scar, got {other:?}"),
+            };
+        }
+        board
+    }
+
+    #[test]
+    fn side_by_side_kerfs_read_as_one_wider_slot() {
+        // Two strokes a kerf apart, then one overlapping the second.
+        let board = scarred(&[192, 190, 189]);
+        assert_eq!(
+            describe_board(&board),
+            "3/4\" x 7-1/4\" x 24\", with a 5/16\"-wide, 1/4\"-deep dado 3-7/16\" long"
+        );
+    }
+
+    #[test]
+    fn matching_slots_are_counted() {
+        let board = scarred(&[64, 128, 192, 256, 258]);
+        assert_eq!(
+            describe_board(&board),
+            "3/4\" x 7-1/4\" x 24\", with three 1/8\"-wide, 1/4\"-deep dados 3-7/16\" long \
+             and a 1/4\"-wide, 1/4\"-deep dado 3-7/16\" long"
+        );
     }
 }

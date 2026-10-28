@@ -589,7 +589,7 @@ mod tests {
         push_through(&mut station);
         assert_eq!(
             station.status(),
-            "Cut a 1/4\"-deep groove the full length. \
+            "Cut a 1/8\"-wide, 1/4\"-deep groove the full length. \
              Press B to bring the board back around for another pass."
         );
 

@@ -1,9 +1,9 @@
 //! The miter saw station: a saw built into a bench, its stop block, the board, and the controls.
 
-use std::f32::consts::{FRAC_PI_2, PI};
+use std::f32::consts::FRAC_PI_2;
 
 use bevy::{picking::pointer::PointerButton, prelude::*};
-use woodsim::{Board, Length};
+use woodsim::{Board, Length, MiterSaw};
 
 use crate::{
     chop::{MiterSawStation, board_turn},
@@ -27,6 +27,8 @@ pub const BOUNDS: Block = Block {
 
 pub const HELP: &str = "Left/Right: move the stop 1/16\"   Shift+Left/Right: 1\"   \
                         Or drag the stop block\n\
+                        Up/Down: set the depth stop 1/16\"   Shift: 1/4\"   \
+                        Down past the table turns it off\n\
                         Hold Space: lower the blade   Q/E: turn the board   F: flip it\n\
                         Click a cut piece: slide it back against the stop\n\
                         Click a part on the pile: put it back on the saw   \
@@ -34,8 +36,6 @@ pub const HELP: &str = "Left/Right: move the stop 1/16\"   Shift+Left/Right: 1\"
                         Right-click a piece or press T: carry it to the table saw\n\
                         Tab: go to the table saw   Esc: back to the shop";
 
-/// A 12" blade.
-const BLADE_RADIUS: f32 = inches(6.0);
 const FENCE_HEIGHT: f32 = inches(3.0);
 const BENCH_HALF_LENGTH: f32 = inches(40.0);
 const STOP_HEIGHT: f32 = inches(3.5);
@@ -43,17 +43,28 @@ const STOP_HEIGHT: f32 = inches(3.5);
 const STOP_BACK: f32 = inches(-1.25);
 const STOP_FRONT: f32 = inches(2.5);
 const STOP_WIDTH: f32 = inches(1.5);
-/// The arm pivots on a post behind the fence and swings the blade down in front of it.
-const PIVOT: Vec3 = Vec3::new(0.0, inches(6.0), inches(-4.0));
-/// The blade's center relative to the pivot, with the arm all the way down.
-const BLADE_FROM_PIVOT: Vec3 = Vec3::new(0.0, inches(-3.0), inches(7.6));
-/// How far the arm swings up from the bottom of its travel.
-const RAISE_ANGLE: f32 = 40.0 * PI / 180.0;
 /// Fractions of the blade's full travel per second.
 const LOWER_SPEED: f32 = 1.0 / 0.6;
 const RAISE_SPEED: f32 = 1.0 / 0.4;
 
 const STOP_STEP: Length = Length::from_inch_fraction(1, 16);
+const DEPTH_STEP: Length = Length::from_inch_fraction(1, 16);
+const DEPTH_BIG_STEP: Length = Length::from_inch_fraction(1, 4);
+
+/// Where the arm's pivot is, on a post behind the fence.
+fn pivot(saw: &MiterSaw) -> Vec3 {
+    Vec3::new(
+        0.0,
+        saw.pivot.1.as_meters_f32(),
+        -saw.pivot.0.as_meters_f32(),
+    )
+}
+
+/// The blade's center relative to the pivot, with its lowest point `bottom` above the table.
+fn blade_from_pivot(saw: &MiterSaw, bottom: Length) -> Vec3 {
+    let (out, up) = saw.center(bottom);
+    Vec3::new(0.0, up.as_meters_f32(), out.as_meters_f32()) - pivot(saw)
+}
 const STOP_BIG_STEP: Length = Length::from_inches(1);
 
 pub struct MiterSawPlugin;
@@ -68,6 +79,7 @@ impl Plugin for MiterSawPlugin {
                     (
                         (
                             move_stop_with_keys,
+                            set_depth_stop_with_keys,
                             turn_with_keys,
                             set_aside_with_key,
                             carry_with_key,
@@ -226,12 +238,19 @@ fn spawn_miter_saw(
         &mut meshes,
         &dark,
         Vec3::new(inches(-1.5), 0.0, inches(-6.0)),
-        Vec3::new(inches(1.5), PIVOT.y + inches(1.0), inches(-2.5)),
+        Vec3::new(
+            inches(1.5),
+            pivot(&station.saw).y + inches(1.0),
+            inches(-2.5),
+        ),
     );
 
-    let kerf = station.saw.blade.kerf.as_meters_f32();
-    let arm_length = BLADE_FROM_PIVOT.length();
-    let arm_tilt = (-BLADE_FROM_PIVOT.y).atan2(BLADE_FROM_PIVOT.z);
+    // The head is drawn with the arm all the way down; `draw_head` swings it up from there.
+    let saw = station.saw;
+    let kerf = saw.blade.kerf.as_meters_f32();
+    let down = blade_from_pivot(&saw, saw.stroke.1);
+    let arm_length = down.length();
+    let arm_tilt = (-down.y).atan2(down.z);
     let motor = meshes.add(Cylinder::new(inches(1.9), inches(4.5)));
     // Rounded boxes start at a corner; these are centered on their transforms.
     let mut centered = |size: Vec3| {
@@ -243,27 +262,27 @@ fn spawn_miter_saw(
     let handle = centered(Vec3::new(inches(1.3), inches(1.3), inches(4.5)));
     commands
         .spawn((
-            Transform::from_translation(ORIGIN + PIVOT),
+            Transform::from_translation(ORIGIN + pivot(&saw)),
             Visibility::default(),
             Head,
         ))
         .with_children(|head| {
             head.spawn((
-                Mesh3d(meshes.add(Cylinder::new(BLADE_RADIUS, kerf))),
+                Mesh3d(meshes.add(Cylinder::new(saw.blade.radius().as_meters_f32(), kerf))),
                 MeshMaterial3d(materials.add(StandardMaterial {
                     base_color: Color::srgb(0.88, 0.89, 0.92),
                     perceptual_roughness: 0.3,
                     ..default()
                 })),
                 // A cylinder's axis starts along Y; turn it to X so the blade cuts across the board.
-                Transform::from_translation(BLADE_FROM_PIVOT - Vec3::X * kerf / 2.0)
+                Transform::from_translation(down - Vec3::X * kerf / 2.0)
                     .with_rotation(Quat::from_rotation_z(FRAC_PI_2)),
                 Pickable::IGNORE,
             ));
             head.spawn((
                 Mesh3d(arm),
                 MeshMaterial3d(body.clone()),
-                Transform::from_translation(BLADE_FROM_PIVOT / 2.0 + Vec3::X * inches(1.0))
+                Transform::from_translation(down / 2.0 + Vec3::X * inches(1.0))
                     .with_rotation(Quat::from_rotation_x(arm_tilt)),
                 Pickable::IGNORE,
             ));
@@ -271,20 +290,16 @@ fn spawn_miter_saw(
             head.spawn((
                 Mesh3d(motor.clone()),
                 MeshMaterial3d(body.clone()),
-                Transform::from_translation(
-                    BLADE_FROM_PIVOT + Vec3::new(inches(2.6), inches(2.0), 0.0),
-                )
-                .with_rotation(Quat::from_rotation_z(FRAC_PI_2)),
+                Transform::from_translation(down + Vec3::new(inches(2.6), inches(2.0), 0.0))
+                    .with_rotation(Quat::from_rotation_z(FRAC_PI_2)),
                 Pickable::IGNORE,
             ));
             head.spawn((
                 Mesh3d(motor),
                 MeshMaterial3d(dark.clone()),
-                Transform::from_translation(
-                    BLADE_FROM_PIVOT + Vec3::new(inches(5.0), inches(2.0), 0.0),
-                )
-                .with_rotation(Quat::from_rotation_z(FRAC_PI_2))
-                .with_scale(Vec3::new(0.85, 0.15, 0.85)),
+                Transform::from_translation(down + Vec3::new(inches(5.0), inches(2.0), 0.0))
+                    .with_rotation(Quat::from_rotation_z(FRAC_PI_2))
+                    .with_scale(Vec3::new(0.85, 0.15, 0.85)),
                 Pickable::IGNORE,
             ));
             // The handle, out front where a hand pulls the blade down.
@@ -292,7 +307,7 @@ fn spawn_miter_saw(
                 Mesh3d(handle),
                 MeshMaterial3d(dark.clone()),
                 Transform::from_translation(
-                    BLADE_FROM_PIVOT + Vec3::new(inches(0.5), inches(4.5), inches(4.0)),
+                    down + Vec3::new(inches(0.5), inches(4.5), inches(4.0)),
                 ),
                 Pickable::IGNORE,
             ));
@@ -461,7 +476,7 @@ fn work_blade(
     mut station: ResMut<MiterSawStation>,
 ) {
     let pressing = *view == ShopView::MiterSaw && keys.pressed(KeyCode::Space);
-    if pressing && station.lowered < 1.0 {
+    if pressing && station.lowered < station.lowest() {
         station.lower(LOWER_SPEED * time.delta_secs());
     } else if !pressing && station.lowered > 0.0 {
         station.raise(RAISE_SPEED * time.delta_secs());
@@ -516,9 +531,35 @@ fn draw_stop(station: Res<MiterSawStation>, mut stop: Single<&mut Transform, Wit
     }
 }
 
+/// Swings the arm up from all the way down, so the blade's center is where the saw says it is
+/// for the height of its lowest point.
 fn draw_head(station: Res<MiterSawStation>, mut head: Single<&mut Transform, With<Head>>) {
     if station.is_changed() {
-        head.rotation = Quat::from_rotation_x(-RAISE_ANGLE * (1.0 - station.lowered));
+        let saw = station.saw;
+        // The angle of the arm, about the pivot.
+        let angle = |arm: Vec3| arm.y.atan2(arm.z);
+        let down = angle(blade_from_pivot(&saw, saw.stroke.1));
+        let now = angle(blade_from_pivot(&saw, station.bottom()));
+        head.rotation = Quat::from_rotation_x(down - now);
+    }
+}
+
+/// Up and Down raise and lower the depth stop. Lowered past the table, it's off.
+fn set_depth_stop_with_keys(keys: Res<ButtonInput<KeyCode>>, mut station: ResMut<MiterSawStation>) {
+    let step = if keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]) {
+        DEPTH_BIG_STEP
+    } else {
+        DEPTH_STEP
+    };
+    if keys.just_pressed(KeyCode::ArrowUp) {
+        let stop = station.depth_stop.map_or(Length::ZERO, |stop| stop + step);
+        station.set_depth_stop(Some(stop));
+    }
+    if keys.just_pressed(KeyCode::ArrowDown)
+        && let Some(stop) = station.depth_stop
+    {
+        let lower = stop - step;
+        station.set_depth_stop((lower >= Length::ZERO).then_some(lower));
     }
 }
 

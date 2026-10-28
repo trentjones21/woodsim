@@ -1,3 +1,6 @@
+mod common;
+
+use common::CutApart;
 use woodsim::{Blade, Board, Cut, CutError, Length, MiterSaw, Orientation, Pass, TableSaw};
 
 /// `whole numerator/denominator` inches, e.g. `inches(7, 1, 4)` for 7-1/4".
@@ -29,13 +32,7 @@ fn table_saw(blade: Blade, fence: Length) -> TableSaw {
 }
 
 fn miter_saw() -> MiterSaw {
-    MiterSaw {
-        blade: Blade {
-            diameter: Length::from_inches(12),
-            kerf: Blade::FULL_KERF,
-        },
-        capacity: Length::from_inch_fraction(15, 2),
-    }
+    MiterSaw::twelve_inch()
 }
 
 /// Rips `board` all the way through, expecting it to come apart.
@@ -126,7 +123,7 @@ fn crosscut_leaves_the_measured_length_and_loses_a_kerf() {
             Orientation::default(),
             Length::from_inches(24),
         )
-        .unwrap();
+        .cut_apart();
 
     assert_eq!(cut.piece.board.length(), Length::from_inches(24));
     assert_eq!(cut.piece.board.width(), inches(7, 1, 4));
@@ -146,7 +143,7 @@ fn rip_to_width_then_crosscut_to_length() {
             Orientation::default(),
             Length::from_inches(24),
         )
-        .unwrap();
+        .cut_apart();
 
     assert_eq!(cut.piece.board.to_string(), "3/4\" x 6\" x 24\"");
 }
@@ -158,7 +155,7 @@ fn kerf_means_an_eight_foot_board_does_not_make_four_two_foot_pieces() {
     for _ in 0..3 {
         let cut = saw
             .crosscut(&rest, Orientation::default(), Length::from_inches(24))
-            .unwrap();
+            .cut_apart();
         assert_eq!(cut.piece.board.length(), Length::from_inches(24));
         rest = cut.offcut.unwrap().board;
     }

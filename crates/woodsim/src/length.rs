@@ -56,6 +56,13 @@ impl Length {
         Length(steps * step.0)
     }
 
+    /// The square, in nanometers squared, as `i128`: a length can approach 10^10 nm, and its
+    /// square overflows `i64`.
+    pub(crate) fn squared(self) -> i128 {
+        let nm = self.0 as i128;
+        nm * nm
+    }
+
     pub fn as_inches_f64(self) -> f64 {
         self.0 as f64 / NM_PER_INCH as f64
     }
