@@ -22,7 +22,7 @@ use bevy::{
     render::view::{ColorGrading, ColorGradingGlobal},
     time::common_conditions::on_real_timer,
 };
-use woodsim::{Angle, Board, Cut, Kerf, Length, Orientation, Piece, Run};
+use woodsim::{Across, Angle, Board, Cut, Kerf, Length, Orientation, Piece, Run};
 
 use crate::{
     chop::MiterSawStation,
@@ -83,7 +83,11 @@ impl Placed {
 
     /// A piece cut from this board, where it was on it.
     pub fn piece(&self, piece: &Piece) -> Placed {
-        let offset = Vec3::new(piece.w.as_meters_f32(), 0.0, piece.l.as_meters_f32());
+        let offset = Vec3::new(
+            piece.w.as_meters_f32(),
+            piece.t.as_meters_f32(),
+            piece.l.as_meters_f32(),
+        );
         Placed {
             board: piece.board.clone(),
             corner: self.corner + self.rotation * offset,
@@ -115,15 +119,12 @@ fn board_size(board: &Board) -> Vec3 {
 }
 
 /// The rotation that lays `board` on a saw as `lie` says, and where its corner ends up from the
-/// near corner of the space it takes up. Matches `woodsim::Orientation`: any flip comes first,
-/// about the saw's along axis, then the quarter turns about the up axis.
+/// near corner of the space it takes up. Matches `woodsim::Orientation`: the rolls come first,
+/// about the saw's along axis, each tipping across toward up, then the quarter turns about the
+/// up axis.
 fn lay(board: &Board, lie: Orientation) -> (Quat, Vec3) {
-    let flip = if lie.is_flipped() {
-        Quat::from_rotation_z(PI)
-    } else {
-        Quat::IDENTITY
-    };
-    let rotation = Quat::from_rotation_y(lie.turns() as f32 * FRAC_PI_2) * flip;
+    let roll = Quat::from_rotation_z(lie.rolls() as f32 * FRAC_PI_2);
+    let rotation = Quat::from_rotation_y(lie.turns() as f32 * FRAC_PI_2) * roll;
     let placed = Placed {
         board: board.clone(),
         corner: Vec3::ZERO,
@@ -859,6 +860,25 @@ fn describe_slots(board: &Board, kerf: &Kerf, count: usize) -> String {
         run.map_or(Length::ZERO, |run| run.length)
             .rounded_to(thirty_second)
     };
+    if let Across::Thickness = kerf.across {
+        // A resaw slot, cut by a blade standing parallel to the faces, came in through an edge.
+        let width = size.width.rounded_to(thirty_second);
+        let depth = size.depth.rounded_to(thirty_second);
+        return match (size.bottom, size.top) {
+            (Some(one), Some(other)) => format!(
+                "{a} stopped resaw cut{s} {} long on one edge and {} on the other",
+                run(Some(one)),
+                run(Some(other))
+            ),
+            (Some(edge), None) | (None, Some(edge)) if edge.end_to_end => {
+                format!("{a} {width}-wide, {depth}-deep resaw kerf{s} in an edge, the full length")
+            }
+            (edge, other) => format!(
+                "{a} {width}-wide, {depth}-deep resaw kerf{s} in an edge, {} long",
+                run(edge.or(other))
+            ),
+        };
+    }
     let thickness = board.thickness();
     if kerf.depth(thickness) >= thickness {
         // A slot through the board's whole length would have cut it apart, so this one stops.
@@ -1082,6 +1102,32 @@ mod tests {
             describe_board(&board),
             "3/4\" x 7-1/4\" x 24\", with three 1/8\"-wide, 1/4\"-deep dados 3-7/16\" long \
              and a 1/4\"-wide, 1/4\"-deep dado 3-7/16\" long"
+        );
+    }
+
+    #[test]
+    fn a_resaw_slot_is_described_from_the_edge_it_came_in_through() {
+        let saw = woodsim::TableSaw {
+            blade: woodsim::Blade {
+                diameter: Length::from_inches(10),
+                kerf: woodsim::Blade::FULL_KERF,
+            },
+            fence: Length::from_inch_fraction(5, 16),
+            height: Length::from_inches(3),
+            miter_gauge: None,
+        };
+        let board = Board::new(
+            Length::from_inches(24),
+            Length::from_inch_fraction(11, 2),
+            Length::from_inch_fraction(3, 4),
+        );
+        let Ok(Pass::Kerfed(slotted)) = saw.rip(&board, Orientation::default().tipped()) else {
+            panic!("expected a slot in the edge");
+        };
+        assert_eq!(
+            describe_board(&slotted),
+            "3/4\" x 5-1/2\" x 24\", with a 1/8\"-wide, 3\"-deep resaw kerf in an edge, the full \
+             length"
         );
     }
 }

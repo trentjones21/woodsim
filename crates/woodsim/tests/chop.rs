@@ -2,7 +2,7 @@
 //! leaves a scar shaped like its circle, and side-by-side scars nibble out a wider one.
 
 use proptest::prelude::*;
-use woodsim::{Board, Direction, Length, MiterSaw, Orientation, Pass};
+use woodsim::{Across, Board, Direction, Length, MiterSaw, Orientation, Pass};
 
 fn inches(n: i64) -> Length {
     Length::from_inches(n)
@@ -40,7 +40,7 @@ fn stopping_short_leaves_a_scar_from_above() {
 
     let scar = board.kerfs()[0];
     assert!(!scar.from_below());
-    assert_eq!(scar.across, Direction::LENGTH);
+    assert_eq!(scar.across, Across::Face(Direction::LENGTH));
     assert_eq!(scar.depth(board.thickness()), fraction(1, 4));
     // The blade's circle dips into the top only under its center, which is a few inches out
     // from the fence: the scar doesn't reach the board's front edge or the fence.

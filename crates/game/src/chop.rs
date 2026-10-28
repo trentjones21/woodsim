@@ -123,6 +123,12 @@ impl MiterSawStation {
         self.relay(self.lie.flipped())
     }
 
+    /// Stands the board up on an edge, with its bottom face toward the fence, or lays it back
+    /// down.
+    pub fn tip(&mut self) -> bool {
+        self.relay(self.lie.tipped())
+    }
+
     fn relay(&mut self, lie: Orientation) -> bool {
         if !self.blade_up() {
             return false;
@@ -976,6 +982,34 @@ mod tests {
                 .starts_with("Board on the saw: 3/4\" x 6\" x 24\", with a stopped cut"),
             "{}",
             station.status()
+        );
+    }
+
+    #[test]
+    fn on_edge_the_blade_chops_down_through_the_board() {
+        let mut station = MiterSawStation::default();
+        station.load(Board::new(
+            Length::from_inches(24),
+            Length::from_inch_fraction(7, 2),
+            Length::from_inch_fraction(3, 4),
+        ));
+        assert!(station.tip());
+        chop(&mut station);
+        let Work::Cut { cut, .. } = &station.work else {
+            panic!("the blade should have cut the board");
+        };
+        assert_eq!(cut.piece.board.to_string(), "3/4\" x 3-1/2\" x 12\"");
+    }
+
+    #[test]
+    fn on_edge_the_table_has_to_be_square() {
+        let mut station = loaded();
+        assert!(station.tip());
+        station.set_miter(Angle::from_degrees(45));
+        chop(&mut station);
+        assert_eq!(
+            station.status(),
+            "No cut: the table has to be square to cut a board standing on edge."
         );
     }
 }

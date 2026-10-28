@@ -3,6 +3,7 @@ use std::fmt;
 use crate::{
     Angle, Axis, Kerf, Length,
     face::{Direction, Edge, Region, merge_all},
+    kerf::Across,
 };
 
 /// A board: stock of some length, width, and thickness, less any slots saws have cut into it
@@ -88,15 +89,56 @@ impl Board {
             })
     }
 
+    /// Whether the board has wood at the point `(l, w, t)`: inside its face and thickness, and
+    /// not where a slot took it. Points on a surface don't count.
+    pub fn has_wood_in(&self, l: Length, w: Length, t: Length) -> bool {
+        Length::ZERO < t
+            && t < self.thickness
+            && self.face.iter().any(|region| region.contains(l, w))
+            && !self.kerfs.iter().any(|kerf| kerf.contains(l, w, t))
+    }
+
     /// The separate pieces this board is in. Wherever slots, alone or together, go all the
     /// way through the board, they divide it: a slot the length of the board splits it in two,
-    /// and a rip and a crosscut that meet cut out the corner between them. Wood the slots took
-    /// entirely is sawdust. Each piece is trimmed to its wood, and in order by where its corner
-    /// was.
+    /// and a rip and a crosscut that meet cut out the corner between them. Resaw slots square
+    /// to the thickness that reach across the whole face, one or more together, split it into
+    /// layers, and slots in the face that go through a thinner layer divide it in turn. Wood
+    /// the slots took entirely is sawdust. Each piece is trimmed to its wood, and in order by
+    /// where its corner was.
     ///
-    /// Only slots that go through on their own divide a board. Two slots from opposite faces
-    /// whose depths together go through don't yet.
+    /// Two slots in the face, from opposite faces, whose depths together go through don't
+    /// divide a board yet.
     pub(crate) fn pieces(&self) -> Vec<Piece> {
+        let across_face = self.face_pieces();
+        let mut changed = !matches!(across_face.as_slice(), [whole] if whole.board == *self);
+        let mut pieces = Vec::new();
+        for piece in across_face {
+            let Some(layers) = piece.board.layers() else {
+                pieces.push(piece);
+                continue;
+            };
+            changed = true;
+            for layer in layers {
+                for part in layer.board.pieces() {
+                    pieces.push(Piece {
+                        board: part.board,
+                        l: piece.l + part.l,
+                        w: piece.w + part.w,
+                        t: layer.t + part.t,
+                    });
+                }
+            }
+        }
+        if !changed {
+            return vec![Piece::whole(self.clone())];
+        }
+        pieces.sort_by_key(|piece| (piece.l, piece.w, piece.t));
+        pieces
+    }
+
+    /// The pieces slots through the board divide its face into, as `pieces` does but without
+    /// splitting it into layers.
+    fn face_pieces(&self) -> Vec<Piece> {
         let mut wood = self.face.clone();
         for hole in self
             .kerfs
@@ -152,11 +194,7 @@ impl Board {
             && bounds(regions) == whole
         {
             // Still in one piece and as big as ever: the slots are just slots.
-            return vec![Piece {
-                board: self.clone(),
-                l: Length::ZERO,
-                w: Length::ZERO,
-            }];
+            return vec![Piece::whole(self.clone())];
         }
 
         let mut pieces: Vec<Piece> = pieces
@@ -175,6 +213,7 @@ impl Board {
                     board,
                     l: l0,
                     w: w0,
+                    t: Length::ZERO,
                 }
             })
             .collect();
@@ -182,24 +221,80 @@ impl Board {
         pieces
     }
 
+    /// The layers resaw slots split the board into, if they do: where slots square to the
+    /// thickness, sharing some depth in it, together reach across the whole face. The layer
+    /// below runs up to the highest of their lower faces and the layer above from the lowest of
+    /// their upper ones; the slots stay in both, so where one of them is lower or higher than
+    /// the others, it still takes its wood out of that layer.
+    fn layers(&self) -> Option<Vec<Piece>> {
+        let resaws: Vec<&Kerf> = self
+            .kerfs
+            .iter()
+            .filter(|kerf| matches!(kerf.across, Across::Thickness))
+            .filter(|kerf| kerf.near < self.thickness && kerf.far > Length::ZERO)
+            .collect();
+        // Any group of slots sharing some depth all reach just above one of their lower faces.
+        resaws.iter().find_map(|first| {
+            let depth = first.near + Length::from_nm(1);
+            let group: Vec<&Kerf> = resaws
+                .iter()
+                .copied()
+                .filter(|kerf| kerf.near < depth && depth < kerf.far)
+                .collect();
+            let outlines: Vec<Region> = group.iter().filter_map(|kerf| kerf.outline()).collect();
+            let covered = self.face.iter().all(|region| {
+                outlines
+                    .iter()
+                    .fold(vec![region.clone()], |left, outline| {
+                        left.iter().flat_map(|part| part.minus(outline)).collect()
+                    })
+                    .is_empty()
+            });
+            if !covered {
+                return None;
+            }
+            let below = group.iter().map(|kerf| kerf.near).max()?;
+            let above = group.iter().map(|kerf| kerf.far).min()?;
+            let layers = [
+                (below > Length::ZERO).then(|| self.layer(Length::ZERO, below)),
+                (above < self.thickness).then(|| self.layer(above, self.thickness)),
+            ];
+            Some(layers.into_iter().flatten().collect())
+        })
+    }
+
+    /// The part of the board from `t` = `bottom` to `top`, as a piece of it.
+    fn layer(&self, bottom: Length, top: Length) -> Piece {
+        let mut board = Board::new(self.length, self.width, top - bottom);
+        board.face = self.face.clone();
+        board.kerfs = self
+            .kerfs
+            .iter()
+            .map(|kerf| kerf.moved_up(bottom))
+            .filter(|kerf| board.touched_by(kerf))
+            .collect();
+        Piece {
+            board,
+            l: Length::ZERO,
+            w: Length::ZERO,
+            t: bottom,
+        }
+    }
+
     /// How `kerf`, one of this board's slots, measures in it.
     pub fn slot(&self, kerf: &Kerf) -> SlotSize {
+        match kerf.across {
+            Across::Face(across) => self.slot_in_face(kerf, across),
+            Across::Thickness => self.slot_in_edge(kerf),
+        }
+    }
+
+    fn slot_in_face(&self, kerf: &Kerf, across: Direction) -> SlotSize {
         let in_slot: Vec<Region> = self
             .face
             .iter()
             .filter_map(|region| region.clip_all(kerf.faces()))
             .collect();
-        let range = |regions: &[Region], direction: Direction| {
-            regions
-                .iter()
-                .map(|region| region.extent(direction))
-                .fold((f64::MAX, f64::MIN), |(low, high), (a, b)| {
-                    (low.min(a), high.max(b))
-                })
-        };
-        let measured = |(low, high): (f64, f64), direction: Direction| {
-            Length::from_nm(((high - low).max(0.0) / direction.scale()).round() as i64)
-        };
         let [near_face, far_face] = kerf.faces();
         let wood_beyond = |face: Edge| {
             self.face
@@ -223,10 +318,51 @@ impl Board {
             })
         };
         SlotSize {
-            width: measured(range(&in_slot, kerf.across), kerf.across),
+            width: measured(range(&in_slot, across), across),
+            depth: kerf.depth(self.thickness).min(self.thickness),
             at_edge: !wood_beyond(near_face) || !wood_beyond(far_face),
             bottom: run(Length::ZERO),
             top: run(self.thickness),
+        }
+    }
+
+    /// Measures a slot square to the thickness, which came in through one of the board's edges
+    /// square to `along.square()`.
+    fn slot_in_edge(&self, kerf: &Kerf) -> SlotSize {
+        let square = kerf.along.square();
+        let scale = kerf.along.scale();
+        let radius = kerf.radius.as_nm() as f64 * scale;
+        let center = kerf.center.as_nm() as f64;
+        let (low, high) = range(&self.face, square);
+        let wood = range(&self.face, kerf.along);
+        // How far the blade reached along each edge, within the board's length there.
+        let run = |side: f64| {
+            let off = side - center;
+            (off.abs() <= radius).then(|| {
+                let half = (radius * radius - off * off).sqrt();
+                let reach = (
+                    kerf.start.as_nm() as f64 - half,
+                    kerf.end.as_nm() as f64 + half,
+                );
+                let within = (reach.0.max(wood.0), reach.1.min(wood.1));
+                Run {
+                    length: measured(within, kerf.along),
+                    end_to_end: reach.0 <= wood.0 && reach.1 >= wood.1,
+                }
+            })
+        };
+        let depth = if center < low {
+            center + radius - low
+        } else {
+            high - (center - radius)
+        };
+        let nm = |scaled: f64| Length::from_nm((scaled / scale).round() as i64);
+        SlotSize {
+            width: (kerf.far.min(self.thickness) - kerf.near.max(Length::ZERO)).max(Length::ZERO),
+            depth: nm(depth.min(high - low)),
+            at_edge: kerf.near <= Length::ZERO || kerf.far >= self.thickness,
+            bottom: run(low),
+            top: run(high),
         }
     }
 
@@ -249,6 +385,21 @@ impl Board {
     }
 }
 
+/// The range of `direction · (l, w)` over `regions`, times the direction's scale.
+fn range(regions: &[Region], direction: Direction) -> (f64, f64) {
+    regions
+        .iter()
+        .map(|region| region.extent(direction))
+        .fold((f64::MAX, f64::MIN), |(low, high), (a, b)| {
+            (low.min(a), high.max(b))
+        })
+}
+
+/// The length of `(low, high)`, measured along `direction`, to the nanometer.
+fn measured((low, high): (f64, f64), direction: Direction) -> Length {
+    Length::from_nm(((high - low).max(0.0) / direction.scale()).round() as i64)
+}
+
 /// How far `out`, the way an edge faces, is turned from the board's length, in radians, either
 /// way.
 fn slant(out: Direction) -> f64 {
@@ -266,10 +417,13 @@ fn is_end(out: Direction) -> bool {
 pub struct SlotSize {
     /// How wide it is in the board, square to its faces.
     pub width: Length,
+    /// How deep it goes into the board from where the blade came in, at its deepest.
+    pub depth: Length,
     /// Whether it's at an edge or end of the board, with wood on one side of it only.
     pub at_edge: bool,
-    /// How far it runs along the board on its bottom face and on its top, if the blade reached
-    /// that face.
+    /// How far it runs along the board on the two sides the blade could come out of, if it
+    /// reached them: for a slot in the face, its bottom face and its top; for a slot square to
+    /// the thickness, the edges where `along.square()` is lowest and highest.
     pub bottom: Option<Run>,
     pub top: Option<Run>,
 }
@@ -282,19 +436,34 @@ pub struct Run {
     pub end_to_end: bool,
 }
 
-/// A board cut from a bigger one, and where its corner was on that board: `l` along its length
-/// and `w` across its width.
+/// A board cut from a bigger one, and where its corner was on that board: `l` along its
+/// length, `w` across its width, and `t` up through its thickness.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Piece {
     pub board: Board,
     pub l: Length,
     pub w: Length,
+    pub t: Length,
 }
 
 impl Piece {
+    /// All of `board`, as a piece of itself.
+    fn whole(board: Board) -> Piece {
+        Piece {
+            board,
+            l: Length::ZERO,
+            w: Length::ZERO,
+            t: Length::ZERO,
+        }
+    }
+
     /// Where the piece's corner was on `axis` of the board it came from.
     pub fn at(&self, axis: Axis) -> Length {
-        axis.pick(self.l, self.w)
+        match axis {
+            Axis::Length => self.l,
+            Axis::Width => self.w,
+            Axis::Thickness => self.t,
+        }
     }
 }
 

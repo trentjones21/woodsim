@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::{Angle, Axis, Board, Direction, Kerf, Length, Orientation, Piece};
+use crate::{Angle, Axis, Board, Direction, Kerf, Length, Orientation, Piece, kerf::Across};
 
 /// A round saw blade. Every cut turns a strip of wood as wide as the kerf into sawdust.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -55,6 +55,8 @@ pub enum CutError {
     NonPositiveSetting(Length),
     /// The setting is at or past the board's far edge, so the blade never touches it.
     MissesBoard { setting: Length, available: Length },
+    /// The board lies a way the simulation can't cut yet, for the reason given.
+    NotModeled(&'static str),
 }
 
 impl fmt::Display for CutError {
@@ -67,6 +69,7 @@ impl fmt::Display for CutError {
                 f,
                 "the blade misses the board: set to {setting}, but the board is only {available}"
             ),
+            CutError::NotModeled(reason) => write!(f, "{reason}"),
         }
     }
 }
@@ -113,6 +116,12 @@ impl TableSaw {
         );
         let (across, across_backward) = lie.across();
         let (along, along_backward) = lie.along();
+        let (up, up_backward) = lie.up();
+        if along == Axis::Thickness {
+            return Err(CutError::NotModeled(
+                "standing on edge, the board has to run along the table lengthwise",
+            ));
+        }
         let span = across.of(board);
         let reaches = |setting: Length| {
             if setting <= Length::ZERO {
@@ -141,18 +150,25 @@ impl TableSaw {
         let (near, far) = Orientation::onto_board(slot, span, across_backward);
         let (start, end) = Orientation::onto_board((start, end), along.of(board), along_backward);
         let radius = self.blade.radius();
-        let center = self.height - radius;
+        let height = self.height - radius;
+        let center = if up_backward {
+            up.of(board) - height
+        } else {
+            height
+        };
+        // Lying flat, the blade stands square to the board's face; on edge, parallel to it,
+        // resawing it.
+        let kind = match up {
+            Axis::Thickness => Across::Face(Direction::of(across)),
+            _ => Across::Thickness,
+        };
         let kerf = Kerf::new(
-            Direction::of(across),
+            kind,
             (near, far),
             Direction::of(along),
             (start, end),
             radius,
-            if lie.is_flipped() {
-                board.thickness() - center
-            } else {
-                center
-            },
+            center,
         );
         if !board.touched_by(&kerf) {
             return Ok(Pass::Missed);
@@ -282,6 +298,9 @@ impl MiterSaw {
             self.max_miter,
             self.miter
         );
+        if lie.on_edge() {
+            return self.chop_on_edge(board, lie, length, bottom);
+        }
         let (across, across_backward) = lie.across();
         let span = across.of(board);
         let (along, _) = lie.along();
@@ -308,12 +327,12 @@ impl MiterSaw {
         let (out, height) = self.center(bottom);
         let middle = at(outward) + scaled(out, outward);
         let kerf = Kerf::new(
-            toward_stop,
+            Across::Face(toward_stop),
             (face - kerf_width, face),
             outward,
             (middle, middle),
             self.blade.radius(),
-            if lie.is_flipped() {
+            if lie.up().1 {
                 board.thickness() - height
             } else {
                 height
@@ -343,6 +362,85 @@ impl MiterSaw {
             2 * toward_stop.dot(piece.l + l, piece.w + w) > slot_middle
         };
         Ok(Pass::Cut(sort_out(pieces, measured, toward_fence, waste)))
+    }
+
+    /// Chops a board standing on an edge, square only: with its length along the fence, the
+    /// blade comes down through its width; turned with its length across the saw, parallel to
+    /// its faces.
+    fn chop_on_edge(
+        &self,
+        board: &Board,
+        lie: Orientation,
+        length: Length,
+        bottom: Length,
+    ) -> Result<Pass, CutError> {
+        if self.miter != Angle::ZERO {
+            return Err(CutError::NotModeled(
+                "the table has to be square to cut a board standing on edge",
+            ));
+        }
+        let (across, across_backward) = lie.across();
+        let (along, along_backward) = lie.along();
+        let (up, up_backward) = lie.up();
+        let (span, total) = (across.of(board), along.of(board));
+        if length <= Length::ZERO {
+            return Err(CutError::NonPositiveSetting(length));
+        }
+        if length >= total {
+            return Err(CutError::MissesBoard {
+                setting: length,
+                available: total,
+            });
+        }
+        let slot = (total - length - self.blade.kerf, total - length);
+        let (near, far) = Orientation::onto_board(slot, total, along_backward);
+        // Where the blade's center is on the board: out in front of the fence, and up.
+        let (out, height) = self.center(bottom);
+        let (out, _) = Orientation::onto_board((span - out, span - out), span, across_backward);
+        let height = if up_backward {
+            up.of(board) - height
+        } else {
+            height
+        };
+        let radius = self.blade.radius();
+        let kerf = match along {
+            Axis::Length => Kerf::new(
+                Across::Face(Direction::LENGTH),
+                (near, far),
+                Direction::WIDTH,
+                (height, height),
+                radius,
+                out,
+            ),
+            _ => Kerf::new(
+                Across::Thickness,
+                (near, far),
+                Direction::of(across),
+                (out, out),
+                radius,
+                height,
+            ),
+        };
+        if !board.touched_by(&kerf) {
+            return Ok(Pass::Missed);
+        }
+        let kerfed = board.with_kerf(kerf);
+        let pieces = kerfed.pieces();
+        if let [whole] = pieces.as_slice()
+            && whole.board == kerfed
+        {
+            return Ok(Pass::Kerfed(kerfed));
+        }
+        let waste = slot.1.min(total) - slot.0.max(Length::ZERO);
+        let toward_fence = |piece: &Piece| on_table(piece, across, span, across_backward).1;
+        let toward_stop =
+            |piece: &Piece| past_middle(on_table(piece, along, total, along_backward), slot);
+        Ok(Pass::Cut(sort_out(
+            pieces,
+            toward_stop,
+            toward_fence,
+            waste,
+        )))
     }
 
     /// Brings the blade all the way down on `board`, crosscutting it so the measured piece
@@ -399,13 +497,17 @@ fn sort_out(
     }
 }
 
-/// How much of a board's face a piece covers, as its bounding rectangle.
-fn area(piece: &Piece) -> i128 {
-    piece.board.length().as_nm() as i128 * piece.board.width().as_nm() as i128
+/// How much room a piece takes up, as the box around it.
+fn size(piece: &Piece) -> i128 {
+    let board = &piece.board;
+    [board.length(), board.width(), board.thickness()]
+        .into_iter()
+        .map(|side| side.as_nm() as i128)
+        .product()
 }
 
 /// Removes and returns the biggest piece, the one nearest the fence among equals.
 fn take_biggest(pieces: &mut Vec<Piece>, toward_fence: impl Fn(&Piece) -> Length) -> Option<Piece> {
-    let index = (0..pieces.len()).max_by_key(|&i| (area(&pieces[i]), toward_fence(&pieces[i])))?;
+    let index = (0..pieces.len()).max_by_key(|&i| (size(&pieces[i]), toward_fence(&pieces[i])))?;
     Some(pieces.remove(index))
 }

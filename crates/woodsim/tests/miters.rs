@@ -180,7 +180,7 @@ fn stopped_short_at_an_angle_it_scars_the_board_on_the_slant() {
         other => panic!("expected a scar, got {other:?}"),
     };
     let scar = board.kerfs()[0];
-    assert_eq!(scar.across.axis(), None);
+    assert_eq!(scar.slant(), Angle::from_degrees(45));
     assert_eq!(scar.width(), Blade::FULL_KERF);
     let size = board.slot(&scar);
     assert_eq!(size.width, Blade::FULL_KERF);

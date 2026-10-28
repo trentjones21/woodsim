@@ -31,11 +31,13 @@ impl Direction {
         }
     }
 
-    /// The direction one of the board's axes runs.
+    /// The direction one of the board's face axes runs. Panics for the thickness, which isn't
+    /// a direction in the face.
     pub fn of(axis: Axis) -> Direction {
         match axis {
             Axis::Length => Direction::LENGTH,
             Axis::Width => Direction::WIDTH,
+            Axis::Thickness => panic!("the thickness isn't a direction in the board's face"),
         }
     }
 
@@ -226,6 +228,22 @@ impl Region {
             Region::rectangle((-FAR, FAR), (-FAR, FAR)),
             |region, edge| region.clip(edge),
         )
+    }
+
+    /// The convex region with `corners`, in order counterclockwise, if it has any area. Edges
+    /// run straight between them.
+    pub(crate) fn around(corners: &[(Length, Length)]) -> Option<Region> {
+        let n = corners.len();
+        let edges = (0..n).filter_map(|i| {
+            let ((l0, w0), (l1, w1)) = (corners[i], corners[(i + 1) % n]);
+            let (dl, dw) = ((l1 - l0).as_nm(), (w1 - w0).as_nm());
+            // Counterclockwise, the wood is to the left; the outside, to the right.
+            (dl != 0 || dw != 0).then(|| {
+                let out = Direction::new(dw, -dl);
+                Edge::new(out, out.dot(l0, w0))
+            })
+        });
+        Region::within(edges)
     }
 
     /// Starts the edges at the same one however the region was made, so equal regions compare

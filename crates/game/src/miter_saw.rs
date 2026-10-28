@@ -31,7 +31,8 @@ pub const HELP: &str = "Left/Right: move the stop 1/16\"   Shift+Left/Right: 1\"
                         Down past the table turns it off\n\
                         [ and ]: swing the miter 1 deg   \
                         Shift: to the next stop (15, 22.5, 30, 45 deg)\n\
-                        Hold Space: lower the blade   Q/E: turn the board   F: flip it\n\
+                        Hold Space: lower the blade   Q/E: turn the board   F: flip it   \
+                        V: stand it on edge\n\
                         Click a cut piece: slide it back against the stop\n\
                         Click a part on the pile: put it back on the saw   \
                         S: set everything on the saw aside\n\
@@ -441,6 +442,9 @@ fn turn_with_keys(keys: Res<ButtonInput<KeyCode>>, mut station: ResMut<MiterSawS
     }
     if keys.just_pressed(KeyCode::KeyF) {
         station.flip();
+    }
+    if keys.just_pressed(KeyCode::KeyV) {
+        station.tip();
     }
 }
 

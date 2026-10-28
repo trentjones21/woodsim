@@ -15,7 +15,7 @@ mod saw;
 pub use angle::Angle;
 pub use board::{Board, Piece, Run, SlotSize};
 pub use face::{Direction, Edge, Region};
-pub use kerf::Kerf;
+pub use kerf::{Across, Kerf};
 pub use length::Length;
 pub use orientation::{Axis, Orientation};
 pub use saw::{Blade, Cut, CutError, MiterSaw, Pass, TableSaw};

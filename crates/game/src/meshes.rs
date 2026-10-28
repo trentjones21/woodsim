@@ -8,7 +8,7 @@ use bevy::{
     asset::RenderAssetUsages, mesh::Indices, prelude::*, render::render_resource::PrimitiveTopology,
 };
 
-use woodsim::{Board, Direction, Length};
+use woodsim::{Across, Board, Direction, Length};
 
 use crate::textures::{WOOD_TILE_ACROSS, WOOD_TILE_ALONG};
 
@@ -70,13 +70,16 @@ pub fn board_mesh(size: Vec3, offset: Vec3, grain: Grain) -> Mesh {
 /// up.
 ///
 /// The board's face starts as the convex regions woodsim gives, and each region is split along
-/// every slot's faces and, inside a slot, at points around its curved ends. At any point in a
-/// region, the wood runs from a bottom to a top: a slot cut up from below raises the bottom,
-/// one cut down from above lowers the top, and where they meet there's no wood. Walls go
-/// wherever a region has wood the region beside it doesn't.
+/// every slot's faces and, inside a slot, at points around its curved ends, and around each
+/// resaw slot square to the thickness. At any point in a region, the wood runs from a bottom to
+/// a top: a slot cut up from below raises the bottom, one cut down from above lowers the top,
+/// and where they meet there's no wood. A resaw slot takes a layer out of the middle, so the
+/// wood there is in two spans, or more. Walls go wherever a region has wood the region beside
+/// it doesn't.
 pub fn lumber_mesh(board: &Board, grain: Vec3) -> Mesh {
     let thickness = board.thickness().as_meters_f32();
-    let slots: Vec<Slot> = board.kerfs().iter().map(Slot::from).collect();
+    let slots: Vec<Slot> = board.kerfs().iter().filter_map(Slot::of).collect();
+    let resaws: Vec<Resaw> = board.kerfs().iter().filter_map(Resaw::of).collect();
     let mut cells: Vec<Vec<Vec2>> = board
         .face()
         .iter()
@@ -113,40 +116,44 @@ pub fn lumber_mesh(board: &Board, grain: Vec3) -> Mesh {
             })
             .collect();
     }
+    for resaw in &resaws {
+        cells = cells
+            .iter()
+            .flat_map(|cell| carve(cell, &resaw.outline))
+            .collect();
+    }
 
-    // Each cell, the slots cutting it, and the span of wood at each of its corners.
-    let cutting = |cell: &[Vec2]| -> Vec<&Slot> {
-        let middle = centroid(cell);
-        slots.iter().filter(|slot| slot.covers(middle)).collect()
-    };
+    // Each cell, what's cutting it, and the spans of wood at each of its corners.
     let cells: Vec<Cell> = cells
         .into_iter()
         .map(|corners| {
-            let slots = cutting(&corners);
-            let spans = corners
+            let middle = centroid(&corners);
+            let slots: Vec<&Slot> = slots.iter().filter(|slot| slot.covers(middle)).collect();
+            let layers = layers_out(&resaws, middle, thickness);
+            let columns = corners
                 .iter()
-                .map(|&p| wood_at(&slots, p, thickness))
+                .map(|&p| column(&slots, &layers, p, thickness))
                 .collect();
             Cell {
                 corners,
                 slots,
-                spans,
+                layers,
+                columns,
             }
         })
         .collect();
 
     let mut mesh = MeshBuilder::new(grain);
-    for Cell {
-        corners: cell,
-        spans,
-        ..
-    } in &cells
-    {
-        mesh.surfaces(cell, spans);
-        let middle = centroid(cell);
-        let n = cell.len();
+    for cell in &cells {
+        let corners = &cell.corners;
+        for span in 0..=cell.layers.len() {
+            let spans: Vec<(f32, f32)> = cell.columns.iter().map(|column| column[span]).collect();
+            mesh.surfaces(corners, &spans);
+        }
+        let middle = centroid(corners);
+        let n = corners.len();
         for i in 0..n {
-            let (a, b) = (cell[i], cell[(i + 1) % n]);
+            let (a, b) = (corners[i], corners[(i + 1) % n]);
             let along = b - a;
             let outward = Vec2::new(along.y, -along.x).normalize_or_zero();
             let outward = if outward.dot(a - middle) < 0.0 {
@@ -166,39 +173,54 @@ pub fn lumber_mesh(board: &Board, grain: Vec3) -> Mesh {
                 .collect();
             stops.extend([0.0, 1.0]);
             let stops = sorted_distinct(stops);
-            let ours = |t: f32| {
-                let (from, to) = (spans[i], spans[(i + 1) % n]);
-                (from.0 + (to.0 - from.0) * t, from.1 + (to.1 - from.1) * t)
-            };
+            let (from, to) = (&cell.columns[i], &cell.columns[(i + 1) % n]);
             for pair in stops.windows(2) {
                 let (p, q) = (a + along * pair[0], a + along * pair[1]);
                 let beside = (p + q) / 2.0 + outward * 1e-5;
                 let theirs = cells
                     .iter()
                     .find(|other| contains(&other.corners, beside))
-                    .map(|other| [p, q].map(|point| wood_at(&other.slots, point, thickness)));
-                mesh.wall(
-                    [(p.x, p.y), (q.x, q.y)],
-                    [ours(pair[0]), ours(pair[1])],
-                    theirs,
-                    Vec3::new(outward.x, 0.0, outward.y),
-                );
+                    .map(|other| {
+                        [p, q].map(|point| column(&other.slots, &other.layers, point, thickness))
+                    });
+                for span in 0..from.len() {
+                    let ours = |t: f32| {
+                        let (from, to) = (from[span], to[span]);
+                        (from.0 + (to.0 - from.0) * t, from.1 + (to.1 - from.1) * t)
+                    };
+                    mesh.wall(
+                        [(p.x, p.y), (q.x, q.y)],
+                        [ours(pair[0]), ours(pair[1])],
+                        theirs.as_ref(),
+                        Vec3::new(outward.x, 0.0, outward.y),
+                    );
+                }
             }
         }
     }
     mesh.build()
 }
 
-/// A convex piece of a board's face, the slots cutting it, and the span of wood at each of its
+/// A convex piece of a board's face, what's cutting it, and the spans of wood at each of its
 /// corners.
 struct Cell<'a> {
     corners: Vec<Vec2>,
     slots: Vec<&'a Slot>,
-    spans: Vec<(f32, f32)>,
+    /// The layers resaw slots take out of the middle of the wood here, bottom to top.
+    layers: Vec<(f32, f32)>,
+    /// At each corner, a span of wood below each layer taken out and one above them all.
+    columns: Vec<Vec<(f32, f32)>>,
 }
 
 /// The parts of the convex `cell` on either side of the line `direction · p = at`.
 fn split(cell: &[Vec2], direction: Vec2, at: f32) -> Vec<Vec<Vec2>> {
+    let (below, above) = sides(cell, direction, at);
+    below.into_iter().chain(above).collect()
+}
+
+/// The parts of the convex `cell` below the line `direction · p = at` and above it, if it has
+/// any there.
+fn sides(cell: &[Vec2], direction: Vec2, at: f32) -> (Option<Vec<Vec2>>, Option<Vec<Vec2>>) {
     let side: Vec<f32> = cell
         .iter()
         .map(|&p| {
@@ -206,8 +228,11 @@ fn split(cell: &[Vec2], direction: Vec2, at: f32) -> Vec<Vec<Vec2>> {
             if d.abs() < 1e-7 { 0.0 } else { d }
         })
         .collect();
-    if side.iter().all(|&d| d <= 0.0) || side.iter().all(|&d| d >= 0.0) {
-        return vec![cell.to_vec()];
+    if side.iter().all(|&d| d <= 0.0) {
+        return (Some(cell.to_vec()), None);
+    }
+    if side.iter().all(|&d| d >= 0.0) {
+        return (None, Some(cell.to_vec()));
     }
     let (mut below, mut above) = (Vec::new(), Vec::new());
     let n = cell.len();
@@ -225,10 +250,29 @@ fn split(cell: &[Vec2], direction: Vec2, at: f32) -> Vec<Vec<Vec2>> {
             above.push(crossing);
         }
     }
-    [below, above]
-        .into_iter()
-        .filter(|part| area(part) > 1e-12)
-        .collect()
+    let keep = |part: Vec<Vec2>| (area(&part) > 1e-12).then_some(part);
+    (keep(below), keep(above))
+}
+
+/// The convex `cell` cut where the convex `outline` crosses it: the part inside, and the parts
+/// around it, each convex.
+fn carve(cell: &[Vec2], outline: &[Vec2]) -> Vec<Vec<Vec2>> {
+    let middle = centroid(outline);
+    let mut around = Vec::new();
+    let mut inside = cell.to_vec();
+    for (i, &a) in outline.iter().enumerate() {
+        let b = outline[(i + 1) % outline.len()];
+        let out = Vec2::new(b.y - a.y, a.x - b.x);
+        let out = if out.dot(middle - a) > 0.0 { -out } else { out };
+        let (within, beyond) = sides(&inside, out, out.dot(a));
+        around.extend(beyond);
+        match within {
+            Some(within) => inside = within,
+            None => return around,
+        }
+    }
+    around.push(inside);
+    around
 }
 
 fn area(cell: &[Vec2]) -> f32 {
@@ -253,7 +297,20 @@ fn contains(cell: &[Vec2], point: Vec2) -> bool {
     turns.iter().all(|&t| t > 0.0) || turns.iter().all(|&t| t < 0.0)
 }
 
-/// A kerf in meters, on the board's face as the mesh lays it out: `w` along x, `l` along y.
+/// A direction on the board's face as the mesh lays it out, `w` along x and `l` along y, and a
+/// way to turn positions along it, nanometers times its scale, into meters.
+fn unit(direction: Direction) -> (Vec2, impl Fn(Length) -> f32) {
+    let scale = direction.scale();
+    let vector = Vec2::new(
+        (direction.w as f64 / scale) as f32,
+        (direction.l as f64 / scale) as f32,
+    );
+    (vector, move |at: Length| {
+        (at.as_nm() as f64 / scale / 1e9) as f32
+    })
+}
+
+/// A slot in the face, in meters, on the board's face as the mesh lays it out.
 struct Slot {
     across: Vec2,
     along: Vec2,
@@ -265,20 +322,14 @@ struct Slot {
     end: f32,
 }
 
-impl From<&woodsim::Kerf> for Slot {
-    fn from(kerf: &woodsim::Kerf) -> Slot {
-        let unit = |direction: Direction| {
-            let scale = direction.scale();
-            let vector = Vec2::new(
-                (direction.w as f64 / scale) as f32,
-                (direction.l as f64 / scale) as f32,
-            );
-            let meters = move |at: Length| (at.as_nm() as f64 / scale / 1e9) as f32;
-            (vector, meters)
+impl Slot {
+    fn of(kerf: &woodsim::Kerf) -> Option<Slot> {
+        let Across::Face(across) = kerf.across else {
+            return None;
         };
-        let (across, across_meters) = unit(kerf.across);
+        let (across, across_meters) = unit(across);
         let (along, along_meters) = unit(kerf.along);
-        Slot {
+        Some(Slot {
             across,
             along,
             near: across_meters(kerf.near),
@@ -287,8 +338,91 @@ impl From<&woodsim::Kerf> for Slot {
             center: kerf.center.as_meters_f32(),
             start: along_meters(kerf.start),
             end: along_meters(kerf.end),
+        })
+    }
+}
+
+/// A resaw slot square to the thickness: the layer it takes out, and where on the face, its
+/// round ends drawn as points around them.
+struct Resaw {
+    near: f32,
+    far: f32,
+    outline: Vec<Vec2>,
+}
+
+/// Points around each round end of a resaw slot's outline.
+const RESAW_STEPS: usize = 16;
+
+impl Resaw {
+    fn of(kerf: &woodsim::Kerf) -> Option<Resaw> {
+        let Across::Thickness = kerf.across else {
+            return None;
+        };
+        let (along, along_meters) = unit(kerf.along);
+        let (square, _) = unit(kerf.along.square());
+        let (start, end, center) = (
+            along_meters(kerf.start),
+            along_meters(kerf.end),
+            along_meters(kerf.center),
+        );
+        let radius = kerf.radius.as_meters_f32();
+        let half = std::f32::consts::PI;
+        let arc = |middle: f32, from: f32| {
+            (0..=RESAW_STEPS).map(move |step| {
+                let angle = from + half * step as f32 / RESAW_STEPS as f32;
+                along * (middle + radius * angle.cos()) + square * (center + radius * angle.sin())
+            })
+        };
+        Some(Resaw {
+            near: kerf.near.as_meters_f32(),
+            far: kerf.far.as_meters_f32(),
+            outline: arc(end, -half / 2.0)
+                .chain(arc(start, half / 2.0))
+                .collect(),
+        })
+    }
+}
+
+/// The layers the resaw slots covering `point` take out of a board `thickness` thick, merged
+/// where they overlap, bottom to top.
+fn layers_out(resaws: &[Resaw], point: Vec2, thickness: f32) -> Vec<(f32, f32)> {
+    let mut layers: Vec<(f32, f32)> = resaws
+        .iter()
+        .filter(|resaw| contains(&resaw.outline, point))
+        .map(|resaw| (resaw.near.max(0.0), resaw.far.min(thickness)))
+        .filter(|(near, far)| near < far)
+        .collect();
+    layers.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut merged: Vec<(f32, f32)> = Vec::new();
+    for (near, far) in layers {
+        match merged.last_mut() {
+            Some(last) if near <= last.1 => last.1 = last.1.max(far),
+            _ => merged.push((near, far)),
         }
     }
+    merged
+}
+
+/// The spans of wood at `point`, bottom to top: one below each of `layers` taken out, and one
+/// above them all, each running from where the slots in the face leave the wood. A span with no
+/// wood is empty where it would have been, so spans always run upward.
+fn column(slots: &[&Slot], layers: &[(f32, f32)], point: Vec2, thickness: f32) -> Vec<(f32, f32)> {
+    let (bottom, top) = wood_at(slots, point, thickness);
+    (0..=layers.len())
+        .map(|k| {
+            let low = if k == 0 {
+                bottom
+            } else {
+                layers[k - 1].1.max(bottom)
+            };
+            let high = if k == layers.len() {
+                top
+            } else {
+                layers[k].0.min(top)
+            };
+            (low.min(high), high)
+        })
+        .collect()
 }
 
 /// Points around each curved end of a slot, between where it meets the board's faces.
@@ -401,45 +535,37 @@ impl MeshBuilder {
     }
 
     /// The face of a cell's wood along one edge, from `points[0]` to `points[1]`, where the
-    /// neighboring cell has no wood to cover it. `ours` and `theirs` are the spans of wood at
-    /// those points on each side; a neighbor that's off the board or cut away has none.
+    /// neighboring cell has no wood to cover it. `ours` is a span of wood at those points on
+    /// this side, and `theirs` the spans at them on the other; a neighbor that's off the board
+    /// or cut away has none.
     fn wall(
         &mut self,
         points: [(f32, f32); 2],
         ours: [(f32, f32); 2],
-        theirs: Option<[(f32, f32); 2]>,
+        theirs: Option<&[Vec<(f32, f32)>; 2]>,
         outward: Vec3,
     ) {
-        // Below the neighbor's wood, and above it.
-        let mut below = [(0.0, 0.0); 2];
-        let mut above = [(0.0, 0.0); 2];
-        for k in 0..2 {
+        // The gaps between the neighbor's spans, where ours shows, clamped into ours.
+        let gaps = |k: usize| -> Vec<(f32, f32)> {
             let (bottom, top) = ours[k];
-            if bottom >= top {
-                below[k] = (bottom, bottom);
-                above[k] = (top, top);
-                continue;
+            let Some(theirs) = theirs else {
+                return vec![(bottom, top)];
+            };
+            let mut edges = vec![f32::MIN];
+            for &(low, high) in &theirs[k] {
+                edges.extend([low, high]);
             }
-            match theirs.map(|theirs| theirs[k]).filter(|(b, t)| b < t) {
-                Some((their_bottom, their_top)) => {
-                    below[k] = (bottom, their_bottom.clamp(bottom, top));
-                    above[k] = (their_top.clamp(bottom, top), top);
-                }
-                None => {
-                    below[k] = (bottom, top);
-                    above[k] = (top, top);
-                }
-            }
-        }
-        for part in [below, above] {
+            edges.push(f32::MAX);
+            edges
+                .chunks(2)
+                .map(|gap| (gap[0].clamp(bottom, top), gap[1].clamp(bottom, top)))
+                .collect()
+        };
+        let (near, far) = (gaps(0), gaps(1));
+        for (from, to) in near.into_iter().zip(far) {
             let at = |k: usize, height: f32| Vec3::new(points[k].0, height, points[k].1);
             self.quad(
-                [
-                    at(0, part[0].0),
-                    at(1, part[1].0),
-                    at(1, part[1].1),
-                    at(0, part[0].1),
-                ],
+                [at(0, from.0), at(1, to.0), at(1, to.1), at(0, from.1)],
                 outward,
             );
         }
@@ -913,5 +1039,57 @@ mod tests {
             let center = (a + b + c) / 3.0 - size / 2.0;
             assert!(facing.dot(center) > 0.0, "a triangle faces inward");
         }
+    }
+
+    #[test]
+    fn a_resaw_slot_opens_a_gap_in_the_edge_but_leaves_the_faces_whole() {
+        let saw = TableSaw {
+            blade: Blade {
+                diameter: Length::from_inches(10),
+                kerf: Blade::FULL_KERF,
+            },
+            fence: Length::from_inch_fraction(5, 16),
+            height: Length::from_inches(3),
+            miter_gauge: None,
+        };
+        let Ok(Pass::Kerfed(board)) = saw.rip(&plank(), Orientation::default().tipped()) else {
+            panic!("expected a slot in the edge");
+        };
+        let mesh = lumber_mesh(&board, Vec3::ZERO);
+        let (thickness, width, length) = (
+            board.thickness().as_meters_f32(),
+            board.width().as_meters_f32(),
+            board.length().as_meters_f32(),
+        );
+        // The faces are whole.
+        assert!((top_area(&mesh, thickness) - width * length).abs() < 1e-6);
+        // Inside the slot, the wood below faces up at its lower face, and the wood above faces
+        // down at its upper one, as far up from the edge as the blade reached.
+        let (near, far) = (
+            Length::from_inch_fraction(5, 16).as_meters_f32(),
+            Length::from_inch_fraction(7, 16).as_meters_f32(),
+        );
+        let inside = |height: f32, facing: f32| {
+            triangles(&mesh)
+                .iter()
+                .zip(normals(&mesh).chunks(3))
+                .filter(|(corners, normal)| {
+                    corners.iter().all(|p| (p.y - height).abs() < 1e-6)
+                        && normal[0].y * facing > 0.9
+                })
+                .map(|([a, b, c], _)| (b - a).cross(c - a).length() / 2.0)
+                .sum::<f32>()
+        };
+        let slot = Length::from_inches(3).as_meters_f32() * length;
+        assert!(
+            (inside(near, 1.0) - slot).abs() < 1e-5,
+            "{}",
+            inside(near, 1.0)
+        );
+        assert!(
+            (inside(far, -1.0) - slot).abs() < 1e-5,
+            "{}",
+            inside(far, -1.0)
+        );
     }
 }

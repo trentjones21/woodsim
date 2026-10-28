@@ -163,6 +163,12 @@ impl TableSawStation {
         self.relay(self.lie.flipped())
     }
 
+    /// Stands the board up on an edge, with its bottom face toward the fence, or lays it back
+    /// down.
+    pub fn tip(&mut self) -> bool {
+        self.relay(self.lie.tipped())
+    }
+
     /// Lays the board down another way, if it's in one piece and waiting in front of the blade.
     fn relay(&mut self, lie: Orientation) -> bool {
         if self.on_saw() != Some(Part::Whole) || self.pass.is_some() || self.advance > -CLEAR {
@@ -412,6 +418,7 @@ impl TableSawStation {
         let verb = match self.lie.across().0 {
             Axis::Width => "Ripped",
             Axis::Length => "Crosscut",
+            Axis::Thickness => "Resawed",
         };
         match self.result() {
             Some(Err(error)) => format!("No cut: {error}."),
@@ -845,5 +852,38 @@ mod tests {
         assert_eq!(widths, [Length::from_inch_fraction(9, 8)]);
         assert!(station.pass.is_none());
         assert!(station.taken.is_empty());
+    }
+
+    #[test]
+    fn on_edge_a_narrow_board_resaws_into_two_thin_ones_side_by_side() {
+        let mut station = TableSawStation::default();
+        station.load(Board::new(
+            Length::from_inches(24),
+            Length::from_inches(3),
+            Length::from_inch_fraction(3, 4),
+        ));
+        assert!(station.tip());
+        station.set_fence(Length::from_inch_fraction(5, 16));
+        station.set_height(HEIGHT_MAX);
+        // Standing on edge, it's as tall as it was wide and as wide across as it was thick.
+        let standing = station.boards().whole.unwrap();
+        let (near, far) = standing.bounds();
+        assert_close(far.y - near.y, inches(3.0));
+        assert_close(far.x - near.x, inches(0.75));
+        push_through(&mut station);
+
+        assert_eq!(
+            station.status(),
+            "Resawed a 5/16\" x 3\" x 24\" piece, plus a 5/16\" x 3\" x 24\" offcut. The blade \
+             turned 1/8\" to sawdust."
+        );
+        // The piece rides the fence; the offcut is a kerf away, toward the operator.
+        let boards = station.boards();
+        let (piece, offcut) = (
+            boards.piece.unwrap().bounds(),
+            boards.offcut.unwrap().bounds(),
+        );
+        assert_close(piece.1.x, inches(5.0 / 16.0));
+        assert_close(offcut.1.x, inches(-1.0 / 8.0));
     }
 }

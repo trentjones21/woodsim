@@ -30,8 +30,8 @@ pub const HELP: &str = "Left/Right: move the fence or gauge stop 1/16\"   Shift:
                         G: switch between the rip fence and the miter gauge\n\
                         Up/Down: raise or lower the blade 1/16\"   Shift+Up/Down: 1/4\"\n\
                         Drag the board, or hold Space, to push it   Drag it back to back it out\n\
-                        Q/E: turn the board   F: flip it   B: bring it back around   \
-                        R: new board\n\
+                        Q/E: turn the board   F: flip it   V: stand it on edge   \
+                        B: bring it back around   R: new board\n\
                         Right-click a board or press C: carry it to the miter saw\n\
                         Tab: go to the miter saw   Esc: back to the shop";
 
@@ -597,6 +597,9 @@ fn turn_with_keys(keys: Res<ButtonInput<KeyCode>>, mut station: ResMut<TableSawS
     }
     if keys.just_pressed(KeyCode::KeyF) {
         station.flip();
+    }
+    if keys.just_pressed(KeyCode::KeyV) {
+        station.tip();
     }
 }
 
