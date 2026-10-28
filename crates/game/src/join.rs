@@ -71,6 +71,9 @@ pub struct BenchStation {
     /// The surface picked to go against another, if any.
     pub picked: Option<Spot>,
     pub lining_up: Option<LiningUp>,
+    /// Whether the last click on a part found no flat surface to pick, to say so instead of
+    /// doing nothing.
+    missed: bool,
     /// How many joints have gone together on the bench, to number the next.
     joints: u64,
 }
@@ -82,6 +85,7 @@ impl Default for BenchStation {
             fastener: Fastener::Glue,
             picked: None,
             lining_up: None,
+            missed: false,
             joints: 0,
         }
     }
@@ -259,6 +263,7 @@ impl BenchStation {
     /// Picking another surface of the moving part moves that one instead, and picking the
     /// same surface again lets it go.
     pub fn pick(&mut self, spot: Spot, at: [f64; 3]) {
+        self.missed = false;
         match self.picked {
             Some(picked) if picked == spot && self.lining_up.is_none() => self.picked = None,
             Some(picked) if picked.group == spot.group => {
@@ -439,6 +444,12 @@ impl BenchStation {
         self.make_room(index);
     }
 
+    /// Notes that a click on a part found no flat surface there to pick: the side of a saw kerf,
+    /// say. The status says so until the next pick.
+    pub fn missed(&mut self) {
+        self.missed = true;
+    }
+
     /// Lets go of the joint being lined up, or else of the picked surface.
     pub fn cancel(&mut self) {
         if self.lining_up.take().is_none() {
@@ -573,6 +584,11 @@ impl BenchStation {
         }
         if self.groups.is_empty() {
             return "Nothing on the bench. Pick up a part and click the bench to set it down."
+                .to_string();
+        }
+        if self.missed {
+            return "There's no flat surface there to put against another: try a face, an \
+                    edge, or an end."
                 .to_string();
         }
         let Some(picked) = self.picked else {
@@ -1111,6 +1127,19 @@ mod tests {
 
     fn inches_of(n: i64) -> Length {
         Length::from_inches(n)
+    }
+
+    #[test]
+    fn a_click_that_finds_no_surface_says_so_until_the_next_pick() {
+        let mut bench = bench_with(&[plain()]);
+        bench.missed();
+        assert!(
+            bench
+                .status(None)
+                .starts_with("There's no flat surface there")
+        );
+        click(&mut bench, spot(0, 0, Surface::Top));
+        assert!(bench.status(None).starts_with("Moving its top face."));
     }
 
     #[test]

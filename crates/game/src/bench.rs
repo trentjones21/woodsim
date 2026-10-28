@@ -227,8 +227,9 @@ fn spawn_marks(
         (Mark::Pointed, Color::srgb(1.0, 0.9, 0.35)),
         (Mark::Picked, Color::srgb(0.15, 0.5, 1.0)),
     ] {
+        // A stand-in until there's a surface to lay it over; it's hidden until then.
         commands.spawn((
-            Mesh3d(meshes.add(sheet(&[]))),
+            Mesh3d(meshes.add(Rectangle::new(0.01, 0.01))),
             MeshMaterial3d(materials.add(StandardMaterial {
                 base_color: color,
                 unlit: true,
@@ -525,6 +526,7 @@ fn part_clicked(
         return;
     }
     let Some((surface, local)) = surface_under(part, transform, &click.hit) else {
+        bench.missed();
         return;
     };
     let Some(member) = bench
