@@ -77,11 +77,14 @@ pub enum Work {
         missed: Option<CutError>,
         scarred: Option<Board>,
     },
-    /// A board the blade has cut, with the stop where it was at the time.
+    /// A board the blade has cut, with the stop where it was at the time. While the blade is
+    /// still down, `cut` follows it deeper; once it comes back up, the strips it set loose go
+    /// on the pile.
     Cut {
         board: Board,
         stop: Length,
         cut: Cut,
+        loose_set_aside: bool,
     },
 }
 
@@ -185,8 +188,9 @@ impl MiterSawStation {
     }
 
     /// Lowers the blade by `amount` of its travel, as far as the depth stop lets it go. Into
-    /// the board, it scars it; all the way through, it cuts it. Strips a slot sets loose fall
-    /// onto the parts pile.
+    /// the board, it scars it; all the way through, it cuts it. Going on down after it breaks
+    /// through, it clears what its curve hadn't reached yet, the way a real stroke does, so a
+    /// full stroke leaves clean ends.
     pub fn lower(&mut self, amount: f32) {
         self.lowered = (self.lowered + amount).min(self.lowest());
         if self.lowered <= self.deepest {
@@ -194,41 +198,59 @@ impl MiterSawStation {
         }
         self.deepest = self.lowered;
         let bottom = self.bottom();
-        if let Work::Ready {
-            board,
-            missed,
-            scarred,
-        } = &mut self.work
-        {
-            match self.saw.chop(board, self.lie, self.stop, bottom) {
+        match &mut self.work {
+            Work::Ready {
+                board,
+                missed,
+                scarred,
+            } => match self.saw.chop(board, self.lie, self.stop, bottom) {
                 Ok(Pass::Cut(cut)) => {
-                    self.parts
-                        .extend(cut.loose.iter().map(|piece| piece.board.clone()));
                     self.work = Work::Cut {
                         board: board.clone(),
                         stop: self.stop,
                         cut,
+                        loose_set_aside: false,
                     }
                 }
                 Ok(Pass::Kerfed(scar)) => *scarred = Some(scar),
                 Ok(Pass::Missed) => {}
                 Err(error) => *missed = Some(error),
+            },
+            Work::Cut {
+                board, stop, cut, ..
+            } => {
+                if let Ok(Pass::Cut(deeper)) = self.saw.chop(board, self.lie, *stop, bottom) {
+                    *cut = deeper;
+                }
             }
+            Work::Empty => {}
         }
     }
 
-    /// Raises the blade by `amount` of its travel. Back at the top, the stroke is over, and any
-    /// scar it left stays in the board.
+    /// Raises the blade by `amount` of its travel. Back at the top, the stroke is over: any
+    /// scar it left stays in the board, and strips a cut set loose fall onto the parts pile.
     pub fn raise(&mut self, amount: f32) {
         self.lowered = (self.lowered - amount).max(0.0);
         if self.lowered > 0.0 {
             return;
         }
         self.deepest = 0.0;
-        if let Work::Ready { board, scarred, .. } = &mut self.work
-            && let Some(scar) = scarred.take()
-        {
-            *board = scar;
+        match &mut self.work {
+            Work::Ready { board, scarred, .. } => {
+                if let Some(scar) = scarred.take() {
+                    *board = scar;
+                }
+            }
+            Work::Cut {
+                cut,
+                loose_set_aside,
+                ..
+            } if !*loose_set_aside => {
+                *loose_set_aside = true;
+                self.parts
+                    .extend(cut.loose.iter().map(|piece| piece.board.clone()));
+            }
+            _ => {}
         }
     }
 
@@ -326,7 +348,9 @@ impl MiterSawStation {
             Work::Ready { board, scarred, .. } => {
                 (scarred.as_ref().unwrap_or(board), self.stop, None)
             }
-            Work::Cut { board, stop, cut } => (board, *stop, Some(cut)),
+            Work::Cut {
+                board, stop, cut, ..
+            } => (board, *stop, Some(cut)),
         };
         // The board's far end along the fence rests against the stop block; the rest reaches
         // left past the blade. It reaches from the fence out toward the operator.
@@ -487,6 +511,32 @@ mod tests {
     fn chop(station: &mut MiterSawStation) {
         station.lower(1.0);
         station.raise(1.0);
+    }
+
+    #[test]
+    fn a_stroke_pulled_down_a_little_at_a_time_leaves_clean_mitered_ends() {
+        // A narrow board, ripped off a wider one, comes apart before the blade's curve has
+        // cleared the corners of a 45° cut; going on down, the blade clears them, as a full
+        // stroke does, and both ends are flat.
+        let mut station = MiterSawStation::default();
+        station.load(Board::new(
+            Length::from_inches(24),
+            Length::from_inches(1),
+            Length::from_inch_fraction(3, 4),
+        ));
+        station.set_miter(Angle::from_degrees(45));
+        for _ in 0..250 {
+            station.lower(0.004);
+        }
+        station.raise(1.0);
+        let Work::Cut { cut, .. } = &station.work else {
+            panic!("expected the board cut apart");
+        };
+        for side in [Some(&cut.piece), cut.offcut.as_ref()] {
+            let board = &side.expect("both sides of the cut").board;
+            assert!(board.kerfs().is_empty(), "{:?}", board.kerfs());
+            assert_eq!(board.face().len(), 1);
+        }
     }
 
     #[test]
