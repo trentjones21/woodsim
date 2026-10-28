@@ -16,6 +16,9 @@ use crate::shop::{Part, Placed, SawBoards, describe_board, describe_cut, describ
 
 pub const FENCE_MIN: Length = Length::from_inch_fraction(1, 16);
 pub const FENCE_MAX: Length = Length::from_inches(24);
+/// How far the miter gauge's stop goes from the blade, along its 21" auxiliary fence.
+const GAUGE_STOP_MIN: Length = Length::from_inch_fraction(1, 16);
+const GAUGE_STOP_MAX: Length = Length::from_inches(20);
 /// As high as a 10" blade goes.
 pub const HEIGHT_MAX: Length = Length::from_inch_fraction(25, 8);
 /// A blade's teeth reach at most its radius in front of its center, so a board this far in
@@ -41,6 +44,8 @@ pub struct TableSawStation {
     pass: Option<Feeding>,
     /// Parts carried off the saw.
     taken: Vec<Part>,
+    /// Where the miter gauge's stop is set, kept while the rip fence is in use.
+    gauge_stop: Length,
 }
 
 struct Feeding {
@@ -63,12 +68,14 @@ impl Default for TableSawStation {
                 },
                 fence: Length::from_inches(6),
                 height: Length::from_inches(1),
+                miter_gauge: None,
             },
             board: new_stock(),
             lie: Orientation::default(),
             advance: START,
             pass: None,
             taken: Vec::new(),
+            gauge_stop: Length::from_inches(12),
         }
     }
 }
@@ -83,11 +90,53 @@ fn new_stock() -> Board {
 }
 
 impl TableSawStation {
-    /// Moves the fence, within its range. It stays put while a board is at the blade.
+    /// Moves the rip fence, within its range, while it's in use. It stays put while a board is
+    /// at the blade.
     pub fn set_fence(&mut self, fence: Length) {
-        if !self.at_blade() {
+        if !self.at_blade() && !self.using_gauge() {
             self.saw.fence = fence.clamp(FENCE_MIN, FENCE_MAX);
         }
+    }
+
+    /// Whether the miter gauge is guiding the board, with the rip fence slid out of the way.
+    pub fn using_gauge(&self) -> bool {
+        self.saw.miter_gauge.is_some()
+    }
+
+    /// Where the miter gauge's stop is set: its distance from the blade.
+    pub fn gauge_stop(&self) -> Length {
+        self.gauge_stop
+    }
+
+    /// Switches between the rip fence and the miter gauge. Returns false while a board is at the
+    /// blade.
+    pub fn switch_guide(&mut self) -> bool {
+        if self.at_blade() {
+            return false;
+        }
+        self.saw.miter_gauge = match self.saw.miter_gauge {
+            Some(_) => None,
+            None => Some(self.gauge_stop),
+        };
+        true
+    }
+
+    /// Moves the miter gauge's stop, within its range. It stays put while a board is at the
+    /// blade.
+    pub fn set_gauge_stop(&mut self, stop: Length) {
+        if self.at_blade() {
+            return;
+        }
+        self.gauge_stop = stop.clamp(GAUGE_STOP_MIN, GAUGE_STOP_MAX);
+        if self.using_gauge() {
+            self.saw.miter_gauge = Some(self.gauge_stop);
+        }
+    }
+
+    /// Where the back of the board is along the table, in meters: where the miter gauge pushes
+    /// it.
+    pub fn trailing_edge(&self) -> f32 {
+        (self.reach() - self.advance).as_meters_f32()
     }
 
     /// Raises or lowers the blade, from level with the table to as high as it goes. It stays
@@ -318,14 +367,15 @@ impl TableSawStation {
     }
 
     pub fn boards(&self) -> SawBoards {
-        let fence = self
-            .pass
-            .as_ref()
-            .map_or(self.saw.fence, |pass| pass.saw.fence);
-        // The board reaches from the fence back across the table, and from its leading end
-        // back toward the operator.
+        let saw = self.pass.as_ref().map_or(self.saw, |pass| pass.saw);
+        // The board reaches back across the table from the fence, or on from the gauge's stop
+        // beyond the blade; and from its leading end back toward the operator.
+        let near_side = match saw.miter_gauge {
+            Some(stop) => -saw.blade.kerf - stop,
+            None => saw.fence - self.span(),
+        };
         let near = Vec3::new(
-            (fence - self.span()).as_meters_f32(),
+            near_side.as_meters_f32(),
             0.0,
             (-self.advance).as_meters_f32(),
         );
@@ -391,15 +441,22 @@ impl TableSawStation {
         }
     }
 
-    /// A warning, if the board would ride the fence on its short side: across the table it's
-    /// wider than it is long along the fence, so the fence can't keep it from twisting into
-    /// the blade and kicking back.
+    /// A warning, if the guide can't hold the board straight. Against the fence, a board wider
+    /// across the table than it is long along it rides the fence on its short side, and can
+    /// twist into the blade and kick back. On the gauge, a board longer than it is wide runs
+    /// on past the gauge's face, which can't keep it on line.
     fn warning(&self) -> &'static str {
-        if self.reach() < self.span() && self.saw.fence < self.span() {
-            " Careful: it rides the fence on its short side, so it can twist into the blade and \
-             kick back. A real shop would use a miter gauge or a crosscut sled."
-        } else {
-            ""
+        let (reach, span) = (self.reach(), self.span());
+        match self.saw.miter_gauge {
+            None if reach < span && self.saw.fence < span => {
+                " Careful: it rides the fence on its short side, so it can twist into the blade \
+                 and kick back. Press G to crosscut with the miter gauge."
+            }
+            Some(stop) if reach > span && stop < span => {
+                " Careful: the gauge only holds the back of a board this long, so it can wander \
+                 off line. Press G to rip it against the fence."
+            }
+            _ => "",
         }
     }
 }
@@ -627,6 +684,65 @@ mod tests {
         let (near, far) = station.boards().piece.unwrap().bounds();
         assert_close(near.x, 0.0);
         assert_close(far.x, inches(12.0));
+    }
+
+    #[test]
+    fn the_miter_gauge_crosscuts_from_its_stop_without_a_warning() {
+        let mut station = TableSawStation::default();
+        assert!(station.turn_left() && station.switch_guide());
+        assert!(!station.status().contains("Careful"));
+        // The board's near end rests against the stop, 12" past the blade's far side.
+        let (near, _) = station.boards().whole.unwrap().bounds();
+        assert_close(near.x, -inches(12.125));
+
+        push_through(&mut station);
+        assert_eq!(
+            station.status(),
+            "Crosscut a 3/4\" x 7-1/4\" x 12\" piece, plus a 3/4\" x 7-1/4\" x 11-7/8\" \
+             offcut. The blade turned 1/8\" to sawdust."
+        );
+        // The piece lies between the stop and the blade.
+        let (near, far) = station.boards().piece.unwrap().bounds();
+        assert_close(near.x, -inches(12.125));
+        assert_close(far.x, -inches(0.125));
+    }
+
+    #[test]
+    fn the_guide_switches_only_while_no_board_is_at_the_blade() {
+        let mut station = TableSawStation::default();
+        push_to(&mut station, 2);
+        assert!(!station.switch_guide());
+
+        station.move_to(START);
+        assert!(station.switch_guide());
+        assert!(station.switch_guide());
+        assert!(!station.using_gauge());
+    }
+
+    #[test]
+    fn a_long_board_on_the_gauge_gets_a_warning() {
+        let mut station = TableSawStation::default();
+        assert!(station.switch_guide());
+        // A stop past the board's width would miss it, so there'd be nothing to warn about.
+        assert!(!station.status().contains("Careful"));
+        station.set_gauge_stop(Length::from_inches(3));
+        assert!(
+            station
+                .status()
+                .ends_with("Press G to rip it against the fence.")
+        );
+    }
+
+    #[test]
+    fn the_gauge_stop_stays_in_range_and_the_parked_fence_stays_put() {
+        let mut station = TableSawStation::default();
+        station.switch_guide();
+        station.set_gauge_stop(Length::ZERO);
+        assert_eq!(station.saw.miter_gauge, Some(GAUGE_STOP_MIN));
+        station.set_gauge_stop(Length::from_inches(100));
+        assert_eq!(station.saw.miter_gauge, Some(GAUGE_STOP_MAX));
+        station.set_fence(Length::from_inches(3));
+        assert_eq!(station.saw.fence, Length::from_inches(6));
     }
 
     #[test]

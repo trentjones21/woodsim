@@ -21,7 +21,7 @@ proptest! {
     #[test]
     fn rip_conserves_wood(width in 1..MAX_NM, fence in 1..MAX_NM, kerf in 1..INCH_NM) {
         let board = Board::new(Length::from_inches(96), Length::from_nm(width), Length::from_inch_fraction(3, 4));
-        let saw = TableSaw { blade: blade(kerf), fence: Length::from_nm(fence), height: Length::from_inches(1) };
+        let saw = TableSaw { blade: blade(kerf), fence: Length::from_nm(fence), height: Length::from_inches(1), miter_gauge: None };
 
         match saw.rip(&board, Orientation::default()) {
             Ok(Pass::Cut(cut)) => {
@@ -37,6 +37,31 @@ proptest! {
             Err(error) => {
                 prop_assert!(saw.fence >= board.width());
                 prop_assert_eq!(error, CutError::MissesBoard { setting: saw.fence, available: board.width() });
+            }
+        }
+    }
+
+    #[test]
+    fn miter_gauge_crosscut_conserves_wood(length in INCH_NM..MAX_NM, stop in 1..MAX_NM, kerf in 1..INCH_NM) {
+        let board = Board::new(Length::from_nm(length), Length::from_inches(6), Length::from_inch_fraction(3, 4));
+        let saw = TableSaw {
+            blade: blade(kerf),
+            fence: Length::from_inches(6),
+            height: Length::from_inches(1),
+            miter_gauge: Some(Length::from_nm(stop)),
+        };
+
+        match saw.rip(&board, Orientation::default().turned_left()) {
+            Ok(Pass::Cut(cut)) => {
+                let offcut = cut.offcut.as_ref().map_or(Length::ZERO, |offcut| offcut.board.length());
+                prop_assert_eq!(cut.piece.board.length() + offcut + cut.waste, board.length());
+                prop_assert_eq!(cut.piece.board.length(), Length::from_nm(stop));
+                prop_assert_eq!(cut.piece.l, Length::ZERO);
+                prop_assert!(cut.waste <= saw.blade.kerf);
+            }
+            Ok(pass) => prop_assert!(false, "a blade higher than the board left {:?}", pass),
+            Err(error) => {
+                prop_assert_eq!(error, CutError::MissesBoard { setting: Length::from_nm(stop), available: board.length() });
             }
         }
     }
@@ -73,7 +98,7 @@ proptest! {
         travel in 0..40 * INCH_NM,
     ) {
         let board = Board::new(Length::from_inches(24), Length::from_nm(width), Length::from_inch_fraction(3, 4));
-        let saw = TableSaw { blade: blade(INCH_NM / 8), fence: Length::from_nm(fence), height: Length::from_nm(height) };
+        let saw = TableSaw { blade: blade(INCH_NM / 8), fence: Length::from_nm(fence), height: Length::from_nm(height), miter_gauge: None };
         let start = Length::from_nm(start);
 
         match saw.feed(&board, Orientation::default(), start, start + Length::from_nm(travel)) {
@@ -107,7 +132,7 @@ proptest! {
         further in 0..10 * INCH_NM,
     ) {
         let board = Board::new(Length::from_inches(24), Length::from_inch_fraction(29, 4), Length::from_inch_fraction(3, 4));
-        let saw = TableSaw { blade: blade(INCH_NM / 8), fence: Length::from_inches(6), height: Length::from_nm(height) };
+        let saw = TableSaw { blade: blade(INCH_NM / 8), fence: Length::from_inches(6), height: Length::from_nm(height), miter_gauge: None };
         let start = -Length::from_inches(8);
         let end = Length::from_nm(end).max(start);
 
@@ -125,7 +150,7 @@ proptest! {
         at in INCH_NM..23 * INCH_NM,
     ) {
         let board = Board::new(Length::from_inches(24), Length::from_inch_fraction(29, 4), Length::from_inch_fraction(3, 4));
-        let saw = TableSaw { blade: blade(INCH_NM / 8), fence: Length::from_nm(fence), height: Length::from_nm(height) };
+        let saw = TableSaw { blade: blade(INCH_NM / 8), fence: Length::from_nm(fence), height: Length::from_nm(height), miter_gauge: None };
         let slotted = match saw.feed(&board, Orientation::default(), -Length::from_inches(6), Length::from_nm(end)) {
             Ok(Pass::Kerfed(slotted)) => slotted,
             _ => return Ok(()),

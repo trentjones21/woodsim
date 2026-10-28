@@ -634,10 +634,13 @@ fn update_readout(
             OVERVIEW_HELP,
         ),
         ShopView::TableSaw => (
-            format!(
-                "Fence: {}   Blade: {}",
-                table_saw.saw.fence, table_saw.saw.height
-            ),
+            match table_saw.saw.miter_gauge {
+                Some(stop) => format!("Gauge: {stop}   Blade: {}", table_saw.saw.height),
+                None => format!(
+                    "Fence: {}   Blade: {}",
+                    table_saw.saw.fence, table_saw.saw.height
+                ),
+            },
             table_saw.status(),
             table_saw::HELP,
         ),

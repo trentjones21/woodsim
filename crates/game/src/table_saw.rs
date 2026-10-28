@@ -25,8 +25,9 @@ pub const BOUNDS: Block = Block {
     max: Vec3::new(TABLE_RIGHT, FENCE_HEIGHT, TABLE_FRONT + inches(2.0)),
 };
 
-pub const HELP: &str = "Left/Right: move the fence 1/16\"   Shift+Left/Right: 1\"   \
-                        Or drag the fence\n\
+pub const HELP: &str = "Left/Right: move the fence or gauge stop 1/16\"   Shift: 1\"   \
+                        Or drag it\n\
+                        G: switch between the rip fence and the miter gauge\n\
                         Up/Down: raise or lower the blade 1/16\"   Shift+Up/Down: 1/4\"\n\
                         Drag the board, or hold Space, to push it   Drag it back to back it out\n\
                         Q/E: turn the board   F: flip it   B: bring it back around   \
@@ -46,6 +47,15 @@ const FENCE_WIDTH: f32 = inches(2.0);
 const FENCE_HEIGHT: f32 = inches(2.5);
 /// The fence runs the depth of the table and over the front rail.
 const FENCE_LENGTH: f32 = TABLE_FRONT + inches(2.0) - TABLE_BACK;
+
+/// Where the rip fence sits, slid out of the way, while the miter gauge is in use.
+const FENCE_PARKED: f32 = TABLE_RIGHT - FENCE_WIDTH;
+/// The middle of the left miter slot, where the miter gauge's bar rides.
+const GAUGE_SLOT: f32 = inches(-6.125);
+/// The stop block on the miter gauge's auxiliary fence, and how tall that fence is.
+const STOP_BLOCK: Vec3 = Vec3::new(inches(1.5), inches(2.0), inches(1.5));
+/// The auxiliary fence stops short of the miter saw's bench, next door.
+const AUX_FENCE: Vec3 = Vec3::new(inches(21.0), inches(2.5), inches(0.75));
 
 const FENCE_STEP: Length = Length::from_inch_fraction(1, 16);
 const FENCE_BIG_STEP: Length = Length::from_inches(1);
@@ -70,6 +80,7 @@ impl Plugin for TableSawPlugin {
                 (
                     (
                         move_fence_with_keys,
+                        switch_guide_with_key,
                         raise_blade_with_keys,
                         turn_with_keys,
                         push_board,
@@ -79,7 +90,7 @@ impl Plugin for TableSawPlugin {
                     )
                         .run_if(resource_equals(ShopView::TableSaw)),
                     set_loose_aside,
-                    (draw_fence, draw_blade, draw_board),
+                    (draw_fence, draw_gauge, draw_blade, draw_board),
                 )
                     .chain(),
             );
@@ -94,6 +105,17 @@ struct Fence {
 
 #[derive(Component)]
 struct AtTableSaw;
+
+/// The miter gauge: it rides with the back of the board, and shows only while it's in use.
+#[derive(Component)]
+struct MiterGauge;
+
+/// The stop block on the miter gauge's auxiliary fence.
+#[derive(Component)]
+struct GaugeStop {
+    /// How far right of the block's face the pointer grabbed it, in meters.
+    grab_offset: f32,
+}
 
 /// The blade, which rises and falls with its height setting.
 #[derive(Component)]
@@ -295,6 +317,68 @@ fn spawn_saw(
         .observe(grab_fence)
         .observe(drag_fence);
 
+    // The miter gauge, in its own frame: x across the table as usual, and z = 0 at the back of
+    // the board, which its auxiliary fence pushes. Its bar rides the left miter slot; its head
+    // sits behind the fence; the stop block, placed by `draw_gauge`, sets the piece's length.
+    let gauge = commands
+        .spawn((Transform::default(), Visibility::Hidden, MiterGauge))
+        .id();
+    for (material, min, max) in [
+        (
+            &dark_metal,
+            Vec3::new(GAUGE_SLOT - inches(0.3), inches(-0.35), inches(-16.0)),
+            Vec3::new(GAUGE_SLOT + inches(0.3), 0.0, inches(2.5)),
+        ),
+        (
+            &safety_red,
+            Vec3::new(inches(-9.5), 0.0, AUX_FENCE.z),
+            Vec3::new(inches(-2.75), inches(2.25), inches(2.5)),
+        ),
+        (
+            &dark_metal,
+            Vec3::new(GAUGE_SLOT - inches(0.5), inches(2.25), inches(1.2)),
+            Vec3::new(GAUGE_SLOT + inches(0.5), inches(3.0), inches(2.1)),
+        ),
+    ] {
+        commands.spawn((
+            Mesh3d(meshes.add(rounded_box(max - min))),
+            MeshMaterial3d(material.clone()),
+            Transform::from_translation(min),
+            Pickable::IGNORE,
+            ChildOf(gauge),
+        ));
+    }
+    // The auxiliary fence reaches from just short of the blade out past the farthest stop.
+    commands.spawn((
+        Mesh3d(meshes.add(board_mesh(AUX_FENCE, Vec3::new(0.2, 0.0, 0.0), Grain::X))),
+        MeshMaterial3d(shop.maple.clone()),
+        Transform::from_xyz(inches(-1.0) - AUX_FENCE.x, 0.0, 0.0),
+        Pickable::IGNORE,
+        ChildOf(gauge),
+    ));
+    let stop_color = materials.add(StandardMaterial {
+        base_color: Color::srgb(1.0, 0.78, 0.15),
+        perceptual_roughness: 0.4,
+        ..default()
+    });
+    let stop_hover = materials.add(StandardMaterial {
+        base_color: Color::srgb(1.0, 0.85, 0.4),
+        emissive: LinearRgba::new(1.0, 0.7, 0.1, 1.0) * 40.0,
+        ..default()
+    });
+    commands
+        .spawn((
+            Mesh3d(meshes.add(rounded_box(STOP_BLOCK))),
+            MeshMaterial3d(stop_color.clone()),
+            Transform::default(),
+            GaugeStop { grab_offset: 0.0 },
+            ChildOf(gauge),
+        ))
+        .observe(set_material_on::<PointerOver>(stop_hover))
+        .observe(set_material_on::<PointerOut>(stop_color))
+        .observe(grab_gauge_stop)
+        .observe(drag_gauge_stop);
+
     // Each part gets its own mesh, rebuilt as the board is cut.
     for part in [Part::Whole, Part::Piece, Part::Offcut] {
         commands
@@ -320,13 +404,77 @@ fn move_fence_with_keys(keys: Res<ButtonInput<KeyCode>>, mut station: ResMut<Tab
     } else {
         FENCE_STEP
     };
-    let fence = station.saw.fence;
-    if keys.just_pressed(KeyCode::ArrowRight) {
-        station.set_fence(fence + step);
+    // The arrows move whichever guide is in use the way they point: the gauge's stop is left
+    // of the blade, so moving it left makes the piece longer.
+    let (right, left) = (
+        keys.just_pressed(KeyCode::ArrowRight),
+        keys.just_pressed(KeyCode::ArrowLeft),
+    );
+    if !(right || left) {
+        return;
     }
-    if keys.just_pressed(KeyCode::ArrowLeft) {
-        station.set_fence(fence - step);
+    if station.using_gauge() {
+        let stop = station.gauge_stop();
+        station.set_gauge_stop(if right { stop - step } else { stop + step });
+    } else {
+        let fence = station.saw.fence;
+        station.set_fence(if right { fence + step } else { fence - step });
     }
+}
+
+fn switch_guide_with_key(keys: Res<ButtonInput<KeyCode>>, mut station: ResMut<TableSawStation>) {
+    if keys.just_pressed(KeyCode::KeyG) {
+        station.switch_guide();
+    }
+}
+
+/// Remembers where on the stop block the pointer grabbed it, so it doesn't jump to the cursor.
+fn grab_gauge_stop(
+    drag: On<PointerDragStart>,
+    camera: Single<(&Camera, &GlobalTransform)>,
+    mut stops: Query<&mut GaugeStop>,
+    station: Res<TableSawStation>,
+) {
+    let (camera, camera_transform) = *camera;
+    if drag.button == PointerButton::Primary
+        && let Some(point) = pointer_on_plane(
+            camera,
+            camera_transform,
+            drag.pointer.position,
+            ORIGIN.y + STOP_BLOCK.y,
+        )
+        && let Ok(mut stop) = stops.get_mut(drag.entity)
+    {
+        stop.grab_offset = point.x - ORIGIN.x - stop_face(&station);
+    }
+}
+
+fn drag_gauge_stop(
+    drag: On<PointerDrag>,
+    camera: Single<(&Camera, &GlobalTransform)>,
+    stops: Query<&GaugeStop>,
+    mut station: ResMut<TableSawStation>,
+) {
+    let (camera, camera_transform) = *camera;
+    if drag.button == PointerButton::Primary
+        && let Some(point) = pointer_on_plane(
+            camera,
+            camera_transform,
+            drag.pointer.position,
+            ORIGIN.y + STOP_BLOCK.y,
+        )
+        && let Ok(stop) = stops.get(drag.entity)
+    {
+        // The stop's face is the gauge setting plus a kerf left of the blade's fence-side face.
+        let face = point.x - ORIGIN.x - stop.grab_offset;
+        let kerf = station.saw.blade.kerf.as_meters_f32();
+        station.set_gauge_stop(snap_to_sixteenth(-face - kerf));
+    }
+}
+
+/// Where the face of the gauge's stop block is across the table, in meters.
+fn stop_face(station: &TableSawStation) -> f32 {
+    -(station.saw.blade.kerf + station.gauge_stop()).as_meters_f32()
 }
 
 /// Remembers where on the fence the pointer grabbed it, so the fence doesn't jump to the cursor.
@@ -536,8 +684,36 @@ fn highlight_carryable(
 
 fn draw_fence(station: Res<TableSawStation>, mut fence: Single<&mut Transform, With<Fence>>) {
     if station.is_changed() {
-        let x = station.saw.fence.as_meters_f32();
+        let x = if station.using_gauge() {
+            FENCE_PARKED
+        } else {
+            station.saw.fence.as_meters_f32()
+        };
         fence.translation = ORIGIN + Vec3::new(x, 0.0, TABLE_BACK);
+    }
+}
+
+/// Shows the miter gauge while it's in use, at the back of the board, with its stop block set.
+fn draw_gauge(
+    station: Res<TableSawStation>,
+    gauge: Single<Entity, With<MiterGauge>>,
+    stop: Single<Entity, With<GaugeStop>>,
+    mut parts: Query<(&mut Transform, &mut Visibility)>,
+) {
+    if !station.is_changed() {
+        return;
+    }
+    if let Ok((mut transform, mut visibility)) = parts.get_mut(*gauge) {
+        *visibility = if station.using_gauge() {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+        transform.translation = ORIGIN + Vec3::Z * station.trailing_edge();
+    }
+    // The block sits against the board's end, in front of the auxiliary fence.
+    if let Ok((mut transform, _)) = parts.get_mut(*stop) {
+        transform.translation = Vec3::new(stop_face(&station) - STOP_BLOCK.x, 0.0, -STOP_BLOCK.z);
     }
 }
 

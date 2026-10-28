@@ -81,24 +81,30 @@ impl fmt::Display for CutError {
 impl std::error::Error for CutError {}
 
 /// A table saw. With the board's length along the fence it rips, cutting with the grain; with
-/// the board turned a quarter turn, it crosscuts.
+/// the board turned a quarter turn and pushed by the miter gauge, it crosscuts.
 ///
-/// The board lies on the table as its `Orientation` says, riding the fence on its far side
-/// across the table and leading with its near end along it.
+/// The board lies on the table as its `Orientation` says and leads with its near end along it.
+/// Against the rip fence, it rides the fence on its far side across the table; with the miter
+/// gauge, its near side rests against the gauge's stop.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TableSaw {
     pub blade: Blade,
-    /// Distance from the fence to the near side of the blade.
+    /// Distance from the rip fence to the near side of the blade.
     pub fence: Length,
     /// How far the blade's teeth reach above the table.
     pub height: Length,
+    /// The miter gauge, when it guides the board instead of the rip fence: the distance from
+    /// its stop to the far side of the blade. It holds the board square to the blade, and the
+    /// rip fence is slid out of the way so it can't trap the offcut.
+    pub miter_gauge: Option<Length>,
 }
 
 impl TableSaw {
-    /// Feeds `board`, lying as `lie` says, along the fence while the blade's center travels
-    /// from `start` to `end` along it, measured from its leading end: negative while the board
-    /// is still short of the blade, and past its far end once the board is by. The piece
-    /// against the fence comes out exactly as wide, across the table, as the fence setting.
+    /// Feeds `board`, lying as `lie` says, past the blade while the blade's center travels from
+    /// `start` to `end` along it, measured from its leading end: negative while the board is
+    /// still short of the blade, and past its far end once the board is by. The piece against
+    /// the fence, or against the gauge's stop, comes out exactly as wide across the table as
+    /// the setting.
     ///
     /// Panics if `start` is past `end`.
     pub fn feed(
@@ -112,20 +118,33 @@ impl TableSaw {
             start <= end,
             "the blade's travel runs backward: {start} to {end}"
         );
-        if self.fence <= Length::ZERO {
-            return Err(CutError::NonPositiveSetting(self.fence));
-        }
         let (across, across_backward) = lie.across();
         let (along, along_backward) = lie.along();
         let span = across.of(board);
-        if self.fence >= span {
-            return Err(CutError::MissesBoard {
-                setting: self.fence,
-                available: span,
-            });
-        }
-        // On the table, the slot is the fence setting in from the board's side at the fence.
-        let slot = (span - self.fence - self.blade.kerf, span - self.fence);
+        let reaches = |setting: Length| {
+            if setting <= Length::ZERO {
+                Err(CutError::NonPositiveSetting(setting))
+            } else if setting >= span {
+                Err(CutError::MissesBoard {
+                    setting,
+                    available: span,
+                })
+            } else {
+                Ok(setting)
+            }
+        };
+        // Where the slot is on the table, from the board's near side: the gauge's stop setting
+        // in from that side, or the fence setting in from the far side.
+        let slot = match self.miter_gauge {
+            Some(stop) => {
+                let stop = reaches(stop)?;
+                (stop, stop + self.blade.kerf)
+            }
+            None => {
+                let fence = reaches(self.fence)?;
+                (span - fence - self.blade.kerf, span - fence)
+            }
+        };
         let (near, far) = Orientation::onto_board(slot, span, across_backward);
         let (start, end) = Orientation::onto_board((start, end), along.of(board), along_backward);
         let radius = self.blade.radius();
@@ -154,20 +173,20 @@ impl TableSaw {
             return Ok(Pass::Kerfed(kerfed));
         }
         let waste = slot.1.min(span) - slot.0.max(Length::ZERO);
-        // The piece against the fence is the one reaching furthest toward it.
-        let toward_fence = |piece: &Piece| {
-            let from = piece.at(across);
-            if across_backward {
-                span - from
-            } else {
-                from + across.of(&piece.board)
+        // The measured piece reaches furthest toward the fence, or toward the gauge's stop.
+        let toward_guide = |piece: &Piece| {
+            let (from, size) = (piece.at(across), across.of(&piece.board));
+            let (near, far) = Orientation::onto_board((from, from + size), span, across_backward);
+            match self.miter_gauge {
+                Some(_) => -near,
+                None => far,
             }
         };
         let index = (0..pieces.len())
-            .max_by_key(|&i| (toward_fence(&pieces[i]), area(&pieces[i])))
-            .expect("the wood beside the fence is never in the blade's path");
+            .max_by_key(|&i| (toward_guide(&pieces[i]), area(&pieces[i])))
+            .expect("the wood beside the guide is never in the blade's path");
         let piece = pieces.remove(index);
-        let offcut = take_biggest(&mut pieces, toward_fence);
+        let offcut = take_biggest(&mut pieces, toward_guide);
         Ok(Pass::Cut(Cut {
             piece,
             offcut,

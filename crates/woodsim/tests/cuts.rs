@@ -24,6 +24,7 @@ fn table_saw(blade: Blade, fence: Length) -> TableSaw {
         blade,
         fence,
         height: Length::from_inches(1),
+        miter_gauge: None,
     }
 }
 

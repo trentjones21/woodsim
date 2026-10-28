@@ -29,6 +29,7 @@ fn table_saw(fence: Length, height: Length) -> TableSaw {
         },
         fence,
         height,
+        miter_gauge: None,
     }
 }
 
@@ -83,6 +84,38 @@ fn turned_the_other_way_the_piece_comes_off_the_other_end() {
     assert_eq!(cut.piece.board.length(), inches(12));
     assert_eq!(cut.piece.l, Length::ZERO);
     assert_eq!(cut.offcut.unwrap().l, inches(12) + Blade::FULL_KERF);
+}
+
+/// The table saw with its miter gauge in, its stop `stop` from the blade.
+fn miter_gauge(stop: Length) -> TableSaw {
+    TableSaw {
+        miter_gauge: Some(stop),
+        ..table_saw(inches(6), inches(1))
+    }
+}
+
+#[test]
+fn the_miter_gauge_measures_the_piece_from_its_stop() {
+    let lie = unturned().turned_left();
+    let cut = cut(miter_gauge(inches(12)).rip(&one_by_eight(), lie));
+
+    // The stop is against the board's near side across the table: its `l = 0` end.
+    assert_eq!(cut.piece.board.to_string(), "3/4\" x 7-1/4\" x 12\"");
+    assert_eq!(cut.piece.l, Length::ZERO);
+    let offcut = cut.offcut.unwrap();
+    assert_eq!(offcut.board.length(), fraction(95, 8));
+    assert_eq!(offcut.l, inches(12) + Blade::FULL_KERF);
+}
+
+#[test]
+fn a_gauge_stop_past_the_board_misses_it() {
+    assert_eq!(
+        miter_gauge(inches(24)).rip(&one_by_eight(), unturned().turned_left()),
+        Err(CutError::MissesBoard {
+            setting: inches(24),
+            available: inches(24),
+        })
+    );
 }
 
 #[test]
