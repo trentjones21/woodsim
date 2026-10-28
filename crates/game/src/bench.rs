@@ -657,12 +657,22 @@ pub fn reading(bench: &BenchStation) -> String {
         .iter()
         .map(|group| group.assembly.members().len())
         .sum();
+    let joints: usize = bench
+        .groups
+        .iter()
+        .map(|group| group.assembly.joints().len())
+        .sum();
     let parts = match parts {
         1 => "1 part".to_string(),
         n => format!("{n} parts"),
     };
+    let joints = match joints {
+        0 => String::new(),
+        1 => ", 1 joint".to_string(),
+        n => format!(", {n} joints"),
+    };
     format!(
-        "Fastener: {}   On the bench: {parts}",
+        "Fastener: {}   On the bench: {parts}{joints}",
         fastened(bench.fastener)
     )
 }

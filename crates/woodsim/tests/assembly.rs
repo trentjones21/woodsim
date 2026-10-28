@@ -146,8 +146,12 @@ fn four_matching_pieces_close_into_a_square() {
 
     assert_eq!(closing(&assembly), (Length::ZERO, Length::ZERO));
     assert!(assembly.fit().iter().all(|contact| contact.is_tight()));
-    // Four joints, all in the frame's plane: each piece is face up like the first.
-    assert_eq!(assembly.joints().len(), 3);
+    // Four joints: the last piece is glued at both its corners, closing the frame.
+    assert_eq!(assembly.joints().len(), 4);
+    let first = miter(&assembly.members()[0].board, false);
+    let last = miter(&assembly.members()[3].board, true);
+    assert_eq!(assembly.joints()[3].between, [(0, first), (3, last)]);
+    // All in the frame's plane: each piece is face up like the first.
     for member in assembly.members() {
         assert_eq!(member.axes()[2], [0.0, 0.0, 1.0]);
     }
@@ -175,6 +179,8 @@ fn a_long_side_leaves_the_last_corner_open() {
     let expected = fraction(1, 16).as_nm() as f64 / 2f64.sqrt();
     assert!((least.as_nm() as f64 - expected).abs() < 2.0, "{least:?}");
     assert_eq!(least, most);
+    // An open corner isn't glued: only the three that went together are.
+    assert_eq!(assembly.joints().len(), 3);
 }
 
 #[test]
@@ -221,10 +227,12 @@ fn two_halves_of_a_frame_close_into_a_square() {
     assert!(assembly.attach(onto, &other, surface, mating, Fastener::Glue));
 
     assert_eq!(assembly.members().len(), 4);
-    // Its own joint comes along, renumbered, and the new one joins the halves.
-    assert_eq!(assembly.joints().len(), 3);
+    // Its own joint comes along, renumbered; the new one joins the halves, and so does the
+    // corner that closes at the same time.
+    assert_eq!(assembly.joints().len(), 4);
     assert_eq!(assembly.joints()[1].between[0].0, 2);
     assert_eq!(assembly.joints()[2].between, [onto, (2, surface.1)]);
+    assert_eq!(assembly.joints()[3].between, [(0, surface.1), (3, onto.1)]);
     assert_eq!(closing(&assembly), (Length::ZERO, Length::ZERO));
     assert!(assembly.fit().iter().all(|contact| contact.is_tight()));
 }
@@ -298,6 +306,7 @@ fn boards_edge_to_edge_make_a_panel() {
 
     assert!(panel.fit().iter().all(|contact| contact.is_tight()));
     assert_eq!(panel.fit().len(), 2);
+    assert_eq!(panel.joints().len(), 2);
     // Three 4" boards side by side, ends flush: 12" across.
     let far = panel.members()[2].point(inches(24), inches(4), Length::ZERO);
     assert_eq!(far, [inches(24), inches(12), Length::ZERO]);
@@ -349,11 +358,12 @@ fn eight_pieces_mitered_at_22_and_a_half_degrees_close_into_an_octagon() {
         let onto = (last, miter(&assembly.members()[last].board, true));
         add(&mut assembly, onto, &piece, miter(&piece, false));
     }
-    // The last piece meets the first within a micron.
+    // The last piece meets the first within a micron, and is glued to it too.
     assert!(
         assembly.fit().iter().all(|contact| contact.is_tight()),
         "{:?}",
         assembly.fit()
     );
     assert_eq!(assembly.fit().len(), 8);
+    assert_eq!(assembly.joints().len(), 8);
 }

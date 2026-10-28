@@ -47,6 +47,8 @@ struct Joined {
     group: Group,
     /// When it was joined, counting joints on the bench.
     order: u64,
+    /// How many places it was fastened: where it was put, and wherever else it met flush.
+    places: usize,
 }
 
 /// A surface of a part on the bench.
@@ -476,10 +478,13 @@ impl BenchStation {
             return false;
         }
         self.joints += 1;
+        let places =
+            target.assembly.joints().len() - before.joints().len() - moving.assembly.joints().len();
         target.joined.push(Joined {
             before,
             group: moving,
             order: self.joints,
+            places,
         });
         self.groups.remove(picked.group);
         self.picked = None;
@@ -592,13 +597,20 @@ impl BenchStation {
                 .to_string();
         }
         let Some(picked) = self.picked else {
-            let fit = self
-                .latest()
-                .map(|index| describe_fit(&self.groups[index].assembly, 0))
-                .unwrap_or_default();
+            let last = self.latest().map_or(String::new(), |index| {
+                let group = &self.groups[index];
+                let joined = group.joined.last().expect("the latest group has a joint");
+                let fastener = group.assembly.joints().last().map(|joint| joint.fastener);
+                format!(
+                    " The last part went on with {} {}.{}",
+                    fastened(fastener.unwrap_or(self.fastener)),
+                    at_joints(joined.places),
+                    describe_fit(&group.assembly, 0)
+                )
+            });
             return format!(
                 "Click the surface of a part to move it: an end, an edge, or a face. Q/E turn \
-                 the part under the pointer to bring a side facing away around.{fit}"
+                 the part under the pointer to bring a side facing away around.{last}"
             );
         };
         let mine = name(picked.surface);
@@ -628,11 +640,27 @@ impl BenchStation {
         } else {
             ""
         };
+        let places = preview.assembly.joints().len()
+            - self.groups[lining_up.onto.group].assembly.joints().len()
+            - self.groups[picked.group].assembly.joints().len();
+        let places = if places > 1 {
+            format!(" {}", at_joints(places))
+        } else {
+            String::new()
+        };
         format!(
-            "Its {mine} against the {theirs}{lined_up}.{flip} Enter fastens it with {}.{}",
+            "Its {mine} against the {theirs}{lined_up}.{flip} Enter fastens it with {}{places}.{}",
             fastened(self.fastener),
             describe_fit(&preview.assembly, first)
         )
+    }
+}
+
+/// "at 1 joint", "at 2 joints".
+fn at_joints(count: usize) -> String {
+    match count {
+        1 => "at 1 joint".to_string(),
+        n => format!("at {n} joints"),
     }
 }
 
@@ -665,8 +693,8 @@ fn describe_slide(slide: [Length; 2], stops: [[Length; 3]; 2]) -> String {
 }
 
 /// How the joints between `assembly`'s members fit, counting only those that involve a member
-/// from `first` on: the ones that aren't tight, worst first, or that they all are. Starts with
-/// a space, or is empty if there are no joints.
+/// from `first` on: the places that aren't tight, worst first, which go unfastened, or that
+/// they all are. Starts with a space, or is empty if there are no joints.
 fn describe_fit(assembly: &Assembly, first: usize) -> String {
     let contacts: Vec<Contact> = assembly
         .fit()
@@ -699,7 +727,11 @@ fn describe_fit(assembly: &Assembly, first: usize) -> String {
             } else {
                 format!("is open {least} to {most}")
             };
-            format!("A {} {how} where it meets a {}.", name(b), name(a))
+            format!(
+                "A {} {how} where it meets a {}, so it's not fastened there.",
+                name(b),
+                name(a)
+            )
         })
         .collect();
     format!(" {}", lines.join(" "))
@@ -917,7 +949,7 @@ mod tests {
                 assert!(
                     bench
                         .status(None)
-                        .ends_with("A mitered end is open 3/64\" where it meets a mitered end."),
+                        .ends_with("where it meets a mitered end, so it's not fastened there."),
                     "{}",
                     bench.status(None)
                 );
@@ -926,6 +958,37 @@ mod tests {
         }
         assert_eq!(bench.groups.len(), 1);
         assert_eq!(bench.groups[0].assembly.members().len(), 4);
+    }
+
+    #[test]
+    fn the_last_frame_piece_is_glued_at_both_its_corners() {
+        let piece = frame_piece();
+        let mut bench = bench_with(&[piece.clone(), piece.clone(), piece.clone(), piece.clone()]);
+        for last in 0..3 {
+            click(&mut bench, spot(1, 0, miter(&piece, false)));
+            click(&mut bench, spot(0, last, miter(&piece, true)));
+            if last == 2 {
+                assert!(
+                    bench
+                        .status(None)
+                        .contains("Enter fastens it with glue at 2 joints."),
+                    "{}",
+                    bench.status(None)
+                );
+            }
+            assert!(bench.glue());
+        }
+        assert_eq!(bench.groups[0].assembly.joints().len(), 4);
+        assert!(
+            bench
+                .status(None)
+                .ends_with("The last part went on with glue at 2 joints. Every joint is tight."),
+            "{}",
+            bench.status(None)
+        );
+        // Taken back apart, both its joints come off with it.
+        assert!(bench.take_apart());
+        assert_eq!(bench.groups[0].assembly.joints().len(), 2);
     }
 
     #[test]

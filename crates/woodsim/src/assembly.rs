@@ -298,8 +298,11 @@ impl Assembly {
     }
 
     /// Adds `other`, moved where `mating` puts it, with its member's `surface` against `onto`,
-    /// held by `fastener`. Its members follow this assembly's, in the same order. Returns false,
-    /// leaving the assembly as it was, if either surface isn't there.
+    /// held by `fastener`. Every other place one of its members now meets one of ours flush is
+    /// fastened too, the way a glue-up gets glue on every face that meets: the last piece of a
+    /// frame is glued at both its corners. A place that's open, even a little, isn't. Its
+    /// members follow this assembly's, in the same order. Returns false, leaving the assembly
+    /// as it was, if either surface isn't there.
     pub fn attach(
         &mut self,
         onto: (usize, Surface),
@@ -322,19 +325,39 @@ impl Assembly {
                 fastener: joint.fastener,
             }
         }));
+        let chosen = [onto, (surface.0 + first, surface.1)];
         self.joints.push(Joint {
-            between: [onto, (surface.0 + first, surface.1)],
+            between: chosen,
             fastener,
         });
+        let flush: Vec<Joint> = self
+            .contacts(|i, j| i < first && j >= first)
+            .into_iter()
+            .filter(|contact| contact.is_tight() && contact.between != chosen)
+            .map(|contact| Joint {
+                between: contact.between,
+                fastener,
+            })
+            .collect();
+        self.joints.extend(flush);
         true
     }
 
     /// Every place two members' surfaces meet or nearly do, facing each other, with how far
     /// apart they are.
     pub fn fit(&self) -> Vec<Contact> {
+        self.contacts(|_, _| true)
+    }
+
+    /// The places members `i` and `j` meet or nearly do, for each pair `i < j` that `pair`
+    /// picks out.
+    fn contacts(&self, pair: impl Fn(usize, usize) -> bool) -> Vec<Contact> {
         let mut contacts = Vec::new();
         for (i, first) in self.members.iter().enumerate() {
             for (j, second) in self.members.iter().enumerate().skip(i + 1) {
+                if !pair(i, j) {
+                    continue;
+                }
                 for a in surfaces(&first.board) {
                     for b in surfaces(&second.board) {
                         if let (Some(pa), Some(pb)) = (first.patch(a), second.patch(b))
