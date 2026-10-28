@@ -7,6 +7,7 @@ mod hand;
 mod join;
 mod meshes;
 mod miter_saw;
+mod plan;
 mod scenery;
 mod shop;
 mod table_saw;

@@ -75,6 +75,8 @@ pub struct BenchStation {
     /// Whether the last click on a part found no flat surface to pick, to say so instead of
     /// doing nothing.
     missed: bool,
+    /// What came of drawing up the last plans, said until something on the bench changes.
+    note: Option<String>,
     /// How many joints have gone together on the bench, to number the next.
     joints: u64,
 }
@@ -87,6 +89,7 @@ impl Default for BenchStation {
             picked: None,
             lining_up: None,
             missed: false,
+            note: None,
             joints: 0,
         }
     }
@@ -206,6 +209,7 @@ impl BenchStation {
         let spot = self.free_spot(&group, None);
         group.center_on(spot);
         self.groups.push(group);
+        self.note = None;
     }
 
     /// Where the middle of `group`'s footprint can go, as near where it is as there's room on
@@ -262,6 +266,7 @@ impl BenchStation {
     /// same surface again lets it go.
     pub fn pick(&mut self, spot: Spot, at: [f64; 3]) {
         self.missed = false;
+        self.note = None;
         match self.picked {
             Some(picked) if picked == spot && self.lining_up.is_none() => self.picked = None,
             Some(picked) if picked.group == spot.group => {
@@ -485,6 +490,7 @@ impl BenchStation {
         self.groups.remove(picked.group);
         self.picked = None;
         self.lining_up = None;
+        self.note = None;
         let target = lining_up.onto.group - usize::from(picked.group < lining_up.onto.group);
         self.make_room(target);
         true
@@ -510,6 +516,7 @@ impl BenchStation {
         group.assembly = joined.before;
         self.picked = None;
         self.lining_up = None;
+        self.note = None;
         let mut apart = joined.group;
         let spot = self.free_spot(&apart, None);
         apart.center_on(spot);
@@ -523,6 +530,7 @@ impl BenchStation {
         let picked = self.picked?;
         self.picked = None;
         self.lining_up = None;
+        self.note = None;
         let group = self.groups.remove(picked.group);
         Some(if group.is_loose() {
             Workpiece::Board(group.assembly.members()[0].board.clone())
@@ -532,6 +540,26 @@ impl BenchStation {
                 shift: [Length::ZERO; 3],
             }))
         })
+    }
+
+    /// What to draw up plans for, lying as it lies on the bench: the glue-up (or loose part)
+    /// in group `under_pointer`, or else the picked part's, or the one that last had a joint go
+    /// together, or the first on the bench. `None` if the bench is bare.
+    pub fn to_plan(&self, under_pointer: Option<usize>) -> Option<Assembly> {
+        let index = under_pointer
+            .or(self.picked.map(|picked| picked.group))
+            .or(self.latest())
+            .or((!self.groups.is_empty()).then_some(0))?;
+        let group = self.groups.get(index)?;
+        Some(group.assembly.moved(Motion {
+            rotation: group.turn,
+            shift: [Length::ZERO; 3],
+        }))
+    }
+
+    /// Says what came of drawing up plans, until something on the bench changes.
+    pub fn note(&mut self, note: String) {
+        self.note = Some(note);
     }
 
     /// The group being lined up against another, put together the way it would be glued.
@@ -583,8 +611,17 @@ impl BenchStation {
         shown
     }
 
-    /// One line on what's happening at the bench, given what's in hand.
+    /// One line on what's happening at the bench, given what's in hand, after what came of
+    /// the last plans drawn up.
     pub fn status(&self, holding: bool) -> String {
+        let doing = self.doing(holding);
+        match &self.note {
+            Some(note) => format!("{note} {doing}"),
+            None => doing,
+        }
+    }
+
+    fn doing(&self, holding: bool) -> String {
         if holding {
             return "Click the bench to set it down.".to_string();
         }
@@ -990,6 +1027,35 @@ mod tests {
         // Taken back apart, both its joints come off with it.
         assert!(bench.take_apart());
         assert_eq!(bench.groups[0].assembly.joints().len(), 2);
+    }
+
+    #[test]
+    fn plans_are_for_the_glue_up_pointed_at_or_else_the_last_put_together() {
+        let piece = frame_piece();
+        let mut bench = bench_with(&[piece.clone(), piece.clone(), plain()]);
+        assert_eq!(bench.to_plan(None).unwrap().members().len(), 1);
+        click(&mut bench, spot(1, 0, miter(&piece, false)));
+        click(&mut bench, spot(0, 0, miter(&piece, true)));
+        assert!(bench.glue());
+        // The corner, the last put together, is group 0; the plain board group 1.
+        assert_eq!(bench.to_plan(None).unwrap().members().len(), 2);
+        assert_eq!(bench.to_plan(Some(1)).unwrap().members().len(), 1);
+        // Drawn up as it lies on the bench: turned over, it's drawn turned over.
+        let lying = bench.to_plan(None).unwrap();
+        bench.turn_group(0, Rotation::quarter_turns(0, 2));
+        let turned = bench.to_plan(None).unwrap();
+        assert!(lying.members()[0].axes()[2][2] > 0.999);
+        assert!(turned.members()[0].axes()[2][2] < -0.999);
+        // What came of it says so until the next pick.
+        bench.note("Drew up plans.".to_string());
+        assert!(
+            bench
+                .status(false)
+                .starts_with("Drew up plans. Click the surface")
+        );
+        click(&mut bench, spot(1, 0, end(&plain(), true)));
+        assert!(!bench.status(false).contains("Drew up plans"));
+        assert!(BenchStation::default().to_plan(None).is_none());
     }
 
     #[test]

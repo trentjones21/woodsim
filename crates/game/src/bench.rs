@@ -2,7 +2,7 @@
 //! they're fastened together. The surface under the pointer lights up, and clicking picks it:
 //! first the surface that moves, then the one it goes against.
 
-use std::f32::consts::PI;
+use std::{f32::consts::PI, path::Path};
 
 use bevy::{
     asset::RenderAssetUsages,
@@ -22,6 +22,7 @@ use crate::{
     hand::{Gesture, Hand},
     join::{BenchStation, HALF_TOP, Spot, assembly_point, fastened, surface_at},
     meshes::{Grain, board_mesh, lumber_mesh},
+    plan::{self, Plan},
     shop::{
         Block, Placed, Shape, ShopAssets, ShopCamera, ShopView, inches, rounded_block, station_part,
     },
@@ -42,7 +43,7 @@ pub const HELP: &str = "Click a surface of a part, then the surface it goes agai
                         F: flip it\n\
                         Arrows: slide it across the joint (Shift: 1/16\")   Enter: fasten it\n\
                         1: glue   2: brads   3: screws   U: take the last joint apart\n\
-                        Backspace: let go   Space: pick up a loose part\n\
+                        Backspace: let go   Space: pick up a loose part   P: plans to print\n\
                         Drag: look around   Scroll: zoom   Tab: go to the table saw   \
                         Esc: back to the shop";
 
@@ -336,6 +337,9 @@ fn work_with_keys(
             bench.turn_group(group, rotation);
         }
     }
+    if keys.just_pressed(KeyCode::KeyP) {
+        draw_up_plans(&mut bench, under_pointer);
+    }
     if let Some(directions) = bench.slide_directions() {
         let fine = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
         let arrows = [
@@ -366,6 +370,26 @@ fn work_with_keys(
     {
         hand.0 = Some(work);
     }
+}
+
+/// Draws up plans for the glue-up under the pointer (or the picked one, or the last put
+/// together), saves them, and opens them to print.
+fn draw_up_plans(bench: &mut BenchStation, under_pointer: Option<usize>) {
+    let Some(assembly) = bench.to_plan(under_pointer) else {
+        return;
+    };
+    let page = Plan::of(assembly).page();
+    let note = match plan::save(&page, Path::new(plan::FOLDER)) {
+        Ok(path) => match plan::open(&path) {
+            Ok(()) => format!("Drew up plans in {}, opened to print.", path.display()),
+            Err(error) => format!(
+                "Drew up plans in {}, but couldn't open them: {error}.",
+                path.display()
+            ),
+        },
+        Err(error) => format!("Couldn't save the plans: {error}."),
+    };
+    bench.note(note);
 }
 
 /// A part drawn on the bench, with what `draw_bench` keeps up to date on it.

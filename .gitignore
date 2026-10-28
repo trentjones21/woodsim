@@ -9,3 +9,6 @@
 
 # macOS
 .DS_Store
+
+# Saved by pressing P at the workbench
+/plans
