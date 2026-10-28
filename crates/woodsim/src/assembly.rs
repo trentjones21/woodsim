@@ -49,6 +49,22 @@ impl Rotation {
         }
     }
 
+    /// The square turn whose columns, where it turns `x`, `y`, and `z`, are `columns`: each
+    /// one of the axes, one way or the other.
+    pub(crate) fn square(columns: [[i8; 3]; 3]) -> Rotation {
+        Rotation {
+            columns: columns.map(|column| column.map(|v| i64::from(v) << 40)),
+        }
+    }
+
+    /// Whether it turns each axis exactly onto another, one way or the other: a square turn.
+    pub(crate) fn is_square(self) -> bool {
+        self.columns
+            .iter()
+            .flatten()
+            .all(|&v| v == 0 || v.abs() == 1 << 40)
+    }
+
     /// Where it turns `x`, `y`, and `z`.
     pub fn columns(self) -> [[f64; 3]; 3] {
         self.columns
@@ -366,9 +382,14 @@ impl Assembly {
         self.contacts(|_, _| true)
     }
 
+    /// An assembly of `members` held by `joints`, between them by their places in `members`.
+    pub(crate) fn from_parts(members: Vec<Member>, joints: Vec<Joint>) -> Assembly {
+        Assembly { members, joints }
+    }
+
     /// The places members `i` and `j` meet or nearly do, for each pair `i < j` that `pair`
     /// picks out.
-    fn contacts(&self, pair: impl Fn(usize, usize) -> bool) -> Vec<Contact> {
+    pub(crate) fn contacts(&self, pair: impl Fn(usize, usize) -> bool) -> Vec<Contact> {
         let mut contacts = Vec::new();
         for (i, first) in self.members.iter().enumerate() {
             for (j, second) in self.members.iter().enumerate().skip(i + 1) {

@@ -1,4 +1,4 @@
-use crate::{Board, Direction, Length};
+use crate::{Board, Direction, Length, Rotation};
 
 /// One of a board's three directions: along its length (with the grain), across its width, or
 /// through its thickness.
@@ -115,6 +115,25 @@ impl Orientation {
         self.axis_on(Table::Up)
     }
 
+    /// The turn that lays the board's axes (`l`, `w`, `t`) onto the saw's, as `x`, `y`, and `z`:
+    /// along the table, across it toward the fence, and up. The same turn lays a glue-up on a
+    /// saw the way this lays a board.
+    pub fn rotation(self) -> Rotation {
+        let mut columns = [[0i8; 3]; 3];
+        for (row, (axis, backward)) in [self.along(), self.across(), self.up()]
+            .into_iter()
+            .enumerate()
+        {
+            let column = match axis {
+                Axis::Length => 0,
+                Axis::Width => 1,
+                Axis::Thickness => 2,
+            };
+            columns[column][row] = if backward { -1 } else { 1 };
+        }
+        Rotation::square(columns)
+    }
+
     /// The board's axis on the saw's direction `table`, rolled and then turned into place from
     /// the board lying flat with its length along the table.
     fn axis_on(self, table: Table) -> (Axis, bool) {
@@ -200,6 +219,25 @@ impl Orientation {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_way_a_board_lies_is_a_turn_not_a_mirror_image() {
+        for rolls in 0..4 {
+            for turns in 0..4 {
+                let lie = Orientation { turns, rolls };
+                let [l, w, t] = lie.rotation().columns();
+                let cross = [
+                    l[1] * w[2] - l[2] * w[1],
+                    l[2] * w[0] - l[0] * w[2],
+                    l[0] * w[1] - l[1] * w[0],
+                ];
+                assert_eq!(cross, t, "{lie:?}");
+            }
+        }
+        // Lying as it comes, its length runs along the table, its width across, and its
+        // thickness up.
+        assert_eq!(Orientation::default().rotation(), Rotation::NONE);
+    }
 
     #[test]
     fn four_quarter_turns_come_back_around() {

@@ -8,6 +8,7 @@ mod angle;
 mod assembly;
 mod board;
 mod face;
+mod glue_up;
 mod kerf;
 mod length;
 mod orientation;
@@ -20,6 +21,7 @@ pub use assembly::{
 };
 pub use board::{Board, Piece, Run, SlotSize};
 pub use face::{Direction, Edge, Region};
+pub use glue_up::{GlueUpCut, GlueUpPass};
 pub use kerf::{Across, Kerf};
 pub use length::Length;
 pub use orientation::{Axis, Orientation};

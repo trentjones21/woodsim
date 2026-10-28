@@ -1,6 +1,10 @@
 use std::fmt;
 
-use crate::{Angle, Axis, Board, Direction, Kerf, Length, Orientation, Piece, kerf::Across};
+use crate::{
+    Angle, Assembly, Axis, Board, Direction, Kerf, Length, Orientation, Piece, Rotation,
+    glue_up::{GlueUpPass, Laid, Path},
+    kerf::Across,
+};
 
 /// A round saw blade. Every cut turns a strip of wood as wide as the kerf into sawdust.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -123,30 +127,7 @@ impl TableSaw {
             ));
         }
         let span = across.of(board);
-        let reaches = |setting: Length| {
-            if setting <= Length::ZERO {
-                Err(CutError::NonPositiveSetting(setting))
-            } else if setting >= span {
-                Err(CutError::MissesBoard {
-                    setting,
-                    available: span,
-                })
-            } else {
-                Ok(setting)
-            }
-        };
-        // Where the slot is on the table, from the board's near side: the gauge's stop setting
-        // in from that side, or the fence setting in from the far side.
-        let slot = match self.miter_gauge {
-            Some(stop) => {
-                let stop = reaches(stop)?;
-                (stop, stop + self.blade.kerf)
-            }
-            None => {
-                let fence = reaches(self.fence)?;
-                (span - fence - self.blade.kerf, span - fence)
-            }
-        };
+        let slot = self.slot(span)?;
         let (near, far) = Orientation::onto_board(slot, span, across_backward);
         let (start, end) = Orientation::onto_board((start, end), along.of(board), along_backward);
         let radius = self.blade.radius();
@@ -196,6 +177,71 @@ impl TableSaw {
         let radius = self.blade.radius();
         let reach = lie.along().0.of(board);
         self.feed(board, lie, -radius, reach + radius)
+    }
+
+    /// Where the slot is across the table, from the near side of what's on it, `span` wide:
+    /// the gauge's stop setting in from that side, or the fence setting in from the far side.
+    fn slot(&self, span: Length) -> Result<(Length, Length), CutError> {
+        let reaches = |setting: Length| {
+            if setting <= Length::ZERO {
+                Err(CutError::NonPositiveSetting(setting))
+            } else if setting >= span {
+                Err(CutError::MissesBoard {
+                    setting,
+                    available: span,
+                })
+            } else {
+                Ok(setting)
+            }
+        };
+        Ok(match self.miter_gauge {
+            Some(stop) => {
+                let stop = reaches(stop)?;
+                (stop, stop + self.blade.kerf)
+            }
+            None => {
+                let fence = reaches(self.fence)?;
+                (span - fence - self.blade.kerf, span - fence)
+            }
+        })
+    }
+
+    /// Feeds a glue-up past the blade, the way `feed` does a board, with `lie` laying its axes
+    /// onto the table's: along it, across it toward the fence, and up, as `x`, `y`, `z` (as a
+    /// board's `Orientation::rotation` lays a board). Every board in it has to lie flat.
+    ///
+    /// Panics if `start` is past `end`.
+    pub fn feed_glue_up(
+        &self,
+        glue_up: &Assembly,
+        lie: Rotation,
+        start: Length,
+        end: Length,
+    ) -> Result<GlueUpPass, CutError> {
+        assert!(
+            start <= end,
+            "the blade's travel runs backward: {start} to {end}"
+        );
+        let laid = Laid::new(glue_up, lie)?;
+        let slot = self.slot(laid.extent[1])?;
+        let radius = self.blade.radius();
+        Ok(laid.cut(&Path {
+            across: (0, 1),
+            face: [Length::ZERO, slot.1],
+            kerf: self.blade.kerf,
+            through: [Length::ZERO; 2],
+            travel: (start, end),
+            height: self.height - radius,
+            radius,
+            measured_ahead: self.miter_gauge.is_none(),
+        }))
+    }
+
+    /// Pushes a glue-up, lying as `lie` lays it, all the way past the blade.
+    pub fn rip_glue_up(&self, glue_up: &Assembly, lie: Rotation) -> Result<GlueUpPass, CutError> {
+        let radius = self.blade.radius();
+        let reach = Laid::new(glue_up, lie)?.extent[0];
+        self.feed_glue_up(glue_up, lie, -radius, reach + radius)
     }
 }
 
@@ -364,6 +410,62 @@ impl MiterSaw {
         Ok(Pass::Cut(sort_out(pieces, measured, toward_fence, waste)))
     }
 
+    /// Brings the blade down on a glue-up, the way `chop` does on a board, with `lie` laying its
+    /// axes onto the saw's: along the fence toward the stop, across the table toward the fence,
+    /// and up, as `x`, `y`, `z`. Every board in it has to lie flat.
+    ///
+    /// Panics if the miter is past `max_miter`.
+    pub fn chop_glue_up(
+        &self,
+        glue_up: &Assembly,
+        lie: Rotation,
+        length: Length,
+        bottom: Length,
+    ) -> Result<GlueUpPass, CutError> {
+        assert!(
+            self.miter.abs() <= self.max_miter,
+            "the table turns {} either way, not {}",
+            self.max_miter,
+            self.miter
+        );
+        let laid = Laid::new(glue_up, lie)?;
+        let (total, span) = (laid.extent[0], laid.extent[1]);
+        if length <= Length::ZERO {
+            return Err(CutError::NonPositiveSetting(length));
+        }
+        if length >= total {
+            return Err(CutError::MissesBoard {
+                setting: length,
+                available: total,
+            });
+        }
+        // As for a board: the blade's stop-side face crosses the fence `length` from the stop,
+        // and its center is out in front of the fence along it.
+        let (cos, sin) = self.miter.unit();
+        let (out, height) = self.center(bottom);
+        let at = [total - length, span];
+        Ok(laid.cut(&Path {
+            across: (cos, sin),
+            face: at,
+            kerf: self.blade.kerf,
+            through: at,
+            travel: (out, out),
+            height,
+            radius: self.blade.radius(),
+            measured_ahead: true,
+        }))
+    }
+
+    /// Chops a glue-up with a full stroke, through the table.
+    pub fn crosscut_glue_up(
+        &self,
+        glue_up: &Assembly,
+        lie: Rotation,
+        length: Length,
+    ) -> Result<GlueUpPass, CutError> {
+        self.chop_glue_up(glue_up, lie, length, self.stroke.1)
+    }
+
     /// Chops a board standing on an edge, square only: with its length along the fence, the
     /// blade comes down through its width; turned with its length across the saw, parallel to
     /// its faces.
@@ -456,7 +558,7 @@ impl MiterSaw {
 }
 
 /// `length` times the scale of `direction`, as positions along it are measured.
-fn scaled(length: Length, direction: Direction) -> Length {
+pub(crate) fn scaled(length: Length, direction: Direction) -> Length {
     Length::from_nm((length.as_nm() as f64 * direction.scale()).round() as i64)
 }
 
