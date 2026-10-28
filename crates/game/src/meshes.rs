@@ -8,7 +8,7 @@ use bevy::{
     asset::RenderAssetUsages, mesh::Indices, prelude::*, render::render_resource::PrimitiveTopology,
 };
 
-use woodsim::Board;
+use woodsim::{Axis, Board, Length};
 
 use crate::textures::{WOOD_TILE_ACROSS, WOOD_TILE_ALONG};
 
@@ -64,13 +64,14 @@ pub fn board_mesh(size: Vec3, offset: Vec3, grain: Grain) -> Mesh {
     )
 }
 
-/// A board as the simulation has it, slots and all: from its corner at the origin, with `w`
-/// along x, `t` along y, and `l` (and the grain) along z. `grain` is where that corner sits in
-/// the wood the grain pattern is laid out on, so pieces cut from one board line up.
+/// A board as the simulation has it, slots, cutaways and all: from its corner at the origin,
+/// with `w` along x, `t` along y, and `l` (and the grain) along z. `grain` is where that corner
+/// sits in the wood the grain pattern is laid out on, so pieces cut from one board line up.
 ///
-/// The board is built in slices across its width, split wherever a slot's face is. Within a
-/// slice, each point along the length has one span of wood from bottom to top; a slot cut from
-/// below raises the bottom of that span, and a slot that goes through empties it.
+/// The board's face is split into a grid wherever a slot or cutaway has an edge, and at points
+/// around each slot's curved ends. At any point in a cell, the wood runs from a bottom to a
+/// top: a slot cut up from below raises the bottom, one cut down from above lowers the top, and
+/// where they meet there's no wood. Walls go wherever a cell has wood its neighbor doesn't.
 pub fn lumber_mesh(board: &Board, grain: Vec3) -> Mesh {
     let size = Vec3::new(
         board.width().as_meters_f32(),
@@ -78,41 +79,100 @@ pub fn lumber_mesh(board: &Board, grain: Vec3) -> Mesh {
         board.length().as_meters_f32(),
     );
     let slots: Vec<Slot> = board.kerfs().iter().map(Slot::from).collect();
-    let mut faces = Vec::from([0.0, size.x]);
-    faces.extend(
-        slots
-            .iter()
-            .flat_map(|slot| [slot.near, slot.far])
-            .map(|w| w.clamp(0.0, size.x)),
-    );
-    let faces = sorted_distinct(faces);
+    let cutaways: Vec<[f32; 4]> = board
+        .cutaways()
+        .iter()
+        .map(|cutaway| {
+            [cutaway.w.0, cutaway.w.1, cutaway.l.0, cutaway.l.1].map(Length::as_meters_f32)
+        })
+        .collect();
+
+    // Grid lines across the width (x) and along the length (z).
+    let (mut xs, mut zs) = (vec![0.0, size.x], vec![0.0, size.z]);
+    for slot in &slots {
+        let (faces, outline) = match slot.across {
+            Axis::Width => (&mut xs, &mut zs),
+            Axis::Length => (&mut zs, &mut xs),
+        };
+        faces.extend([slot.near, slot.far]);
+        outline.extend(slot.outline(size.y));
+    }
+    for [w0, w1, l0, l1] in &cutaways {
+        xs.extend([*w0, *w1]);
+        zs.extend([*l0, *l1]);
+    }
+    xs.retain(|x| (0.0..=size.x).contains(x));
+    zs.retain(|z| (0.0..=size.z).contains(z));
+    let (xs, zs) = (sorted_distinct(xs), sorted_distinct(zs));
+    let (columns, rows) = (xs.len() - 1, zs.len() - 1);
+
+    // The span of wood at each corner of each cell, worked out with that cell's slots; `None`
+    // for a cell cut away. Corners go (x0, z0), (x1, z0), (x1, z1), (x0, z1).
+    let spans: Vec<Option<[(f32, f32); 4]>> = (0..rows)
+        .flat_map(|j| (0..columns).map(move |i| (i, j)))
+        .map(|(i, j)| {
+            let center = ((xs[i] + xs[i + 1]) / 2.0, (zs[j] + zs[j + 1]) / 2.0);
+            let cut_away = cutaways.iter().any(|&[w0, w1, l0, l1]| {
+                w0 < center.0 && center.0 < w1 && l0 < center.1 && center.1 < l1
+            });
+            if cut_away {
+                return None;
+            }
+            let cutting: Vec<&Slot> = slots
+                .iter()
+                .filter(|slot| {
+                    let across = match slot.across {
+                        Axis::Width => center.0,
+                        Axis::Length => center.1,
+                    };
+                    slot.near < across && across < slot.far
+                })
+                .collect();
+            let corners = [
+                (xs[i], zs[j]),
+                (xs[i + 1], zs[j]),
+                (xs[i + 1], zs[j + 1]),
+                (xs[i], zs[j + 1]),
+            ];
+            Some(corners.map(|(x, z)| wood_at(&cutting, x, z, size.y)))
+        })
+        .collect();
 
     let mut mesh = MeshBuilder::new(grain);
-    for (&left, &right) in faces.iter().zip(&faces[1..]) {
-        let middle = (left + right) / 2.0;
-        let cutting: Vec<&Slot> = slots
-            .iter()
-            .filter(|slot| (slot.near..=slot.far).contains(&middle))
-            .collect();
-        let mut stations = Vec::from([0.0, size.z]);
-        for slot in &cutting {
-            stations.extend(slot.outline(size.y));
+    let at = |i: usize, j: usize| j * columns + i;
+    for j in 0..rows {
+        for i in 0..columns {
+            let Some(ours) = spans[at(i, j)] else {
+                continue;
+            };
+            let (x0, x1, z0, z1) = (xs[i], xs[i + 1], zs[j], zs[j + 1]);
+            let points = [(x0, z0), (x1, z0), (x1, z1), (x0, z1)];
+            mesh.surfaces(points, ours);
+            // Each edge: its two corners in this cell, the neighbor across it and the same two
+            // points in that neighbor, and which way the edge faces.
+            let neighbor = |di: isize, dj: isize| {
+                let (ni, nj) = (i as isize + di, j as isize + dj);
+                (ni >= 0 && nj >= 0 && (ni as usize) < columns && (nj as usize) < rows)
+                    .then(|| spans[at(ni as usize, nj as usize)])
+                    .flatten()
+            };
+            let edges = [
+                ([0, 3], neighbor(-1, 0).map(|n| [n[1], n[2]]), Vec3::NEG_X),
+                ([1, 2], neighbor(1, 0).map(|n| [n[0], n[3]]), Vec3::X),
+                ([0, 1], neighbor(0, -1).map(|n| [n[3], n[2]]), Vec3::NEG_Z),
+                ([3, 2], neighbor(0, 1).map(|n| [n[0], n[1]]), Vec3::Z),
+            ];
+            for ([a, b], theirs, outward) in edges {
+                mesh.wall([points[a], points[b]], [ours[a], ours[b]], theirs, outward);
+            }
         }
-        stations.retain(|l| (0.0..=size.z).contains(l));
-        let columns: Vec<(f32, f32, f32)> = sorted_distinct(stations)
-            .into_iter()
-            .map(|l| {
-                let (bottom, top) = wood_at(&cutting, l, size.y);
-                (l, bottom, top)
-            })
-            .collect();
-        mesh.slice(left, right, &columns, size.z);
     }
     mesh.build()
 }
 
-/// A kerf in meters, in the mesh's axes.
+/// A kerf in meters.
 struct Slot {
+    across: Axis,
     near: f32,
     far: f32,
     radius: f32,
@@ -124,6 +184,7 @@ struct Slot {
 impl From<&woodsim::Kerf> for Slot {
     fn from(kerf: &woodsim::Kerf) -> Slot {
         Slot {
+            across: kerf.across,
             near: kerf.near.as_meters_f32(),
             far: kerf.far.as_meters_f32(),
             radius: kerf.radius.as_meters_f32(),
@@ -138,18 +199,19 @@ impl From<&woodsim::Kerf> for Slot {
 const ARC_STEPS: usize = 12;
 
 impl Slot {
-    /// The span of height the blade cut at `l` along the board, if it reached there.
-    fn cut_at(&self, l: f32) -> Option<(f32, f32)> {
-        let along = (self.start - l).max(l - self.end).max(0.0);
-        (along < self.radius).then(|| {
-            let half = (self.radius * self.radius - along * along).sqrt();
+    /// The span of height the blade cut at `along` on the axis the slot runs along, if it
+    /// reached there.
+    fn cut_at(&self, along: f32) -> Option<(f32, f32)> {
+        let past = (self.start - along).max(along - self.end).max(0.0);
+        (past < self.radius).then(|| {
+            let half = (self.radius * self.radius - past * past).sqrt();
             (self.center - half, self.center + half)
         })
     }
 
-    /// Points along the board where the slot's outline needs a vertex: the ends of its straight
-    /// run, and points around its curved ends from where they cross one face of a board
-    /// `thickness` thick to where they cross the other.
+    /// Points along the slot where its outline needs a vertex: the ends of its straight run,
+    /// and points around its curved ends from where they cross one face of a board `thickness`
+    /// thick to where they cross the other.
     fn outline(&self, thickness: f32) -> impl Iterator<Item = f32> + '_ {
         let low = (self.center - self.radius).max(0.0);
         let high = (self.center + self.radius).min(thickness);
@@ -163,12 +225,19 @@ impl Slot {
     }
 }
 
-/// The span of wood left at `l` along the board, bottom to top, given the slots cutting this
-/// slice. A slot reaches in from the bottom face or the top one; where it goes through, the
-/// span is empty, with bottom and top equal.
-fn wood_at(slots: &[&Slot], l: f32, thickness: f32) -> (f32, f32) {
+/// The span of wood at the point `(x, z)` of the board's face, bottom to top, given the slots
+/// cutting there. A slot reaches in from the bottom face or the top one; where the wood's gone,
+/// bottom and top are equal.
+fn wood_at(slots: &[&Slot], x: f32, z: f32, thickness: f32) -> (f32, f32) {
     let (mut bottom, mut top) = (0.0_f32, thickness);
-    for (low, high) in slots.iter().filter_map(|slot| slot.cut_at(l)) {
+    for slot in slots {
+        let along = match slot.across {
+            Axis::Width => z,
+            Axis::Length => x,
+        };
+        let Some((low, high)) = slot.cut_at(along) else {
+            continue;
+        };
         if low <= bottom {
             bottom = bottom.max(high);
         } else if high >= top {
@@ -208,64 +277,70 @@ impl MeshBuilder {
         }
     }
 
-    /// The faces of one slice of a board from `left` to `right` across it. `columns` are points
-    /// along it in order, each with the span of wood there: `(l, bottom, top)`.
-    fn slice(&mut self, left: f32, right: f32, columns: &[(f32, f32, f32)], length: f32) {
-        let at = |w: f32, t: f32, l: f32| Vec3::new(w, t, l);
-        for pair in columns.windows(2) {
-            let [(l0, bottom0, top0), (l1, bottom1, top1)] = [pair[0], pair[1]];
-            if bottom0 >= top0 && bottom1 >= top1 {
+    /// The top and bottom of the wood in one cell, whose corners are at `points` on the face
+    /// with the spans of wood `spans`.
+    fn surfaces(&mut self, points: [(f32, f32); 4], spans: [(f32, f32); 4]) {
+        if spans.iter().all(|(bottom, top)| bottom >= top) {
+            return;
+        }
+        for upward in [true, false] {
+            let corners: [Vec3; 4] = std::array::from_fn(|k| {
+                let height = if upward { spans[k].1 } else { spans[k].0 };
+                Vec3::new(points[k].0, height, points[k].1)
+            });
+            // The diagonals' cross product points up for corners going round from (x0, z0).
+            let facing = (corners[2] - corners[0]).cross(corners[1] - corners[3]);
+            let facing = if facing.length_squared() > 1e-18 {
+                facing
+            } else {
+                Vec3::Y
+            };
+            self.quad(corners, if upward { facing } else { -facing });
+        }
+    }
+
+    /// The face of a cell's wood along one edge, from `points[0]` to `points[1]`, where the
+    /// neighboring cell has no wood to cover it. `ours` and `theirs` are the spans of wood at
+    /// those points on each side; a neighbor that's off the board or cut away has none.
+    fn wall(
+        &mut self,
+        points: [(f32, f32); 2],
+        ours: [(f32, f32); 2],
+        theirs: Option<[(f32, f32); 2]>,
+        outward: Vec3,
+    ) {
+        // Below the neighbor's wood, and above it.
+        let mut below = [(0.0, 0.0); 2];
+        let mut above = [(0.0, 0.0); 2];
+        for k in 0..2 {
+            let (bottom, top) = ours[k];
+            if bottom >= top {
+                below[k] = (bottom, bottom);
+                above[k] = (top, top);
                 continue;
             }
-            let run = l1 - l0;
-            self.quad(
-                [
-                    at(left, top0, l0),
-                    at(right, top0, l0),
-                    at(right, top1, l1),
-                    at(left, top1, l1),
-                ],
-                Vec3::new(0.0, run, top0 - top1),
-            );
-            self.quad(
-                [
-                    at(left, bottom0, l0),
-                    at(right, bottom0, l0),
-                    at(right, bottom1, l1),
-                    at(left, bottom1, l1),
-                ],
-                Vec3::new(0.0, -run, bottom1 - bottom0),
-            );
-            for (w, outward) in [(left, Vec3::NEG_X), (right, Vec3::X)] {
-                self.quad(
-                    [
-                        at(w, bottom0, l0),
-                        at(w, top0, l0),
-                        at(w, top1, l1),
-                        at(w, bottom1, l1),
-                    ],
-                    outward,
-                );
+            match theirs.map(|theirs| theirs[k]).filter(|(b, t)| b < t) {
+                Some((their_bottom, their_top)) => {
+                    below[k] = (bottom, their_bottom.clamp(bottom, top));
+                    above[k] = (their_top.clamp(bottom, top), top);
+                }
+                None => {
+                    below[k] = (bottom, top);
+                    above[k] = (top, top);
+                }
             }
         }
-        // The board's two ends, where there's wood at them.
-        for &(l, bottom, top) in [columns[0], columns[columns.len() - 1]].iter() {
-            if bottom < top {
-                let outward = if l < length / 2.0 {
-                    Vec3::NEG_Z
-                } else {
-                    Vec3::Z
-                };
-                self.quad(
-                    [
-                        at(left, bottom, l),
-                        at(right, bottom, l),
-                        at(right, top, l),
-                        at(left, top, l),
-                    ],
-                    outward,
-                );
-            }
+        for part in [below, above] {
+            let at = |k: usize, height: f32| Vec3::new(points[k].0, height, points[k].1);
+            self.quad(
+                [
+                    at(0, part[0].0),
+                    at(1, part[1].0),
+                    at(1, part[1].1),
+                    at(0, part[0].1),
+                ],
+                outward,
+            );
         }
     }
 
@@ -450,7 +525,7 @@ fn rounded(size: Vec3, map: impl Fn(Vec3) -> (Face, f32), offset: Vec3) -> Mesh 
 #[cfg(test)]
 mod tests {
     use bevy::mesh::VertexAttributeValues;
-    use woodsim::{Blade, Length, Pass, TableSaw};
+    use woodsim::{Blade, Orientation, Pass, TableSaw};
 
     use super::*;
 
@@ -528,7 +603,12 @@ mod tests {
             fence: Length::from_inches(6),
             height: Length::from_inches(1),
         };
-        match saw.feed(&plank(), -Length::from_inches(6), Length::from_inches(10)) {
+        match saw.feed(
+            &plank(),
+            Orientation::default(),
+            -Length::from_inches(6),
+            Length::from_inches(10),
+        ) {
             Ok(Pass::Kerfed(board)) => board,
             other => panic!("expected a stopped cut, got {other:?}"),
         }
@@ -585,6 +665,77 @@ mod tests {
             })
         };
         assert!(wall(near) && wall(far));
+    }
+
+    /// The total area of the triangles lying flat on the board's top face.
+    fn top_area(mesh: &Mesh, thickness: f32) -> f32 {
+        triangles(mesh)
+            .iter()
+            .filter(|corners| corners.iter().all(|p| (p.y - thickness).abs() < 1e-6))
+            .map(|[a, b, c]| (b - a).cross(c - a).length() / 2.0)
+            .sum()
+    }
+
+    #[test]
+    fn a_dado_from_below_leaves_the_top_whole() {
+        let saw = TableSaw {
+            blade: Blade {
+                diameter: Length::from_inches(10),
+                kerf: Blade::FULL_KERF,
+            },
+            fence: Length::from_inches(12),
+            height: Length::from_inch_fraction(1, 4),
+        };
+        let Ok(Pass::Kerfed(board)) = saw.rip(&plank(), Orientation::default().turned_left())
+        else {
+            panic!("expected a dado");
+        };
+        let mesh = lumber_mesh(&board, Vec3::ZERO);
+        let face = board.width().as_meters_f32() * board.length().as_meters_f32();
+        assert!((top_area(&mesh, board.thickness().as_meters_f32()) - face).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_cutaway_corner_has_no_wood() {
+        // Cut the plank's far corner out with a stopped rip and a stopped crosscut that meet.
+        let saw = |fence: Length| TableSaw {
+            blade: Blade {
+                diameter: Length::from_inches(10),
+                kerf: Blade::FULL_KERF,
+            },
+            fence,
+            height: Length::from_inches(1),
+        };
+        let six = -Length::from_inches(6);
+        let Ok(Pass::Kerfed(ripped)) = saw(Length::from_inches(2)).feed(
+            &plank(),
+            Orientation::default(),
+            six,
+            Length::from_inches(8),
+        ) else {
+            panic!("expected a stopped rip");
+        };
+        let Ok(Pass::Cut(cut)) = saw(Length::from_inch_fraction(119, 8)).feed(
+            &ripped,
+            Orientation::default().turned_left(),
+            six,
+            Length::from_inch_fraction(3, 2),
+        ) else {
+            panic!("expected the corner to come out");
+        };
+        let board = cut.piece.board;
+        let mesh = lumber_mesh(&board, Vec3::ZERO);
+        let corner = board.cutaways()[0];
+        let [w0, w1, l0, l1] =
+            [corner.w.0, corner.w.1, corner.l.0, corner.l.1].map(Length::as_meters_f32);
+        for [a, b, c] in triangles(&mesh) {
+            let center = (a + b + c) / 3.0;
+            let inside = w0 + 1e-5 < center.x
+                && center.x < w1 - 1e-5
+                && l0 + 1e-5 < center.z
+                && center.z < l1 - 1e-5;
+            assert!(!inside, "wood in the cutaway at {center}");
+        }
     }
 
     #[test]

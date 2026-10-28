@@ -29,7 +29,8 @@ pub const HELP: &str = "Left/Right: move the fence 1/16\"   Shift+Left/Right: 1\
                         Or drag the fence\n\
                         Up/Down: raise or lower the blade 1/16\"   Shift+Up/Down: 1/4\"\n\
                         Drag the board, or hold Space, to push it   Drag it back to back it out\n\
-                        B: bring the board back around   R: new board\n\
+                        Q/E: turn the board   F: flip it   B: bring it back around   \
+                        R: new board\n\
                         Right-click a board or press C: carry it to the miter saw\n\
                         Tab: go to the miter saw   Esc: back to the shop";
 
@@ -70,12 +71,14 @@ impl Plugin for TableSawPlugin {
                     (
                         move_fence_with_keys,
                         raise_blade_with_keys,
+                        turn_with_keys,
                         push_board,
                         bring_back_with_key,
                         new_board,
                         carry_with_key,
                     )
                         .run_if(resource_equals(ShopView::TableSaw)),
+                    set_loose_aside,
                     (draw_fence, draw_blade, draw_board),
                 )
                     .chain(),
@@ -100,9 +103,13 @@ struct BladeDisc;
 #[derive(Component)]
 struct RivingKnife;
 
-/// How far behind the board's leading end the pointer grabbed it to drag it, in meters.
+/// Where the pointer grabbed the board to drag it, along the table, and how far along the blade
+/// the board was then. The board follows how far the pointer moves.
 #[derive(Resource, Default)]
-struct BoardGrab(f32);
+struct BoardGrab {
+    pointer: f32,
+    advance: Length,
+}
 
 fn spawn_saw(
     mut commands: Commands,
@@ -394,24 +401,22 @@ fn bring_back_with_key(keys: Res<ButtonInput<KeyCode>>, mut station: ResMut<Tabl
     }
 }
 
-/// Remembers where on the board the pointer grabbed it, so it doesn't jump to the cursor.
+/// Remembers where the pointer grabbed the board, so it doesn't jump to the cursor.
 fn grab_board(
     drag: On<PointerDragStart>,
     camera: Single<(&Camera, &GlobalTransform)>,
-    transforms: Query<&Transform, With<AtTableSaw>>,
+    station: Res<TableSawStation>,
     mut grab: ResMut<BoardGrab>,
 ) {
     let (camera, camera_transform) = *camera;
     if drag.button == PointerButton::Primary
-        && let Ok(transform) = transforms.get(drag.entity)
-        && let Some(point) = pointer_on_plane(
-            camera,
-            camera_transform,
-            drag.pointer.position,
-            transform.translation.y,
-        )
+        && let Some(point) =
+            pointer_on_plane(camera, camera_transform, drag.pointer.position, ORIGIN.y)
     {
-        grab.0 = point.z - transform.translation.z;
+        *grab = BoardGrab {
+            pointer: point.z,
+            advance: station.advance(),
+        };
     }
 }
 
@@ -419,23 +424,38 @@ fn grab_board(
 fn drag_board(
     drag: On<PointerDrag>,
     camera: Single<(&Camera, &GlobalTransform)>,
-    transforms: Query<&Transform, With<AtTableSaw>>,
     grab: Res<BoardGrab>,
     mut station: ResMut<TableSawStation>,
 ) {
     let (camera, camera_transform) = *camera;
     if drag.button == PointerButton::Primary
-        && let Ok(transform) = transforms.get(drag.entity)
-        && let Some(point) = pointer_on_plane(
-            camera,
-            camera_transform,
-            drag.pointer.position,
-            transform.translation.y,
-        )
+        && let Some(point) =
+            pointer_on_plane(camera, camera_transform, drag.pointer.position, ORIGIN.y)
     {
-        // The board's leading end is at z = -advance in table space.
-        let lead = point.z - grab.0 - ORIGIN.z;
-        station.move_to(snap(-lead, 64));
+        // The board feeds toward -z, so moving the pointer that way pushes it.
+        station.move_to(grab.advance - snap(point.z - grab.pointer, 64));
+    }
+}
+
+/// Q and E turn the board a quarter turn left and right, and F flips it over, while it waits
+/// in front of the blade.
+fn turn_with_keys(keys: Res<ButtonInput<KeyCode>>, mut station: ResMut<TableSawStation>) {
+    if keys.just_pressed(KeyCode::KeyQ) {
+        station.turn_left();
+    }
+    if keys.just_pressed(KeyCode::KeyE) {
+        station.turn_right();
+    }
+    if keys.just_pressed(KeyCode::KeyF) {
+        station.flip();
+    }
+}
+
+/// Puts any strips a cut set loose on the parts pile by the miter saw.
+fn set_loose_aside(mut table_saw: ResMut<TableSawStation>, mut miter_saw: ResMut<MiterSawStation>) {
+    if table_saw.has_loose() {
+        let loose = table_saw.take_loose();
+        miter_saw.parts.extend(loose);
     }
 }
 

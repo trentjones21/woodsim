@@ -22,7 +22,7 @@ use bevy::{
     render::view::{ColorGrading, ColorGradingGlobal},
     time::common_conditions::on_real_timer,
 };
-use woodsim::{Board, Cut, Kerf, Length};
+use woodsim::{Axis, Board, Cut, Kerf, Length, Orientation, Piece};
 
 use crate::{
     chop::MiterSawStation,
@@ -55,14 +55,82 @@ pub enum Part {
     Offcut,
 }
 
-/// A board on a saw, and where it sits. `corner` is its `l = w = t = 0` corner, in the station's
-/// coordinates. `grain` is where that corner sits in the board it was cut from, so the grain of
+/// A board on a saw, and where it sits, in the saw's own frame: `across` its table toward the
+/// fence, `up`, and `along` it, as x, y, and z. `corner` is where the board's `l = w = t = 0`
+/// corner is, and `rotation` turns the board's own axes (`w`, `t`, `l` along x, y, z) to lie the
+/// way it does. `grain` is where its corner sits in the board it was cut from, so the grain of
 /// the pieces lines up and stays put on the wood as they move.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Placed {
     pub board: Board,
     pub corner: Vec3,
+    pub rotation: Quat,
     pub grain: Vec3,
+}
+
+impl Placed {
+    /// `board` lying as `lie` says, with the near corner of the space it takes up on the saw
+    /// at `near`.
+    pub fn lying(board: &Board, lie: Orientation, near: Vec3) -> Placed {
+        let (rotation, corner) = lay(board, lie);
+        Placed {
+            board: board.clone(),
+            corner: near + corner,
+            rotation,
+            grain: Vec3::ZERO,
+        }
+    }
+
+    /// A piece cut from this board, where it was on it.
+    pub fn piece(&self, piece: &Piece) -> Placed {
+        let offset = Vec3::new(piece.w.as_meters_f32(), 0.0, piece.l.as_meters_f32());
+        Placed {
+            board: piece.board.clone(),
+            corner: self.corner + self.rotation * offset,
+            rotation: self.rotation,
+            grain: self.grain + offset,
+        }
+    }
+
+    /// The space the board takes up on the saw, as its near and far corners.
+    pub fn bounds(&self) -> (Vec3, Vec3) {
+        let size = board_size(&self.board);
+        let corners = (0..8).map(|k| {
+            let corner = Vec3::new((k & 1) as f32, ((k >> 1) & 1) as f32, (k >> 2) as f32);
+            self.corner + self.rotation * (corner * size)
+        });
+        corners.fold((Vec3::MAX, Vec3::MIN), |(low, high), corner| {
+            (low.min(corner), high.max(corner))
+        })
+    }
+}
+
+/// A board's size along its own axes: `w`, `t`, `l` as x, y, z.
+fn board_size(board: &Board) -> Vec3 {
+    Vec3::new(
+        board.width().as_meters_f32(),
+        board.thickness().as_meters_f32(),
+        board.length().as_meters_f32(),
+    )
+}
+
+/// The rotation that lays `board` on a saw as `lie` says, and where its corner ends up from the
+/// near corner of the space it takes up. Matches `woodsim::Orientation`: any flip comes first,
+/// about the saw's along axis, then the quarter turns about the up axis.
+fn lay(board: &Board, lie: Orientation) -> (Quat, Vec3) {
+    let flip = if lie.is_flipped() {
+        Quat::from_rotation_z(PI)
+    } else {
+        Quat::IDENTITY
+    };
+    let rotation = Quat::from_rotation_y(lie.turns() as f32 * FRAC_PI_2) * flip;
+    let placed = Placed {
+        board: board.clone(),
+        corner: Vec3::ZERO,
+        rotation,
+        grain: Vec3::ZERO,
+    };
+    (rotation, -placed.bounds().0)
 }
 
 /// What to draw on a saw: a board in one piece, or both sides of a cut that went through it.
@@ -659,40 +727,49 @@ pub fn describe_kerf(board: &Board, kerf: &Kerf) -> String {
     let thirty_second = Length::from_inch_fraction(1, 32);
     let span = |t: Length| {
         kerf.span_at(t).map_or(Length::ZERO, |(start, end)| {
-            (end.min(board.length()) - start.max(Length::ZERO))
+            (end.min(kerf.along().of(board)) - start.max(Length::ZERO))
                 .max(Length::ZERO)
                 .rounded_to(thirty_second)
         })
     };
-    let bottom = span(Length::ZERO);
-    if kerf.top() >= board.thickness() {
+    let thickness = board.thickness();
+    if kerf.depth(thickness) >= thickness {
         // A slot through the board's whole length would have cut it apart, so this one stops.
-        let top = span(board.thickness());
+        let (top, bottom) = (span(thickness), span(Length::ZERO));
         return format!("a stopped cut {top} long on top and {bottom} on the bottom");
     }
-    let depth = kerf.top().rounded_to(thirty_second);
-    let kind = if kerf.near <= Length::ZERO || kerf.far >= board.width() {
-        "rabbet"
-    } else {
-        "groove"
+    let depth = kerf.depth(thickness).rounded_to(thirty_second);
+    let at_edge = kerf.near <= Length::ZERO || kerf.far >= kerf.across.of(board);
+    let kind = match (kerf.across, at_edge) {
+        (Axis::Width, false) => "groove",
+        (Axis::Width, true) => "rabbet",
+        (Axis::Length, false) => "dado",
+        (Axis::Length, true) => "rabbet across the end",
     };
-    let full_length = kerf
-        .span_at(Length::ZERO)
-        .is_some_and(|(start, end)| start <= Length::ZERO && end >= board.length());
-    if full_length {
-        format!("a {depth}-deep {kind} the full length")
+    // How far it runs on the face the blade came through.
+    let face = if kerf.from_below() {
+        Length::ZERO
     } else {
-        format!("a {depth}-deep {kind} {bottom} long")
+        thickness
+    };
+    let reach = kerf.along().of(board);
+    let all_the_way = kerf
+        .span_at(face)
+        .is_some_and(|(start, end)| start <= Length::ZERO && end >= reach);
+    match (all_the_way, kerf.across) {
+        (true, Axis::Width) => format!("a {depth}-deep {kind} the full length"),
+        (true, Axis::Length) => format!("a {depth}-deep {kind} all the way across"),
+        (false, _) => format!("a {depth}-deep {kind} {} long", span(face)),
     }
 }
 
 /// Places each part of a board on a saw, rebuilding its mesh to match the board and hiding the
-/// parts that aren't there. Each part needs its own mesh. `rotation` turns a board's own axes
-/// (`w`, `t`, `l` along x, y, z) to lie the way the saw holds it.
+/// parts that aren't there. Each part needs its own mesh. `frame` turns the saw's own frame
+/// (across, up, along) into the station's coordinates, which start at `origin`.
 pub fn place_parts<'a>(
     boards: &SawBoards,
     origin: Vec3,
-    rotation: Quat,
+    frame: Quat,
     meshes: &mut Assets<Mesh>,
     parts: impl IntoIterator<
         Item = (
@@ -706,8 +783,8 @@ pub fn place_parts<'a>(
     for (part, mesh, mut transform, mut visibility) in parts {
         match boards.get(*part) {
             Some(placed) => {
-                *transform =
-                    Transform::from_translation(origin + placed.corner).with_rotation(rotation);
+                *transform = Transform::from_translation(origin + frame * placed.corner)
+                    .with_rotation(frame * placed.rotation);
                 if let Some(mut mesh) = meshes.get_mut(&mesh.0) {
                     *mesh = lumber_mesh(&placed.board, placed.grain);
                 }

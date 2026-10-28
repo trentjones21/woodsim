@@ -5,11 +5,12 @@
 //! fence-side face with +x toward the fence, y = 0 is the table top, and z = 0 is under the
 //! blade's center, with the board feeding toward -z, away from the operator.
 //!
-//! The board rides the fence on its `w = width` edge and leads with its `l = 0` end, so its own
-//! axes line up with table space: `w` along x, `t` along y, and `l` along z.
+//! Table space is the saw's own frame: across the table (x), up (y), and along it (z). The board
+//! lies as its `Orientation` says: unturned, its length runs along the table, ripping; turned a
+//! quarter turn, across it, crosscutting.
 
 use bevy::prelude::*;
-use woodsim::{Blade, Board, CutError, Length, Pass, Piece, TableSaw};
+use woodsim::{Axis, Blade, Board, CutError, Length, Orientation, Pass, TableSaw};
 
 use crate::shop::{Part, Placed, SawBoards, describe_board, describe_cut, describe_kerf};
 
@@ -29,6 +30,8 @@ pub struct TableSawStation {
     /// The board on the saw, with the slots earlier passes cut. During a pass, this is how it
     /// was before the pass.
     board: Board,
+    /// How the board lies on the table.
+    lie: Orientation,
     /// Where the blade's center is along the board, from its leading end: negative while the
     /// board is in front of the blade.
     advance: Length,
@@ -46,6 +49,8 @@ struct Feeding {
     /// The furthest back and forward the blade's center has been along the board.
     reached: (Length, Length),
     result: Result<Pass, CutError>,
+    /// Whether pieces the cut set loose have been handed off to set aside.
+    loose_set_aside: bool,
 }
 
 impl Default for TableSawStation {
@@ -60,6 +65,7 @@ impl Default for TableSawStation {
                 height: Length::from_inches(1),
             },
             board: new_stock(),
+            lie: Orientation::default(),
             advance: START,
             pass: None,
             taken: Vec::new(),
@@ -92,6 +98,37 @@ impl TableSawStation {
         }
     }
 
+    /// Turns the board a quarter turn to the left, seen from above. Returns false unless it's
+    /// in one piece, waiting in front of the blade.
+    pub fn turn_left(&mut self) -> bool {
+        self.relay(self.lie.turned_left())
+    }
+
+    /// Turns the board a quarter turn to the right, seen from above.
+    pub fn turn_right(&mut self) -> bool {
+        self.relay(self.lie.turned_right())
+    }
+
+    /// Flips the board over.
+    pub fn flip(&mut self) -> bool {
+        self.relay(self.lie.flipped())
+    }
+
+    /// Lays the board down another way, if it's in one piece and waiting in front of the blade.
+    fn relay(&mut self, lie: Orientation) -> bool {
+        if self.on_saw() != Some(Part::Whole) || self.pass.is_some() || self.advance > -CLEAR {
+            return false;
+        }
+        self.lie = lie;
+        true
+    }
+
+    /// Where the blade's center is along the board, from its leading end: negative while the
+    /// board is in front of the blade.
+    pub fn advance(&self) -> Length {
+        self.advance
+    }
+
     /// Pushes the board `distance` meters along the fence, or pulls it back if `distance` is
     /// negative. It moves in 64ths of an inch.
     pub fn push(&mut self, distance: f32) {
@@ -111,10 +148,7 @@ impl TableSawStation {
         } else {
             START
         };
-        let advance = advance.clamp(
-            back_limit,
-            self.board.length() + CLEAR + Length::from_inches(1),
-        );
+        let advance = advance.clamp(back_limit, self.reach() + CLEAR + Length::from_inches(1));
         if advance == self.advance {
             return;
         }
@@ -122,9 +156,12 @@ impl TableSawStation {
             saw: self.saw,
             reached: (self.advance, self.advance),
             result: Ok(Pass::Missed),
+            loose_set_aside: false,
         });
         pass.reached = (pass.reached.0.min(advance), pass.reached.1.max(advance));
-        pass.result = pass.saw.feed(&self.board, pass.reached.0, pass.reached.1);
+        pass.result = pass
+            .saw
+            .feed(&self.board, self.lie, pass.reached.0, pass.reached.1);
         self.advance = advance;
         // Pulled back clear of the blade, the board keeps whatever slot it got, and the fence
         // and blade are free to move for the next pass.
@@ -175,15 +212,35 @@ impl TableSawStation {
         }
     }
 
+    /// Whether the last cut set pieces loose that haven't been handed off yet.
+    pub fn has_loose(&self) -> bool {
+        matches!(&self.pass, Some(pass) if !pass.loose_set_aside
+            && matches!(&pass.result, Ok(Pass::Cut(cut)) if !cut.loose.is_empty()))
+    }
+
+    /// Hands off the pieces the last cut set loose, once, to be set aside.
+    pub fn take_loose(&mut self) -> Vec<Board> {
+        if !self.has_loose() {
+            return Vec::new();
+        }
+        let pass = self.pass.as_mut().expect("loose pieces come from a pass");
+        pass.loose_set_aside = true;
+        match &pass.result {
+            Ok(Pass::Cut(cut)) => cut.loose.iter().map(|piece| piece.board.clone()).collect(),
+            _ => Vec::new(),
+        }
+    }
+
     /// Puts a fresh 1x8 against the fence. Whatever was on the saw goes in the scrap bin.
     pub fn new_board(&mut self) {
         self.load(new_stock());
     }
 
-    /// Puts `board` against the fence, ready to rip, and hands back whatever was on the saw that
-    /// wasn't carried off: the board, slots and all, or the pieces it was cut into.
+    /// Puts `board` against the fence, unturned and ready to rip, and hands back whatever was on
+    /// the saw that wasn't carried off: the board, slots and all, or the pieces it was cut into.
     pub fn load(&mut self, board: Board) -> Vec<Board> {
-        let leftovers = match self.result() {
+        let mut leftovers = self.take_loose();
+        leftovers.extend(match self.result() {
             Some(Ok(Pass::Cut(cut))) => [
                 (Part::Piece, Some(&cut.piece)),
                 (Part::Offcut, cut.offcut.as_ref()),
@@ -191,12 +248,12 @@ impl TableSawStation {
             .into_iter()
             .filter(|(part, _)| !self.taken.contains(part))
             .filter_map(|(_, piece)| piece.map(|piece| piece.board.clone()))
-            .chain(cut.loose.iter().map(|piece| piece.board.clone()))
             .collect(),
             _ if self.taken.contains(&Part::Whole) => Vec::new(),
             _ => vec![self.current_board()],
-        };
+        });
         self.board = board;
+        self.lie = Orientation::default();
         self.advance = START;
         self.pass = None;
         self.taken.clear();
@@ -205,14 +262,22 @@ impl TableSawStation {
 
     /// Whether any of the board is over the blade, where the fence and blade can't move.
     pub fn at_blade(&self) -> bool {
-        self.on_saw().is_some()
-            && self.advance > -CLEAR
-            && self.advance < self.board.length() + CLEAR
+        self.on_saw().is_some() && self.advance > -CLEAR && self.advance < self.reach() + CLEAR
     }
 
     /// Whether the whole board is past the blade, on the outfeed side.
     pub fn past_blade(&self) -> bool {
-        self.advance >= self.board.length() + CLEAR
+        self.advance >= self.reach() + CLEAR
+    }
+
+    /// How far the board reaches along the table, from its leading end.
+    fn reach(&self) -> Length {
+        self.lie.along().0.of(&self.board)
+    }
+
+    /// How far the board reaches across the table, from the fence.
+    fn span(&self) -> Length {
+        self.lie.across().0.of(&self.board)
     }
 
     fn cut_apart(&self) -> bool {
@@ -257,9 +322,10 @@ impl TableSawStation {
             .pass
             .as_ref()
             .map_or(self.saw.fence, |pass| pass.saw.fence);
-        let width = self.board.width();
-        let corner = Vec3::new(
-            (fence - width).as_meters_f32(),
+        // The board reaches from the fence back across the table, and from its leading end
+        // back toward the operator.
+        let near = Vec3::new(
+            (fence - self.span()).as_meters_f32(),
             0.0,
             (-self.advance).as_meters_f32(),
         );
@@ -267,40 +333,21 @@ impl TableSawStation {
             |part: Part, placed: Placed| (!self.taken.contains(&part)).then_some(placed);
         match self.result() {
             Some(Ok(Pass::Cut(cut))) => {
-                // Each piece sits where it was on the board: its corner `across` and `along` it,
-                // which are x and z in table space.
-                let place = |piece: &Piece| {
-                    let offset = Vec3::new(
-                        piece.across.as_meters_f32(),
-                        0.0,
-                        piece.along.as_meters_f32(),
-                    );
-                    Placed {
-                        board: piece.board.clone(),
-                        corner: corner + offset,
-                        grain: offset,
-                    }
-                };
-                // A table saw pass never sets pieces loose: every slot so far runs in from the
-                // board's leading end, so the wood beside the new slot holds together. Any would
-                // go back with the leftovers when the next board loads.
+                // Each piece sits where it was on the board. Loose pieces are set aside.
+                let board = Placed::lying(&self.board, self.lie, near);
                 SawBoards {
                     whole: None,
-                    piece: unless_taken(Part::Piece, place(&cut.piece)),
+                    piece: unless_taken(Part::Piece, board.piece(&cut.piece)),
                     offcut: cut
                         .offcut
                         .as_ref()
-                        .and_then(|offcut| unless_taken(Part::Offcut, place(offcut))),
+                        .and_then(|offcut| unless_taken(Part::Offcut, board.piece(offcut))),
                 }
             }
             _ => SawBoards {
                 whole: unless_taken(
                     Part::Whole,
-                    Placed {
-                        board: self.current_board(),
-                        corner,
-                        grain: Vec3::ZERO,
-                    },
+                    Placed::lying(&self.current_board(), self.lie, near),
                 ),
                 ..default()
             },
@@ -312,13 +359,21 @@ impl TableSawStation {
         if self.on_saw().is_none() {
             return "Nothing on the saw. Press R for a new board.".to_string();
         }
+        let verb = match self.lie.across().0 {
+            Axis::Width => "Ripped",
+            Axis::Length => "Crosscut",
+        };
         match self.result() {
             Some(Err(error)) => format!("No cut: {error}."),
-            Some(Ok(Pass::Cut(cut))) => describe_cut("Ripped", cut),
+            Some(Ok(Pass::Cut(cut))) if cut.loose.is_empty() => describe_cut(verb, cut),
+            Some(Ok(Pass::Cut(cut))) => format!(
+                "{} Set aside on the pile by the miter saw.",
+                describe_cut(verb, cut)
+            ),
             Some(Ok(Pass::Kerfed(board))) => {
                 let kerf = describe_kerf(board, board.kerfs().last().expect("a pass's slot"));
                 if self.at_blade() {
-                    format!("Cutting. So far, {kerf}.")
+                    format!("Cutting. So far, {kerf}.{}", self.warning())
                 } else {
                     format!("Cut {kerf}. Press B to bring the board back around for another pass.")
                 }
@@ -329,9 +384,22 @@ impl TableSawStation {
                     .to_string()
             }
             _ => format!(
-                "Board on the saw: {}. Drag it, or hold Space, to push it through.",
-                describe_board(&self.board)
+                "Board on the saw: {}. Drag it, or hold Space, to push it through.{}",
+                describe_board(&self.board),
+                self.warning()
             ),
+        }
+    }
+
+    /// A warning, if the board would ride the fence on its short side: across the table it's
+    /// wider than it is long along the fence, so the fence can't keep it from twisting into
+    /// the blade and kicking back.
+    fn warning(&self) -> &'static str {
+        if self.reach() < self.span() && self.saw.fence < self.span() {
+            " Careful: it rides the fence on its short side, so it can twist into the blade and \
+             kick back. A real shop would use a miter gauge or a crosscut sled."
+        } else {
+            ""
         }
     }
 }
@@ -530,6 +598,79 @@ mod tests {
         assert_eq!(
             station.status(),
             "Nothing on the saw. Press R for a new board."
+        );
+    }
+
+    #[test]
+    fn turned_a_quarter_turn_the_board_lies_across_the_table_and_crosscuts() {
+        let mut station = TableSawStation::default();
+        assert!(station.turn_left());
+        let (near, far) = station.boards().whole.unwrap().bounds();
+        // 24" across the table, back from the fence at 6"; 7-1/4" along it.
+        assert_close(far.x, inches(6.0));
+        assert_close(far.x - near.x, inches(24.0));
+        assert_close(far.z - near.z, inches(7.25));
+        assert!(
+            station
+                .status()
+                .contains("Careful: it rides the fence on its short side")
+        );
+
+        station.set_fence(Length::from_inches(12));
+        push_through(&mut station);
+        assert_eq!(
+            station.status(),
+            "Crosscut a 3/4\" x 7-1/4\" x 12\" piece, plus a 3/4\" x 7-1/4\" x 11-7/8\" \
+             offcut. The blade turned 1/8\" to sawdust."
+        );
+        // The piece lies between the blade and the fence.
+        let (near, far) = station.boards().piece.unwrap().bounds();
+        assert_close(near.x, 0.0);
+        assert_close(far.x, inches(12.0));
+    }
+
+    #[test]
+    fn the_board_only_turns_while_it_waits_in_front_of_the_blade() {
+        let mut station = TableSawStation::default();
+        push_to(&mut station, 2);
+        assert!(!station.turn_left() && !station.flip());
+
+        station.move_to(START);
+        assert!(station.turn_left());
+    }
+
+    #[test]
+    fn flipped_over_the_groove_goes_into_the_top_face() {
+        let mut station = TableSawStation::default();
+        assert!(station.flip());
+        station.set_height(Length::from_inch_fraction(1, 4));
+        push_through(&mut station);
+
+        let board = station.boards().whole.unwrap().board;
+        assert!(!board.kerfs()[0].from_below());
+    }
+
+    #[test]
+    fn a_crosscut_through_a_rip_slot_sets_a_strip_loose() {
+        let mut station = TableSawStation::default();
+        // A stopped rip, through the board for its first 9-9/16" or so.
+        push_to(&mut station, 8);
+        station.move_to(START);
+        // Turned, the fence is at the board's far end: crosscut 19" from it, 5" from the
+        // slotted end.
+        assert!(station.turn_left());
+        station.set_fence(Length::from_inches(19));
+        push_through(&mut station);
+
+        assert!(station.has_loose());
+        let loose = station.take_loose();
+        assert_eq!(loose.len(), 1);
+        assert_eq!(loose[0].to_string(), "3/4\" x 1-1/8\" x 4-7/8\"");
+        assert!(!station.has_loose());
+        assert!(
+            station
+                .status()
+                .ends_with("Set aside on the pile by the miter saw.")
         );
     }
 

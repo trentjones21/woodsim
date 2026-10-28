@@ -7,9 +7,11 @@
 mod board;
 mod kerf;
 mod length;
+mod orientation;
 mod saw;
 
-pub use board::{Board, Piece};
+pub use board::{Board, Cutaway, Piece};
 pub use kerf::Kerf;
 pub use length::Length;
+pub use orientation::{Axis, Orientation};
 pub use saw::{Blade, Cut, CutError, MiterSaw, Pass, TableSaw};

@@ -3,7 +3,7 @@
 //! apart leaves it the same size, with one more slot in it.
 
 use proptest::prelude::*;
-use woodsim::{Blade, Board, CutError, Length, MiterSaw, Pass, Piece, TableSaw};
+use woodsim::{Blade, Board, CutError, Length, MiterSaw, Orientation, Pass, Piece, TableSaw};
 
 /// Ten feet, in nanometers.
 const MAX_NM: i64 = 120 * 25_400_000;
@@ -23,7 +23,7 @@ proptest! {
         let board = Board::new(Length::from_inches(96), Length::from_nm(width), Length::from_inch_fraction(3, 4));
         let saw = TableSaw { blade: blade(kerf), fence: Length::from_nm(fence), height: Length::from_inches(1) };
 
-        match saw.rip(&board) {
+        match saw.rip(&board, Orientation::default()) {
             Ok(Pass::Cut(cut)) => {
                 let offcut = cut.offcut.as_ref().map_or(Length::ZERO, |offcut| offcut.board.width());
                 prop_assert_eq!(cut.piece.board.width() + offcut + cut.waste, board.width());
@@ -44,10 +44,10 @@ proptest! {
     #[test]
     fn crosscut_conserves_wood(length in 1..MAX_NM, at in 1..MAX_NM, kerf in 1..INCH_NM) {
         let board = Board::new(Length::from_nm(length), Length::from_inches(6), Length::from_inch_fraction(3, 4));
-        let saw = MiterSaw { blade: blade(kerf) };
+        let saw = MiterSaw { blade: blade(kerf), capacity: Length::from_inch_fraction(15, 2) };
         let at = Length::from_nm(at);
 
-        match saw.crosscut(&board, at) {
+        match saw.crosscut(&board, Orientation::default(), at) {
             Ok(cut) => {
                 let offcut = cut.offcut.as_ref().map_or(Length::ZERO, |offcut| offcut.board.length());
                 prop_assert_eq!(cut.piece.board.length() + offcut + cut.waste, board.length());
@@ -76,7 +76,7 @@ proptest! {
         let saw = TableSaw { blade: blade(INCH_NM / 8), fence: Length::from_nm(fence), height: Length::from_nm(height) };
         let start = Length::from_nm(start);
 
-        match saw.feed(&board, start, start + Length::from_nm(travel)) {
+        match saw.feed(&board, Orientation::default(), start, start + Length::from_nm(travel)) {
             Ok(Pass::Missed) => {}
             Ok(Pass::Kerfed(kerfed)) => {
                 prop_assert_eq!(
@@ -111,9 +111,9 @@ proptest! {
         let start = -Length::from_inches(8);
         let end = Length::from_nm(end).max(start);
 
-        if let Ok(Pass::Cut(_)) = saw.feed(&board, start, end) {
+        if let Ok(Pass::Cut(_)) = saw.feed(&board, Orientation::default(), start, end) {
             let further = end + Length::from_nm(further);
-            prop_assert!(matches!(saw.feed(&board, start, further), Ok(Pass::Cut(_))));
+            prop_assert!(matches!(saw.feed(&board, Orientation::default(), start, further), Ok(Pass::Cut(_))));
         }
     }
 
@@ -126,24 +126,24 @@ proptest! {
     ) {
         let board = Board::new(Length::from_inches(24), Length::from_inch_fraction(29, 4), Length::from_inch_fraction(3, 4));
         let saw = TableSaw { blade: blade(INCH_NM / 8), fence: Length::from_nm(fence), height: Length::from_nm(height) };
-        let slotted = match saw.feed(&board, -Length::from_inches(6), Length::from_nm(end)) {
+        let slotted = match saw.feed(&board, Orientation::default(), -Length::from_inches(6), Length::from_nm(end)) {
             Ok(Pass::Kerfed(slotted)) => slotted,
             _ => return Ok(()),
         };
         let at = Length::from_nm(at);
-        let cut = MiterSaw { blade: blade(INCH_NM / 8) }.crosscut(&slotted, at).unwrap();
+        let cut = MiterSaw { blade: blade(INCH_NM / 8), capacity: Length::from_inch_fraction(15, 2) }.crosscut(&slotted, Orientation::default(), at).unwrap();
         let pieces: Vec<&Piece> = std::iter::once(&cut.piece).chain(&cut.offcut).chain(&cut.loose).collect();
 
         // Every piece lies on the board, and no two share any wood.
         for piece in &pieces {
-            prop_assert!(piece.along >= Length::ZERO && piece.across >= Length::ZERO);
-            prop_assert!(piece.along + piece.board.length() <= board.length());
-            prop_assert!(piece.across + piece.board.width() <= board.width());
+            prop_assert!(piece.l >= Length::ZERO && piece.w >= Length::ZERO);
+            prop_assert!(piece.l + piece.board.length() <= board.length());
+            prop_assert!(piece.w + piece.board.width() <= board.width());
         }
         for (i, a) in pieces.iter().enumerate() {
             for b in &pieces[i + 1..] {
-                let apart_along = a.along + a.board.length() <= b.along || b.along + b.board.length() <= a.along;
-                let apart_across = a.across + a.board.width() <= b.across || b.across + b.board.width() <= a.across;
+                let apart_along = a.l + a.board.length() <= b.l || b.l + b.board.length() <= a.l;
+                let apart_across = a.w + a.board.width() <= b.w || b.w + b.board.width() <= a.w;
                 prop_assert!(apart_along || apart_across, "{:?} overlaps {:?}", a, b);
             }
         }
@@ -153,7 +153,7 @@ proptest! {
         let slot = kerf.far.min(board.width()) - kerf.near.max(Length::ZERO);
         let stop_side = board.length() - at;
         for against_stop in [true, false] {
-            let widths: Length = pieces.iter().filter(|piece| (piece.along >= stop_side) == against_stop).map(|piece| piece.board.width()).sum();
+            let widths: Length = pieces.iter().filter(|piece| (piece.l >= stop_side) == against_stop).map(|piece| piece.board.width()).sum();
             prop_assert!(
                 widths == board.width() || widths == board.width() - slot || (!against_stop && cut.offcut.is_none()),
                 "one side's pieces add up to {} of {}", widths, board.width()

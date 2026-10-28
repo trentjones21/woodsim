@@ -27,7 +27,7 @@ pub const BOUNDS: Block = Block {
 
 pub const HELP: &str = "Left/Right: move the stop 1/16\"   Shift+Left/Right: 1\"   \
                         Or drag the stop block\n\
-                        Hold Space: lower the blade   \
+                        Hold Space: lower the blade   Q/E: turn the board   F: flip it\n\
                         Click a cut piece: slide it back against the stop\n\
                         Click a part on the pile: put it back on the saw   \
                         S: set everything on the saw aside\n\
@@ -66,7 +66,12 @@ impl Plugin for MiterSawPlugin {
                 Update,
                 (
                     (
-                        (move_stop_with_keys, set_aside_with_key, carry_with_key)
+                        (
+                            move_stop_with_keys,
+                            turn_with_keys,
+                            set_aside_with_key,
+                            carry_with_key,
+                        )
                             .run_if(resource_equals(ShopView::MiterSaw)),
                         work_blade,
                     ),
@@ -337,6 +342,19 @@ fn spawn_miter_saw(
     }
 }
 
+/// Q and E turn the board against the stop a quarter turn left and right, and F flips it over.
+fn turn_with_keys(keys: Res<ButtonInput<KeyCode>>, mut station: ResMut<MiterSawStation>) {
+    if keys.just_pressed(KeyCode::KeyQ) {
+        station.turn_left();
+    }
+    if keys.just_pressed(KeyCode::KeyE) {
+        station.turn_right();
+    }
+    if keys.just_pressed(KeyCode::KeyF) {
+        station.flip();
+    }
+}
+
 fn set_aside_with_key(keys: Res<ButtonInput<KeyCode>>, mut station: ResMut<MiterSawStation>) {
     if keys.just_pressed(KeyCode::KeyS) {
         station.set_aside();
@@ -528,7 +546,8 @@ fn draw_pile(
     }
     let pile_parts = station.pile();
     let place = |placed: &Placed| {
-        Transform::from_translation(ORIGIN + placed.corner).with_rotation(board_turn())
+        Transform::from_translation(ORIGIN + board_turn() * placed.corner)
+            .with_rotation(board_turn() * placed.rotation)
     };
     let mut drawn = 0;
     for (entity, part, mesh, mut transform) in &mut pile {
