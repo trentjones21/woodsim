@@ -14,7 +14,7 @@ use bevy::{
 use woodsim::Length;
 
 use crate::{
-    hand::{Gesture, Hand, from_rack},
+    hand::{Gesture, Hand, Workpiece, from_rack},
     meshes::{Grain, board_mesh, rounded_box},
     shop::{SHOP_HALF_SIZE, ShopAssets, ShopView, set_material_on},
     textures::{self, GRASS_TILE, PEGBOARD_TILE},
@@ -889,7 +889,7 @@ fn take_from_rack(
         return;
     }
     if let Ok(board) = boards.get(click.entity) {
-        hand.0 = Some(from_rack(board.width, board.thickness));
+        hand.0 = Some(Workpiece::Board(from_rack(board.width, board.thickness)));
         if let Ok(mut material) = materials.get_mut(click.entity) {
             material.0 = shop.wood.clone();
         }

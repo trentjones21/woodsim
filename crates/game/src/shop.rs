@@ -28,7 +28,7 @@ use crate::{
     bench::{self, BenchView},
     chop::MiterSawStation,
     feed::TableSawStation,
-    hand::{self, Gesture, Hand, set_down},
+    hand::{self, Gesture, Hand, Workpiece, set_down},
     join::BenchStation,
     meshes::{lumber_mesh, rounded_box},
     miter_saw,
@@ -706,6 +706,11 @@ fn update_readout(
                 (Some(ShopView::TableSaw), false) => "Click to work at the table saw.",
                 (Some(ShopView::MiterSaw), false) => "Click to work at the miter saw.",
                 (Some(ShopView::Bench), false) => "Click to work at the workbench.",
+                (Some(ShopView::TableSaw | ShopView::MiterSaw), true)
+                    if matches!(hand.0, Some(Workpiece::GlueUp(_))) =>
+                {
+                    "The saws can't cut glue-ups yet: set it down at the workbench or on the pile."
+                }
                 (Some(ShopView::TableSaw), true) => "Click to set it down on the table saw.",
                 (Some(ShopView::MiterSaw), true) => "Click to set it down on the miter saw.",
                 (Some(ShopView::Bench), true) => "Click to set it down at the workbench.",
@@ -741,7 +746,7 @@ fn update_readout(
         ),
         ShopView::Bench => (
             bench::reading(&bench),
-            bench.status(hand.0.as_ref()),
+            bench.status(hand.0.is_some()),
             bench::HELP,
         ),
     };
@@ -830,7 +835,7 @@ pub fn degrees(angle: Angle) -> String {
 }
 
 /// A length as a tape measure reads it, to the nearest 64th.
-fn measured(length: Length) -> Length {
+pub fn measured(length: Length) -> Length {
     length.rounded_to(Length::from_inch_fraction(1, 64))
 }
 

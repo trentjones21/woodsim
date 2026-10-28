@@ -7,7 +7,7 @@ use woodsim::{Angle, Length, MiterSaw};
 
 use crate::{
     chop::{MITER_STOPS, MiterSawStation, PILE_TRAY, board_turn},
-    hand::{Gesture, Hand},
+    hand::{Gesture, Hand, Workpiece},
     meshes::{Grain, board_mesh, lumber_mesh, rounded_box},
     shop::{
         Block, Part, Placed, Shape, ShopAssets, ShopView, Stations, inches, place_parts,
@@ -118,9 +118,13 @@ struct Head;
 #[derive(Component)]
 struct AtMiterSaw;
 
-/// A part on the pile behind the fence, by its place in `MiterSawStation::parts`.
+/// A board on the pile behind the fence: drawn in its place in `MiterSawStation::pile`, and
+/// part of the part or glue-up at `item` in `MiterSawStation::parts`.
 #[derive(Component)]
-struct PilePart(usize);
+struct PilePart {
+    slot: usize,
+    item: usize,
+}
 
 fn spawn_miter_saw(
     mut commands: Commands,
@@ -476,7 +480,8 @@ fn highlight_takeable(
     mut materials: Query<&mut MeshMaterial3d<StandardMaterial>>,
 ) {
     let clickable = |part: Part| match hand.0 {
-        Some(_) => station.can_load(),
+        Some(Workpiece::Board(_)) => station.can_load(),
+        Some(Workpiece::GlueUp(_)) => false,
         None => station.can_take(part),
     };
     if let Ok(part) = parts.get(over.entity)
@@ -505,7 +510,7 @@ fn saw_part_clicked(
     let handled = if stations.hand.0.is_some() {
         stations.set_down(ShopView::MiterSaw, None)
     } else {
-        stations.hand.0 = stations.miter_saw.take(part);
+        stations.hand.0 = stations.miter_saw.take(part).map(Workpiece::Board);
         stations.hand.0.is_some()
     };
     if handled && let Ok(mut material) = materials.get_mut(click.entity) {
@@ -668,7 +673,7 @@ fn draw_pile(
     station: Res<MiterSawStation>,
     shop: Res<ShopAssets>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut pile: Query<(Entity, &PilePart, &Mesh3d, &mut Transform, &mut Shape)>,
+    mut pile: Query<(Entity, &mut PilePart, &Mesh3d, &mut Transform, &mut Shape)>,
 ) {
     if !station.is_changed() {
         return;
@@ -679,23 +684,24 @@ fn draw_pile(
             .with_rotation(board_turn() * placed.rotation)
     };
     let mut drawn = 0;
-    for (entity, part, mesh, mut transform, mut shape) in &mut pile {
-        match pile_parts.get(part.0) {
-            Some(placed) => {
+    for (entity, mut part, mesh, mut transform, mut shape) in &mut pile {
+        match pile_parts.get(part.slot) {
+            Some((item, placed)) => {
                 *transform = place(placed);
                 shape.update(placed, mesh, &mut meshes);
+                part.item = *item;
                 drawn += 1;
             }
             None => commands.entity(entity).despawn(),
         }
     }
-    for (index, placed) in pile_parts.iter().enumerate().skip(drawn) {
+    for (slot, (item, placed)) in pile_parts.iter().enumerate().skip(drawn) {
         commands
             .spawn((
                 Mesh3d(meshes.add(lumber_mesh(&placed.board, placed.grain))),
                 MeshMaterial3d(shop.wood.clone()),
                 place(placed),
-                PilePart(index),
+                PilePart { slot, item: *item },
                 Shape::built(placed),
             ))
             .observe(highlight_on_pile)
@@ -734,8 +740,8 @@ fn pile_part_clicked(
         return;
     };
     match hand.0.take() {
-        Some(board) => miter_saw.parts.push(board),
-        None => hand.0 = miter_saw.remove_from_pile(part.0),
+        Some(work) => miter_saw.parts.push(work),
+        None => hand.0 = miter_saw.remove_from_pile(part.item),
     }
     // The box clicked will show a different part once the pile shifts, so drop its highlight.
     if let Ok(mut material) = materials.get_mut(click.entity) {
@@ -752,8 +758,8 @@ fn tray_clicked(
 ) {
     if click.button == PointerButton::Primary
         && !gesture.dragged()
-        && let Some(board) = hand.0.take()
+        && let Some(work) = hand.0.take()
     {
-        miter_saw.parts.push(board);
+        miter_saw.parts.push(work);
     }
 }

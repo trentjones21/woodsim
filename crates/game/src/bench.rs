@@ -362,9 +362,9 @@ fn work_with_keys(
     }
     if keys.just_pressed(KeyCode::Space)
         && hand.0.is_none()
-        && let Some(board) = bench.take_picked()
+        && let Some(work) = bench.take_picked()
     {
-        hand.0 = Some(board);
+        hand.0 = Some(work);
     }
 }
 
@@ -520,9 +520,9 @@ fn part_clicked(
     let Ok((part, transform)) = parts.get(click.entity) else {
         return;
     };
-    if let Some(board) = hand.0.take() {
+    if let Some(work) = hand.0.take() {
         let near = click.hit.position.map(|point| (point - ORIGIN).xz());
-        bench.set_down(board, near);
+        bench.set_down(work, near);
         return;
     }
     let Some((surface, local)) = surface_under(part, transform, &click.hit) else {

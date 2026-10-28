@@ -165,6 +165,9 @@ fn four_matching_pieces_close_into_a_square() {
         [first[0] - third[0], first[1] - third[1]].map(|d| d.as_nm().abs()),
         [0, inches(10).as_nm()]
     );
+    // It fills a 10" square, 3/4" thick.
+    let size = assembly.bounds().map(|(least, most)| most - least);
+    assert_eq!(size, [inches(10), inches(10), fraction(3, 4)]);
 }
 
 #[test]

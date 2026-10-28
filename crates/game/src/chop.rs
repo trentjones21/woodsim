@@ -14,8 +14,12 @@ use std::f32::consts::FRAC_PI_2;
 use bevy::prelude::*;
 use woodsim::{Angle, Board, Cut, CutError, Length, MiterSaw, Orientation, Pass};
 
-use crate::shop::{
-    Block, Part, Placed, SawBoards, degrees, describe_board, describe_cut, describe_kerf, inches,
+use crate::{
+    hand::{Workpiece, describe_glue_up, place_glue_up},
+    shop::{
+        Block, Part, Placed, SawBoards, degrees, describe_board, describe_cut, describe_kerf,
+        inches,
+    },
 };
 
 pub const STOP_MIN: Length = Length::from_inch_fraction(1, 16);
@@ -60,8 +64,8 @@ pub struct MiterSawStation {
     deepest: f32,
     /// How high above the table the depth stop holds the blade's lowest point, if it's on.
     pub depth_stop: Option<Length>,
-    /// Finished parts set aside behind the fence, in the order they were set there.
-    pub parts: Vec<Board>,
+    /// Finished parts and glue-ups set aside behind the fence, in the order they were set there.
+    pub parts: Vec<Workpiece>,
     /// How the board on the saw lies.
     lie: Orientation,
 }
@@ -247,8 +251,11 @@ impl MiterSawStation {
                 ..
             } if !*loose_set_aside => {
                 *loose_set_aside = true;
-                self.parts
-                    .extend(cut.loose.iter().map(|piece| piece.board.clone()));
+                self.parts.extend(
+                    cut.loose
+                        .iter()
+                        .map(|piece| Workpiece::Board(piece.board.clone())),
+                );
             }
             _ => {}
         }
@@ -314,26 +321,27 @@ impl MiterSawStation {
                     (Part::Offcut, Some(offcut)) => (offcut, Some(cut.piece)),
                     (_, offcut) => (cut.piece, offcut),
                 };
-                self.parts.extend(other.map(|piece| piece.board));
+                self.parts
+                    .extend(other.map(|piece| Workpiece::Board(piece.board)));
                 Some(taken.board)
             }
         }
     }
 
-    /// Lifts the part at `index` off the pile to carry it elsewhere.
-    pub fn remove_from_pile(&mut self, index: usize) -> Option<Board> {
+    /// Lifts the part (or glue-up) at `index` off the pile to carry it elsewhere.
+    pub fn remove_from_pile(&mut self, index: usize) -> Option<Workpiece> {
         (index < self.parts.len()).then(|| self.parts.remove(index))
     }
 
     fn clear_saw(&mut self) {
         match std::mem::replace(&mut self.work, Work::Empty) {
             Work::Empty => {}
-            Work::Ready { board, .. } => self.parts.push(board),
+            Work::Ready { board, .. } => self.parts.push(Workpiece::Board(board)),
             Work::Cut { cut, .. } => self.parts.extend(
                 [Some(cut.piece), cut.offcut]
                     .into_iter()
                     .flatten()
-                    .map(|piece| piece.board),
+                    .map(|piece| Workpiece::Board(piece.board)),
             ),
         }
     }
@@ -376,30 +384,38 @@ impl MiterSawStation {
         }
     }
 
-    /// Where each part on the pile sits: stacked flat behind the fence, oldest at the bottom,
-    /// with their length along the fence. The grain shifts from part to part, so they don't
-    /// all look like copies of each other.
-    pub fn pile(&self) -> Vec<Placed> {
+    /// Where each board on the pile sits, with the place in `parts` of the part or glue-up it
+    /// belongs to: stacked flat behind the fence, oldest at the bottom, with their length (a
+    /// glue-up's `x`) along the fence. The grain shifts from part to part, so they don't all
+    /// look like copies of each other.
+    pub fn pile(&self) -> Vec<(usize, Placed)> {
         let mut bottom = PILE_TRAY.max.y;
-        self.parts
-            .iter()
-            .enumerate()
-            .map(|(index, part)| {
-                let mut placed = Placed::lying(
-                    part,
-                    Orientation::default(),
-                    Vec3::new(-PILE_FRONT, bottom, PILE_LEFT),
-                );
-                placed.grain = Vec3::new(0.11, 0.0, 0.37) * index as f32;
-                bottom += part.thickness().as_meters_f32() + PILE_GAP;
-                placed
-            })
-            .collect()
+        let mut pile = Vec::new();
+        for (index, part) in self.parts.iter().enumerate() {
+            let near = Vec3::new(-PILE_FRONT, bottom, PILE_LEFT);
+            let placed = match part {
+                Workpiece::Board(board) => vec![Placed {
+                    grain: Vec3::new(0.11, 0.0, 0.37) * index as f32,
+                    ..Placed::lying(board, Orientation::default(), near)
+                }],
+                Workpiece::GlueUp(assembly) => {
+                    let axes = |v: [f64; 3]| Vec3::new(v[1] as f32, v[2] as f32, v[0] as f32);
+                    place_glue_up(assembly, &axes, near)
+                }
+            };
+            let top = placed
+                .iter()
+                .map(|placed| placed.bounds().1.y)
+                .fold(bottom, f32::max);
+            bottom = top + PILE_GAP;
+            pile.extend(placed.into_iter().map(|placed| (index, placed)));
+        }
+        pile
     }
 
     /// The parts pile as a cut list, with identical parts counted together.
     pub fn cut_list(&self) -> String {
-        let mut counts: Vec<(&Board, usize)> = Vec::new();
+        let mut counts: Vec<(&Workpiece, usize)> = Vec::new();
         for part in &self.parts {
             match counts.iter_mut().find(|(board, _)| *board == part) {
                 Some((_, count)) => *count += 1,
@@ -411,9 +427,13 @@ impl MiterSawStation {
             1 => "Cut list: 1 part set aside".to_string(),
             n => format!("Cut list: {n} parts set aside"),
         };
-        for (board, count) in counts {
+        for (part, count) in counts {
             let pieces = if count == 1 { "pc" } else { "pcs" };
-            list.push_str(&format!("\n{count} {pieces}: {}", describe_board(board)));
+            let part = match part {
+                Workpiece::Board(board) => describe_board(board),
+                Workpiece::GlueUp(assembly) => describe_glue_up(assembly),
+            };
+            list.push_str(&format!("\n{count} {pieces}: {part}"));
         }
         list
     }
@@ -636,7 +656,10 @@ mod tests {
         assert_close(end, inches(12.0));
         assert_close(end - start, inches(11.875));
         assert_eq!(station.parts.len(), 1);
-        assert_eq!(station.parts[0].length(), Length::from_inches(12));
+        assert_eq!(
+            station.parts[0].board().unwrap().length(),
+            Length::from_inches(12)
+        );
     }
 
     #[test]
@@ -669,16 +692,22 @@ mod tests {
         assert_eq!(taken.length(), Length::from_inches(12));
         assert!(matches!(station.work, Work::Empty));
         assert_eq!(station.parts.len(), 1);
-        assert_eq!(station.parts[0].length(), Length::from_inch_fraction(95, 8));
+        assert_eq!(
+            station.parts[0].board().unwrap().length(),
+            Length::from_inch_fraction(95, 8)
+        );
     }
 
     #[test]
     fn parts_can_be_lifted_off_the_pile() {
         let mut station = MiterSawStation::default();
-        station.parts.push(ripped_piece());
+        station.parts.push(Workpiece::Board(ripped_piece()));
 
         assert_eq!(station.remove_from_pile(1), None);
-        assert_eq!(station.remove_from_pile(0), Some(ripped_piece()));
+        assert_eq!(
+            station.remove_from_pile(0),
+            Some(Workpiece::Board(ripped_piece()))
+        );
         assert!(station.parts.is_empty());
     }
 
@@ -693,11 +722,15 @@ mod tests {
         }
         chop(&mut station);
         let last = station.take(Part::Piece).unwrap();
-        station.parts.push(last);
+        station.parts.push(Workpiece::Board(last));
 
         assert!(matches!(station.work, Work::Empty));
         // Three 6" parts, what's left, and three kerfs add back up to the 24" board.
-        let total: Length = station.parts.iter().map(Board::length).sum();
+        let total: Length = station
+            .parts
+            .iter()
+            .map(|part| part.board().unwrap().length())
+            .sum();
         assert_eq!(
             total + Length::from_inch_fraction(3, 8),
             Length::from_inches(24)
@@ -725,8 +758,8 @@ mod tests {
         let mut station = loaded();
         chop(&mut station);
         let piece = station.take(Part::Piece).unwrap();
-        station.parts.push(piece);
-        let pile = station.pile();
+        station.parts.push(Workpiece::Board(piece));
+        let pile: Vec<Placed> = station.pile().into_iter().map(|(_, part)| part).collect();
 
         assert_eq!(pile.len(), 2);
         for part in &pile {
@@ -741,6 +774,51 @@ mod tests {
             pile[1].bounds().0.y,
             PILE_TRAY.max.y + inches(0.75) + PILE_GAP,
         );
+    }
+
+    #[test]
+    fn a_glue_up_on_the_pile_stacks_its_boards_and_reads_as_one_part() {
+        let mut station = MiterSawStation::default();
+        let board = Board::new(
+            Length::from_inches(10),
+            Length::from_inches(2),
+            Length::from_inch_fraction(3, 4),
+        );
+        // Two boards laminated face to face: 1-1/2" thick.
+        let mut glue_up = woodsim::Assembly::of(board.clone());
+        let other = woodsim::Assembly::of(board.clone());
+        let mating = woodsim::Mating::default();
+        let surfaces = (woodsim::Surface::Top, woodsim::Surface::Bottom);
+        assert!(glue_up.attach(
+            (0, surfaces.0),
+            &other,
+            (0, surfaces.1),
+            mating,
+            woodsim::Fastener::Glue
+        ));
+        station.parts.push(Workpiece::GlueUp(glue_up));
+        station.parts.push(Workpiece::Board(board));
+
+        let pile = station.pile();
+        // Both of the glue-up's boards belong to the first part; the board on top, the second.
+        assert_eq!(
+            pile.iter().map(|(item, _)| *item).collect::<Vec<_>>(),
+            [0, 0, 1]
+        );
+        assert_close(
+            pile[2].1.bounds().0.y,
+            PILE_TRAY.max.y + inches(1.5) + PILE_GAP,
+        );
+        assert_eq!(
+            station.cut_list(),
+            "Cut list: 2 parts set aside\n\
+             1 pc: glue-up of 2 parts, 1-1/2\" x 2\" x 10\"\n\
+             1 pc: 3/4\" x 2\" x 10\""
+        );
+        assert!(matches!(
+            station.remove_from_pile(0),
+            Some(Workpiece::GlueUp(_))
+        ));
     }
 
     /// A 1x8 off the table saw with a stopped cut 6" from its fence edge, slotted through for
@@ -780,7 +858,10 @@ mod tests {
 
         // The other 9-7/8" fell apart along the slot. The narrow strip is on the pile.
         assert_eq!(station.parts.len(), 1);
-        assert_eq!(station.parts[0].to_string(), "3/4\" x 1-1/8\" x 9-7/8\"");
+        assert_eq!(
+            station.parts[0].board().unwrap().to_string(),
+            "3/4\" x 1-1/8\" x 9-7/8\""
+        );
         assert!(station.status().ends_with(
             "The slot already in the board split off a 3/4\" x 1-1/8\" x 9-7/8\". \
              Set aside on the pile."
@@ -820,7 +901,10 @@ mod tests {
 
         // The 10" against the stop falls apart along the slot; its narrow strip goes on the pile.
         assert_eq!(station.parts.len(), 1);
-        assert_eq!(station.parts[0].to_string(), "3/4\" x 1-1/8\" x 10\"");
+        assert_eq!(
+            station.parts[0].board().unwrap().to_string(),
+            "3/4\" x 1-1/8\" x 10\""
+        );
         let piece = station.boards().piece.unwrap();
         assert_eq!(piece.board.to_string(), "3/4\" x 6\" x 10\"");
         assert_close(x_span(&piece).1, inches(10.0));

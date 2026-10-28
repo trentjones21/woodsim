@@ -8,11 +8,13 @@
 
 use bevy::prelude::*;
 use woodsim::{
-    Assembly, Board, Contact, Fastener, Length, Mating, Member, Rotation, Surface, outline,
-    surfaces,
+    Assembly, Board, Contact, Fastener, Length, Mating, Member, Motion, Rotation, Surface, surfaces,
 };
 
-use crate::shop::inches;
+use crate::{
+    hand::{Workpiece, glue_up_bounds},
+    shop::inches,
+};
 
 /// Half the bench top's length and depth, in meters.
 pub const HALF_TOP: Vec2 = Vec2::new(inches(30.0), inches(15.0));
@@ -124,19 +126,7 @@ impl Group {
 
     /// The least and most corners of the box it fills, in meters from its origin as it lies.
     fn bounds(&self) -> (Vec3, Vec3) {
-        self.assembly
-            .members()
-            .iter()
-            .flat_map(|member| {
-                [Surface::Bottom, Surface::Top]
-                    .into_iter()
-                    .flat_map(|surface| outline(&member.board, surface))
-                    .flatten()
-                    .map(|[l, w, t]| onto_bench(self.turn, meters(member.point(l, w, t))))
-            })
-            .fold((Vec3::MAX, Vec3::MIN), |(low, high), corner| {
-                (low.min(corner), high.max(corner))
-            })
+        glue_up_bounds(&self.assembly, &|v| onto_bench(self.turn, v))
     }
 
     /// Where its origin is on the bench: at `at` across the top, raised so its lowest point
@@ -202,10 +192,19 @@ pub fn assembly_point(member: &Member, mesh_point: Vec3) -> [f64; 3] {
 }
 
 impl BenchStation {
-    /// Sets `board` down loose on the bench, as near `near` (across the top, in meters from
-    /// its middle) as there's room.
-    pub fn set_down(&mut self, board: Board, near: Option<Vec2>) {
-        let mut group = Group::of(board);
+    /// Sets `work` down on the bench, as near `near` (across the top, in meters from its
+    /// middle) as there's room: a board loose, a glue-up lying as it was carried. A glue-up
+    /// that's been carried away has set: its joints don't come back apart.
+    pub fn set_down(&mut self, work: Workpiece, near: Option<Vec2>) {
+        let mut group = match work {
+            Workpiece::Board(board) => Group::of(board),
+            Workpiece::GlueUp(assembly) => Group {
+                assembly,
+                turn: Rotation::NONE,
+                at: Vec2::ZERO,
+                joined: Vec::new(),
+            },
+        };
         group.center_on(near.unwrap_or(SET_DOWN_AT));
         let spot = self.free_spot(&group, None);
         group.center_on(spot);
@@ -521,16 +520,21 @@ impl BenchStation {
         true
     }
 
-    /// Takes the picked part off the bench, if it's loose: a part fastened to others stays.
-    pub fn take_picked(&mut self) -> Option<Board> {
+    /// Takes the picked part off the bench to carry: a loose board, or the whole glue-up it's
+    /// fastened into, lying as it lies on the bench.
+    pub fn take_picked(&mut self) -> Option<Workpiece> {
         let picked = self.picked?;
-        if !self.groups[picked.group].is_loose() {
-            return None;
-        }
         self.picked = None;
         self.lining_up = None;
         let group = self.groups.remove(picked.group);
-        Some(group.assembly.members()[0].board.clone())
+        Some(if group.is_loose() {
+            Workpiece::Board(group.assembly.members()[0].board.clone())
+        } else {
+            Workpiece::GlueUp(group.assembly.moved(Motion {
+                rotation: group.turn,
+                shift: [Length::ZERO; 3],
+            }))
+        })
     }
 
     /// The group being lined up against another, put together the way it would be glued.
@@ -583,8 +587,8 @@ impl BenchStation {
     }
 
     /// One line on what's happening at the bench, given what's in hand.
-    pub fn status(&self, holding: Option<&Board>) -> String {
-        if holding.is_some() {
+    pub fn status(&self, holding: bool) -> String {
+        if holding {
             return "Click the bench to set it down.".to_string();
         }
         if self.groups.is_empty() {
@@ -616,13 +620,13 @@ impl BenchStation {
         let mine = name(picked.surface);
         let (Some(lining_up), Some(preview)) = (self.lining_up, self.preview()) else {
             let take = if self.groups[picked.group].is_loose() {
-                " Space picks it up."
+                "it"
             } else {
-                ""
+                "up the glue-up"
             };
             return format!(
                 "Moving its {mine}. Click the surface it goes against; if it faces away, Q/E \
-                 turn the part under the pointer.{take}"
+                 turn the part under the pointer. Space picks {take}."
             );
         };
         let theirs = name(lining_up.onto.surface);
@@ -882,7 +886,7 @@ mod tests {
     fn bench_with(boards: &[Board]) -> BenchStation {
         let mut bench = BenchStation::default();
         for board in boards {
-            bench.set_down(board.clone(), None);
+            bench.set_down(Workpiece::Board(board.clone()), None);
         }
         bench
     }
@@ -913,7 +917,7 @@ mod tests {
         let lining_up = bench.lining_up.expect("lining up");
         assert_eq!(lining_up.onto, spot(0, 0, miter(&piece, true)));
         assert_eq!(
-            bench.status(None),
+            bench.status(false),
             "Its mitered end against the mitered end. Enter fastens it with glue. Every joint is \
              tight."
         );
@@ -930,7 +934,7 @@ mod tests {
         assert!(bench.glue());
         assert_eq!(bench.groups.len(), 1);
         assert_eq!(bench.groups[0].assembly.members().len(), 2);
-        assert!(bench.status(None).ends_with("Every joint is tight."));
+        assert!(bench.status(false).ends_with("Every joint is tight."));
     }
 
     #[test]
@@ -948,10 +952,10 @@ mod tests {
             if last == 2 {
                 assert!(
                     bench
-                        .status(None)
+                        .status(false)
                         .ends_with("where it meets a mitered end, so it's not fastened there."),
                     "{}",
-                    bench.status(None)
+                    bench.status(false)
                 );
             }
             assert!(bench.glue());
@@ -970,10 +974,10 @@ mod tests {
             if last == 2 {
                 assert!(
                     bench
-                        .status(None)
+                        .status(false)
                         .contains("Enter fastens it with glue at 2 joints."),
                     "{}",
-                    bench.status(None)
+                    bench.status(false)
                 );
             }
             assert!(bench.glue());
@@ -981,10 +985,10 @@ mod tests {
         assert_eq!(bench.groups[0].assembly.joints().len(), 4);
         assert!(
             bench
-                .status(None)
+                .status(false)
                 .ends_with("The last part went on with glue at 2 joints. Every joint is tight."),
             "{}",
-            bench.status(None)
+            bench.status(false)
         );
         // Taken back apart, both its joints come off with it.
         assert!(bench.take_apart());
@@ -1002,11 +1006,11 @@ mod tests {
         let stops = bench.stops().unwrap();
         let slide = |bench: &BenchStation| bench.lining_up.unwrap().mating.slide;
         assert_eq!(slide(&bench)[0], stops[0][0]);
-        assert!(bench.status(None).contains("flush with one side"));
+        assert!(bench.status(false).contains("flush with one side"));
 
         bench.slide(0, true, false);
         assert_eq!(slide(&bench)[0], stops[0][1]);
-        assert!(bench.status(None).contains("centered"));
+        assert!(bench.status(false).contains("centered"));
         bench.slide(0, true, true);
         assert_eq!(slide(&bench)[0], stops[0][1] + NUDGE);
         bench.slide(0, true, false);
@@ -1038,21 +1042,32 @@ mod tests {
     }
 
     #[test]
-    fn only_a_loose_part_comes_off_the_bench() {
+    fn a_loose_part_comes_off_as_a_board_and_a_glue_up_whole() {
         let piece = frame_piece();
         let mut bench = bench_with(&[piece.clone(), piece.clone(), plain()]);
         click(&mut bench, spot(1, 0, miter(&piece, false)));
         click(&mut bench, spot(0, 0, miter(&piece, true)));
         assert!(bench.glue());
-        // The frame's corner stays.
-        click(&mut bench, spot(0, 0, Surface::Top));
-        assert_eq!(bench.take_picked(), None);
-        // The loose board comes off.
-        click(&mut bench, spot(0, 0, Surface::Top));
-        assert_eq!(bench.picked, None);
+        // The loose board comes off as itself.
         click(&mut bench, spot(1, 0, Surface::Top));
-        assert_eq!(bench.take_picked(), Some(plain()));
-        assert_eq!(bench.groups.len(), 1);
+        assert_eq!(bench.take_picked(), Some(Workpiece::Board(plain())));
+        // The frame's corner comes off whole, turned as it lay, with its joint.
+        bench.turn_group(0, Rotation::quarter_turns(2, 1));
+        click(&mut bench, spot(0, 1, Surface::Top));
+        assert!(bench.status(false).ends_with("Space picks up the glue-up."));
+        let Some(Workpiece::GlueUp(corner)) = bench.take_picked() else {
+            panic!("expected the glue-up");
+        };
+        assert!(bench.groups.is_empty());
+        assert_eq!(corner.members().len(), 2);
+        assert_eq!(corner.joints().len(), 1);
+        // Set back down, it lies as it did.
+        let before = corner.clone();
+        bench.set_down(Workpiece::GlueUp(corner), None);
+        assert_eq!(bench.groups[0].assembly, before);
+        assert_eq!(bench.groups[0].turn, Rotation::NONE);
+        let axes = |k: usize| bench.groups[0].pose(k).0 * Vec3::Z;
+        assert!(axes(0).abs_diff_eq(Vec3::NEG_Z, 1e-6), "{}", axes(0));
     }
 
     #[test]
@@ -1090,7 +1105,7 @@ mod tests {
         // One half's free end against the other's.
         click(&mut bench, spot(1, 0, miter(&piece, false)));
         click(&mut bench, spot(0, 1, miter(&piece, true)));
-        assert!(bench.status(None).ends_with("Every joint is tight."));
+        assert!(bench.status(false).ends_with("Every joint is tight."));
         assert!(bench.glue());
         assert_eq!(bench.groups.len(), 1);
         let fit = bench.groups[0].assembly.fit();
@@ -1172,11 +1187,11 @@ mod tests {
         click(&mut bench, spot(0, 0, slanted(&piece)));
         assert!(
             bench
-                .status(None)
+                .status(false)
                 .contains("F flips it over to make a corner.")
         );
         bench.turn_around_joint(2);
-        let status = bench.status(None);
+        let status = bench.status(false);
         assert!(!status.contains("F flips"), "{status}");
         assert!(status.ends_with("Every joint is tight."), "{status}");
         let shown = bench.shown();
@@ -1198,11 +1213,11 @@ mod tests {
         bench.missed();
         assert!(
             bench
-                .status(None)
+                .status(false)
                 .starts_with("There's no flat surface there")
         );
         click(&mut bench, spot(0, 0, Surface::Top));
-        assert!(bench.status(None).starts_with("Moving its top face."));
+        assert!(bench.status(false).starts_with("Moving its top face."));
     }
 
     #[test]

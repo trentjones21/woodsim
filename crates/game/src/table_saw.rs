@@ -8,7 +8,7 @@ use woodsim::Length;
 use crate::{
     chop::MiterSawStation,
     feed::TableSawStation,
-    hand::Hand,
+    hand::{Hand, Workpiece},
     meshes::{Grain, board_mesh, rounded_box},
     shop::{
         Block, Part, Shape, ShopAssets, ShopView, Stations, inches, place_parts, pointer_on_plane,
@@ -607,7 +607,9 @@ fn turn_with_keys(keys: Res<ButtonInput<KeyCode>>, mut station: ResMut<TableSawS
 fn set_loose_aside(mut table_saw: ResMut<TableSawStation>, mut miter_saw: ResMut<MiterSawStation>) {
     if table_saw.has_loose() {
         let loose = table_saw.take_loose();
-        miter_saw.parts.extend(loose);
+        miter_saw
+            .parts
+            .extend(loose.into_iter().map(Workpiece::Board));
     }
 }
 
@@ -629,7 +631,7 @@ fn board_clicked(
     let handled = if stations.hand.0.is_some() {
         stations.set_down(ShopView::TableSaw, None)
     } else {
-        stations.hand.0 = stations.table_saw.take(*part);
+        stations.hand.0 = stations.table_saw.take(*part).map(Workpiece::Board);
         stations.hand.0.is_some()
     };
     if handled && let Ok(mut material) = materials.get_mut(click.entity) {
@@ -648,7 +650,8 @@ fn highlight_carryable(
     mut materials: Query<&mut MeshMaterial3d<StandardMaterial>>,
 ) {
     let clickable = |part: Part| match hand.0 {
-        Some(_) => station.can_load(),
+        Some(Workpiece::Board(_)) => station.can_load(),
+        Some(Workpiece::GlueUp(_)) => false,
         None => station.can_take(part),
     };
     if let Ok(part) = parts.get(over.entity)

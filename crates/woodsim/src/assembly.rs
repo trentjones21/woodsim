@@ -215,6 +215,23 @@ impl Assembly {
         }
     }
 
+    /// The box its members fill, along the assembly's `x`, `y`, and `z`: least and most each
+    /// way, from the corners of their faces.
+    pub fn bounds(&self) -> [(Length, Length); 3] {
+        let mut bounds = [(Length::from_nm(i64::MAX), Length::from_nm(i64::MIN)); 3];
+        for member in &self.members {
+            for surface in [Surface::Bottom, Surface::Top] {
+                for [l, w, t] in outline(&member.board, surface).into_iter().flatten() {
+                    let point = member.point(l, w, t);
+                    for (bound, at) in bounds.iter_mut().zip(point) {
+                        *bound = (bound.0.min(at), bound.1.max(at));
+                    }
+                }
+            }
+        }
+        bounds
+    }
+
     /// The directions across `onto`, a member's surface, that a `Mating` slides along, and how
     /// far the surface reaches along them.
     pub fn extent(&self, onto: (usize, Surface)) -> Option<Extent> {
