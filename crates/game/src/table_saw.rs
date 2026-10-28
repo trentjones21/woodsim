@@ -10,8 +10,8 @@ use crate::{
     feed::TableSawStation,
     meshes::{Grain, board_mesh, rounded_box},
     shop::{
-        Block, Part, ShopAssets, ShopView, inches, place_parts, pointer_on_plane, rounded_block,
-        set_material_on, snap, snap_to_sixteenth, station_part,
+        Block, Part, Shape, ShopAssets, ShopView, inches, place_parts, pointer_on_plane,
+        rounded_block, set_material_on, snap, snap_to_sixteenth, station_part,
     },
 };
 
@@ -389,6 +389,7 @@ fn spawn_saw(
                 Visibility::Hidden,
                 part,
                 AtTableSaw,
+                Shape::default(),
             ))
             .observe(highlight_carryable)
             .observe(set_material_on::<PointerOut>(wood.clone()))
@@ -738,7 +739,10 @@ fn draw_blade(
 fn draw_board(
     station: Res<TableSawStation>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut parts: Query<(&Part, &Mesh3d, &mut Transform, &mut Visibility), With<AtTableSaw>>,
+    mut parts: Query<
+        (&Part, &Mesh3d, &mut Transform, &mut Visibility, &mut Shape),
+        With<AtTableSaw>,
+    >,
 ) {
     if station.is_changed() {
         let boards = station.boards();

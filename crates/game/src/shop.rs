@@ -22,7 +22,7 @@ use bevy::{
     render::view::{ColorGrading, ColorGradingGlobal},
     time::common_conditions::on_real_timer,
 };
-use woodsim::{Axis, Board, Cut, Kerf, Length, Orientation, Piece};
+use woodsim::{Angle, Board, Cut, Kerf, Length, Orientation, Piece, Run};
 
 use crate::{
     chop::MiterSawStation,
@@ -535,29 +535,32 @@ fn spawn_readout(mut commands: Commands) {
         border_radius: BorderRadius::all(px(12)),
         ..default()
     };
+    // The reading and the status stack at the top left, narrow enough to wrap before they run
+    // into the cut list, which wraps before it runs into them.
+    let column = commands
+        .spawn(Node {
+            position_type: PositionType::Absolute,
+            top: px(16),
+            left: px(16),
+            max_width: vw(58),
+            flex_direction: FlexDirection::Column,
+            align_items: AlignItems::FlexStart,
+            row_gap: px(8),
+            ..default()
+        })
+        .id();
+    let stacked = Node {
+        position_type: PositionType::Relative,
+        ..panel.clone()
+    };
     let lines = [
         (
             ReadoutLine::Reading,
             34.0,
             Color::srgb(0.88, 0.38, 0.1),
-            Node {
-                top: px(16),
-                left: px(16),
-                ..panel.clone()
-            },
+            stacked.clone(),
         ),
-        // Narrow enough to wrap before it runs into the cut list.
-        (
-            ReadoutLine::Status,
-            18.0,
-            text,
-            Node {
-                top: px(86),
-                left: px(16),
-                max_width: percent(55),
-                ..panel.clone()
-            },
-        ),
+        (ReadoutLine::Status, 18.0, text, stacked),
         (
             ReadoutLine::Help,
             15.0,
@@ -575,6 +578,7 @@ fn spawn_readout(mut commands: Commands) {
             Node {
                 top: px(16),
                 right: px(16),
+                max_width: vw(36),
                 ..panel.clone()
             },
         ),
@@ -590,7 +594,8 @@ fn spawn_readout(mut commands: Commands) {
         ),
     ];
     for (line, size, color, node) in lines {
-        commands.spawn((
+        let stacks = matches!(line, ReadoutLine::Reading | ReadoutLine::Status);
+        let mut entity = commands.spawn((
             Text::default(),
             TextFont {
                 font_size: FontSize::Px(size),
@@ -602,6 +607,9 @@ fn spawn_readout(mut commands: Commands) {
             BorderColor::all(Color::srgba(0.17, 0.2, 0.27, 0.18)),
             line,
         ));
+        if stacks {
+            entity.insert(ChildOf(column));
+        }
     }
 }
 
@@ -645,10 +653,15 @@ fn update_readout(
             table_saw::HELP,
         ),
         ShopView::MiterSaw => (
-            match miter_saw.depth_stop {
-                Some(stop) => format!("Length: {}   Depth stop: {stop} up", miter_saw.stop),
-                None => format!("Length: {}   Depth stop: off", miter_saw.stop),
-            },
+            format!(
+                "Length: {}   Miter: {}\nDepth stop: {}",
+                miter_saw.stop,
+                describe_miter(miter_saw.saw.miter),
+                match miter_saw.depth_stop {
+                    Some(stop) => format!("{stop} up"),
+                    None => "off".to_string(),
+                }
+            ),
             miter_saw.status(),
             miter_saw::HELP,
         ),
@@ -686,21 +699,24 @@ fn update_fps(diagnostics: Res<DiagnosticsStore>, mut lines: Query<(&ReadoutLine
 /// Describes a finished cut, e.g. "Ripped a 3/4" x 6" x 24" piece, plus a ... offcut.", and
 /// any strips a slot already in the board set loose.
 pub fn describe_cut(verb: &str, cut: &Cut) -> String {
-    let piece = &cut.piece.board;
+    let piece = describe_size(&cut.piece.board);
+    let waste = measured(cut.waste);
     let mut description = match &cut.offcut {
         Some(offcut) => format!(
-            "{verb} a {piece} piece, plus a {} offcut. The blade turned {} to sawdust.",
-            offcut.board, cut.waste
+            "{verb} a {piece} piece, plus a {} offcut. The blade turned {waste} to sawdust.",
+            describe_size(&offcut.board)
         ),
-        None => format!(
-            "{verb} a {piece} piece, and the blade turned the last {} to sawdust.",
-            cut.waste
-        ),
+        None => {
+            format!("{verb} a {piece} piece, and the blade turned the last {waste} to sawdust.")
+        }
     };
+    if let Some(mitered) = describe_miters(&cut.piece.board) {
+        description.push_str(&format!(" The piece is {mitered}."));
+    }
     let loose: Vec<String> = cut
         .loose
         .iter()
-        .map(|piece| format!("a {}", piece.board))
+        .map(|piece| format!("a {}", describe_size(&piece.board)))
         .collect();
     if !loose.is_empty() {
         description.push_str(&format!(
@@ -711,9 +727,63 @@ pub fn describe_cut(verb: &str, cut: &Cut) -> String {
     description
 }
 
-/// Describes a board and the slots sawn into it, e.g. "3/4" x 7-1/4" x 24", with a stopped cut
-/// 11-9/16" long on top and 13" on the bottom". Slots that match once measured are counted
-/// rather than listed: "with three 3/4"-wide, 1/4"-deep dados all the way across".
+/// Which way a miter saw's table is turned, as you face it with the stop to the right: a
+/// positive miter swings the blade's front toward the stop.
+pub fn describe_miter(miter: Angle) -> String {
+    match miter.hundredths().signum() {
+        0 => "square".to_string(),
+        1 => format!("{} right", degrees(miter)),
+        _ => format!("{} left", degrees(miter.abs())),
+    }
+}
+
+/// An angle for the readout, "45 deg": the game's font has no degree sign.
+pub fn degrees(angle: Angle) -> String {
+    angle.to_string().replace('°', " deg")
+}
+
+/// A length as a tape measure reads it, to the nearest 64th.
+fn measured(length: Length) -> Length {
+    length.rounded_to(Length::from_inch_fraction(1, 64))
+}
+
+/// A board's size the way a cut list writes it, thickness x width x length, e.g. "3/4" x 2" x
+/// 12"". A mitered board's length is to its long points.
+pub fn describe_size(board: &Board) -> String {
+    let size = format!(
+        "{} x {} x {}",
+        measured(board.thickness()),
+        measured(board.width()),
+        measured(board.length())
+    );
+    if board.miters().is_empty() {
+        size
+    } else {
+        format!("{size} (long point)")
+    }
+}
+
+/// How a board's ends are mitered, if they are: "mitered 45° at both ends".
+pub fn describe_miters(board: &Board) -> Option<String> {
+    match board.miters().as_slice() {
+        [] => None,
+        [one] => Some(format!("mitered {} at one end", degrees(*one))),
+        [a, b] if a == b => Some(format!("mitered {} at both ends", degrees(*a))),
+        angles => Some(format!(
+            "mitered {}",
+            angles
+                .iter()
+                .map(|&angle| degrees(angle))
+                .collect::<Vec<_>>()
+                .join(" and ")
+        )),
+    }
+}
+
+/// Describes a board, its mitered ends, and the slots sawn into it, e.g. "3/4" x 7-1/4" x 24",
+/// with a stopped cut 11-9/16" long on top and 13" on the bottom". Slots that match once
+/// measured are counted rather than listed: "with three 3/4"-wide, 1/4"-deep dados all the way
+/// across".
 pub fn describe_board(board: &Board) -> String {
     let mut groups: Vec<(String, Kerf, usize)> = Vec::new();
     for slot in slots(board) {
@@ -730,11 +800,14 @@ pub fn describe_board(board: &Board) -> String {
             _ => describe_slots(board, slot, *count),
         })
         .collect();
-    if slots.is_empty() {
-        board.to_string()
-    } else {
-        format!("{board}, with {}", slots.join(" and "))
+    let mut description = describe_size(board);
+    if let Some(mitered) = describe_miters(board) {
+        description.push_str(&format!(", {mitered}"));
     }
+    if !slots.is_empty() {
+        description.push_str(&format!(", with {}", slots.join(" and ")));
+    }
+    description
 }
 
 /// The slots in `board` as you'd see them. Kerfs cut side by side the same way (the blade at
@@ -781,44 +854,68 @@ fn describe_slots(board: &Board, kerf: &Kerf, count: usize) -> String {
         _ => (count.to_string(), "s"),
     };
     let thirty_second = Length::from_inch_fraction(1, 32);
-    let span = |t: Length| {
-        kerf.span_at(t).map_or(Length::ZERO, |(start, end)| {
-            (end.min(kerf.along().of(board)) - start.max(Length::ZERO))
-                .max(Length::ZERO)
-                .rounded_to(thirty_second)
-        })
+    let size = board.slot(kerf);
+    let run = |run: Option<Run>| {
+        run.map_or(Length::ZERO, |run| run.length)
+            .rounded_to(thirty_second)
     };
     let thickness = board.thickness();
     if kerf.depth(thickness) >= thickness {
         // A slot through the board's whole length would have cut it apart, so this one stops.
-        let (top, bottom) = (span(thickness), span(Length::ZERO));
+        let (top, bottom) = (run(size.top), run(size.bottom));
         return format!("{a} stopped cut{s} {top} long on top and {bottom} on the bottom");
     }
     let depth = kerf.depth(thickness).rounded_to(thirty_second);
-    let extent = kerf.across.of(board);
-    let width = (kerf.far.min(extent) - kerf.near.max(Length::ZERO)).rounded_to(thirty_second);
-    let at_edge = kerf.near <= Length::ZERO || kerf.far >= extent;
-    let kind = match (kerf.across, at_edge) {
-        (Axis::Width, false) => format!("groove{s}"),
-        (Axis::Width, true) => format!("rabbet{s}"),
-        (Axis::Length, false) => format!("dado{s}"),
-        (Axis::Length, true) => format!("rabbet{s} across the end"),
+    let width = size.width.rounded_to(thirty_second);
+    let lengthwise = kerf.along.l.abs() > kerf.along.w.abs();
+    let kind = match (lengthwise, size.at_edge) {
+        (true, false) => format!("groove{s}"),
+        (true, true) => format!("rabbet{s}"),
+        (false, false) => format!("dado{s}"),
+        (false, true) => format!("rabbet{s} across the end"),
+    };
+    let slant = kerf.slant();
+    let described = if slant == Angle::ZERO {
+        format!("{a} {width}-wide, {depth}-deep {kind}")
+    } else {
+        format!(
+            "{a} {width}-wide, {depth}-deep {kind} at {},",
+            degrees(slant)
+        )
     };
     // How far it runs on the face the blade came through.
     let face = if kerf.from_below() {
-        Length::ZERO
+        size.bottom
     } else {
-        thickness
+        size.top
     };
-    let reach = kerf.along().of(board);
-    let all_the_way = kerf
-        .span_at(face)
-        .is_some_and(|(start, end)| start <= Length::ZERO && end >= reach);
-    let size = format!("{a} {width}-wide, {depth}-deep {kind}");
-    match (all_the_way, kerf.across) {
-        (true, Axis::Width) => format!("{size} the full length"),
-        (true, Axis::Length) => format!("{size} all the way across"),
-        (false, _) => format!("{size} {} long", span(face)),
+    match (face.is_some_and(|run| run.end_to_end), lengthwise) {
+        (true, true) => format!("{described} the full length"),
+        (true, false) => format!("{described} all the way across"),
+        (false, _) => format!("{described} {} long", run(face)),
+    }
+}
+
+/// The board and grain a mesh was last built from, so it's only rebuilt when they change and
+/// not every frame the blade moves.
+#[derive(Component, Default)]
+pub struct Shape(Option<(Board, Vec3)>);
+
+impl Shape {
+    /// The shape of a mesh just built for `placed`.
+    pub fn built(placed: &Placed) -> Shape {
+        Shape(Some((placed.board.clone(), placed.grain)))
+    }
+
+    /// Rebuilds `mesh` for `placed` unless it was built for it already.
+    pub fn update(&mut self, placed: &Placed, mesh: &Mesh3d, meshes: &mut Assets<Mesh>) {
+        let shape = Shape::built(placed);
+        if self.0 != shape.0
+            && let Some(mut mesh) = meshes.get_mut(&mesh.0)
+        {
+            *mesh = lumber_mesh(&placed.board, placed.grain);
+            *self = shape;
+        }
     }
 }
 
@@ -836,17 +933,16 @@ pub fn place_parts<'a>(
             &'a Mesh3d,
             Mut<'a, Transform>,
             Mut<'a, Visibility>,
+            Mut<'a, Shape>,
         ),
     >,
 ) {
-    for (part, mesh, mut transform, mut visibility) in parts {
+    for (part, mesh, mut transform, mut visibility, mut shape) in parts {
         match boards.get(*part) {
             Some(placed) => {
                 *transform = Transform::from_translation(origin + frame * placed.corner)
                     .with_rotation(frame * placed.rotation);
-                if let Some(mut mesh) = meshes.get_mut(&mesh.0) {
-                    *mesh = lumber_mesh(&placed.board, placed.grain);
-                }
+                shape.update(placed, mesh, meshes);
                 *visibility = Visibility::Inherited;
             }
             None => *visibility = Visibility::Hidden,

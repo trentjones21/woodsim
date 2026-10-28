@@ -3,14 +3,14 @@
 use std::f32::consts::FRAC_PI_2;
 
 use bevy::{picking::pointer::PointerButton, prelude::*};
-use woodsim::{Board, Length, MiterSaw};
+use woodsim::{Angle, Board, Length, MiterSaw};
 
 use crate::{
-    chop::{MiterSawStation, board_turn},
+    chop::{MITER_STOPS, MiterSawStation, board_turn},
     feed::TableSawStation,
     meshes::{Grain, board_mesh, lumber_mesh, rounded_box},
     shop::{
-        Block, Part, Placed, ShopAssets, ShopView, inches, place_parts, pointer_on_plane,
+        Block, Part, Placed, Shape, ShopAssets, ShopView, inches, place_parts, pointer_on_plane,
         rounded_block, set_material_on, snap_to_sixteenth, station_part,
     },
 };
@@ -29,6 +29,8 @@ pub const HELP: &str = "Left/Right: move the stop 1/16\"   Shift+Left/Right: 1\"
                         Or drag the stop block\n\
                         Up/Down: set the depth stop 1/16\"   Shift: 1/4\"   \
                         Down past the table turns it off\n\
+                        [ and ]: swing the miter 1 deg   \
+                        Shift: to the next stop (15, 22.5, 30, 45 deg)\n\
                         Hold Space: lower the blade   Q/E: turn the board   F: flip it\n\
                         Click a cut piece: slide it back against the stop\n\
                         Click a part on the pile: put it back on the saw   \
@@ -50,6 +52,9 @@ const RAISE_SPEED: f32 = 1.0 / 0.4;
 const STOP_STEP: Length = Length::from_inch_fraction(1, 16);
 const DEPTH_STEP: Length = Length::from_inch_fraction(1, 16);
 const DEPTH_BIG_STEP: Length = Length::from_inch_fraction(1, 4);
+const MITER_STEP: Angle = Angle::from_degrees(1);
+/// The miter scale's marks are this far out from where the table turns.
+const SCALE_RADIUS: f32 = inches(8.6);
 
 /// Where the arm's pivot is, on a post behind the fence.
 fn pivot(saw: &MiterSaw) -> Vec3 {
@@ -80,6 +85,7 @@ impl Plugin for MiterSawPlugin {
                         (
                             move_stop_with_keys,
                             set_depth_stop_with_keys,
+                            swing_with_keys,
                             turn_with_keys,
                             set_aside_with_key,
                             carry_with_key,
@@ -87,7 +93,7 @@ impl Plugin for MiterSawPlugin {
                             .run_if(resource_equals(ShopView::MiterSaw)),
                         work_blade,
                     ),
-                    (draw_stop, draw_head, draw_board, draw_pile),
+                    (draw_stop, draw_table, draw_head, draw_board, draw_pile),
                 )
                     .chain(),
             );
@@ -100,7 +106,12 @@ struct StopBlock {
     grab_offset: f32,
 }
 
-/// The arm, motor, and blade that swing down together.
+/// The saw's turning table, with the post the arm pivots on: it turns to the miter angle about
+/// where the blade's stop-side face crosses the fence.
+#[derive(Component)]
+struct Turntable;
+
+/// The arm, motor, and blade that swing down together, on the turntable.
 #[derive(Component)]
 struct Head;
 
@@ -130,6 +141,8 @@ fn spawn_miter_saw(
     let dark = paint(Color::srgb(0.22, 0.24, 0.3));
     let aluminum = paint(Color::srgb(0.86, 0.88, 0.91));
     let pull = paint(Color::srgb(0.98, 0.95, 0.88));
+    let steel = paint(Color::srgb(0.4, 0.43, 0.5));
+    let pointer = paint(Color::srgb(1.0, 0.78, 0.15));
     // The saw's housing: bright tool plastic.
     let body = paint(Color::srgb(0.08, 0.64, 0.66));
     let zero_clearance = paint(Color::srgb(0.92, 0.25, 0.22));
@@ -199,30 +212,87 @@ fn spawn_miter_saw(
     ));
     station_part(entity, ShopView::MiterSaw);
 
-    // The saw: a dark base with a red zero-clearance strip where the blade comes through.
+    // The saw: a dark base, with the miter scale's marks on its front, around a turntable.
     spawn_box(
         &mut commands,
         &mut meshes,
         &dark,
         Vec3::new(inches(-7.0), inches(-1.0), inches(-6.0)),
-        Vec3::new(inches(7.0), 0.0, inches(10.0)),
+        Vec3::new(inches(7.0), inches(-0.05), inches(10.0)),
+    );
+    let mark = meshes.add(Cuboid::new(inches(0.12), inches(0.06), inches(0.7)));
+    for stop in MITER_STOPS.iter().flat_map(|&stop| [stop, -stop]) {
+        let turn = Quat::from_rotation_y(stop.radians() as f32);
+        commands.spawn((
+            Mesh3d(mark.clone()),
+            MeshMaterial3d(pull.clone()),
+            Transform::from_translation(
+                ORIGIN + turn * Vec3::new(0.0, inches(-0.05), SCALE_RADIUS),
+            )
+            .with_rotation(turn),
+            Pickable::IGNORE,
+        ));
+    }
+    let turntable = commands
+        .spawn((
+            Transform::from_translation(ORIGIN),
+            Visibility::default(),
+            Turntable,
+        ))
+        .id();
+    let table_part = |commands: &mut Commands,
+                      meshes: &mut Assets<Mesh>,
+                      material: &Handle<StandardMaterial>,
+                      min: Vec3,
+                      max: Vec3| {
+        let entity = commands.spawn((
+            rounded_block(meshes, Block { min, max }, Vec3::ZERO),
+            MeshMaterial3d(material.clone()),
+            ChildOf(turntable),
+        ));
+        station_part(entity, ShopView::MiterSaw);
+    };
+    // The round table, flush with the base's top; its back half is under the fence.
+    let entity = commands.spawn((
+        Mesh3d(meshes.add(Cylinder::new(inches(5.5), inches(0.5)))),
+        MeshMaterial3d(steel.clone()),
+        Transform::from_xyz(0.0, inches(-0.25), 0.0),
+        ChildOf(turntable),
+    ));
+    station_part(entity, ShopView::MiterSaw);
+    // Its arm out front, which points at the scale, under a red zero-clearance strip where the
+    // blade comes through.
+    table_part(
+        &mut commands,
+        &mut meshes,
+        &steel,
+        Vec3::new(inches(-1.4), inches(-0.5), inches(3.0)),
+        Vec3::new(inches(1.4), inches(-0.02), inches(9.4)),
+    );
+    table_part(
+        &mut commands,
+        &mut meshes,
+        &pointer,
+        Vec3::new(inches(-0.1), inches(-0.04), inches(8.4)),
+        Vec3::new(inches(0.1), inches(0.03), inches(9.3)),
     );
     commands.spawn((
         rounded_block(
             &mut meshes,
             Block {
                 min: Vec3::new(inches(-0.6), inches(-0.5), inches(-1.0)),
-                max: Vec3::new(inches(0.6), inches(0.02), inches(9.0)),
+                max: Vec3::new(inches(0.6), inches(0.02), inches(7.5)),
             },
-            ORIGIN,
+            Vec3::ZERO,
         ),
         MeshMaterial3d(zero_clearance),
         Pickable::IGNORE,
+        ChildOf(turntable),
     ));
-    // The fence, split around the blade.
+    // The fence, split wide enough around the blade for it to turn 50° either way.
     for (left, right) in [
-        (-BENCH_HALF_LENGTH + inches(2.0), inches(-0.75)),
-        (inches(0.75), BENCH_HALF_LENGTH - inches(2.0)),
+        (-BENCH_HALF_LENGTH + inches(2.0), inches(-1.6)),
+        (inches(1.6), BENCH_HALF_LENGTH - inches(2.0)),
     ] {
         spawn_box(
             &mut commands,
@@ -232,8 +302,8 @@ fn spawn_miter_saw(
             Vec3::new(right, FENCE_HEIGHT, 0.0),
         );
     }
-    // The post the arm pivots on.
-    spawn_box(
+    // The post the arm pivots on, which turns with the table.
+    table_part(
         &mut commands,
         &mut meshes,
         &dark,
@@ -262,9 +332,10 @@ fn spawn_miter_saw(
     let handle = centered(Vec3::new(inches(1.3), inches(1.3), inches(4.5)));
     commands
         .spawn((
-            Transform::from_translation(ORIGIN + pivot(&saw)),
+            Transform::from_translation(pivot(&saw)),
             Visibility::default(),
             Head,
+            ChildOf(turntable),
         ))
         .with_children(|head| {
             head.spawn((
@@ -350,6 +421,7 @@ fn spawn_miter_saw(
                 Visibility::Hidden,
                 part,
                 AtMiterSaw,
+                Shape::default(),
             ))
             .observe(highlight_takeable)
             .observe(set_material_on::<PointerOut>(wood.clone()))
@@ -544,6 +616,31 @@ fn draw_head(station: Res<MiterSawStation>, mut head: Single<&mut Transform, Wit
     }
 }
 
+/// [ and ] swing the miter 1° away from the stop and toward it; with Shift, to the next place
+/// the table clicks into.
+fn swing_with_keys(keys: Res<ButtonInput<KeyCode>>, mut station: ResMut<MiterSawStation>) {
+    let shift = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
+    for (key, toward_stop) in [(KeyCode::BracketLeft, false), (KeyCode::BracketRight, true)] {
+        if !keys.just_pressed(key) {
+            continue;
+        }
+        if shift {
+            station.swing_to_next_stop(toward_stop);
+        } else {
+            let step = if toward_stop { MITER_STEP } else { -MITER_STEP };
+            let miter = station.saw.miter + step;
+            station.set_miter(miter);
+        }
+    }
+}
+
+/// Turns the table, with the arm and blade on it, to the miter angle.
+fn draw_table(station: Res<MiterSawStation>, mut table: Single<&mut Transform, With<Turntable>>) {
+    if station.is_changed() {
+        table.rotation = Quat::from_rotation_y(station.saw.miter.radians() as f32);
+    }
+}
+
 /// Up and Down raise and lower the depth stop. Lowered past the table, it's off.
 fn set_depth_stop_with_keys(keys: Res<ButtonInput<KeyCode>>, mut station: ResMut<MiterSawStation>) {
     let step = if keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]) {
@@ -566,7 +663,10 @@ fn set_depth_stop_with_keys(keys: Res<ButtonInput<KeyCode>>, mut station: ResMut
 fn draw_board(
     station: Res<MiterSawStation>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut parts: Query<(&Part, &Mesh3d, &mut Transform, &mut Visibility), With<AtMiterSaw>>,
+    mut parts: Query<
+        (&Part, &Mesh3d, &mut Transform, &mut Visibility, &mut Shape),
+        With<AtMiterSaw>,
+    >,
 ) {
     if station.is_changed() {
         let boards = station.boards();
@@ -580,7 +680,7 @@ fn draw_pile(
     station: Res<MiterSawStation>,
     shop: Res<ShopAssets>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut pile: Query<(Entity, &PilePart, &Mesh3d, &mut Transform)>,
+    mut pile: Query<(Entity, &PilePart, &Mesh3d, &mut Transform, &mut Shape)>,
 ) {
     if !station.is_changed() {
         return;
@@ -591,13 +691,11 @@ fn draw_pile(
             .with_rotation(board_turn() * placed.rotation)
     };
     let mut drawn = 0;
-    for (entity, part, mesh, mut transform) in &mut pile {
+    for (entity, part, mesh, mut transform, mut shape) in &mut pile {
         match pile_parts.get(part.0) {
             Some(placed) => {
                 *transform = place(placed);
-                if let Some(mut mesh) = meshes.get_mut(&mesh.0) {
-                    *mesh = lumber_mesh(&placed.board, placed.grain);
-                }
+                shape.update(placed, mesh, &mut meshes);
                 drawn += 1;
             }
             None => commands.entity(entity).despawn(),
@@ -610,6 +708,7 @@ fn draw_pile(
                 MeshMaterial3d(shop.wood.clone()),
                 place(placed),
                 PilePart(index),
+                Shape::built(placed),
             ))
             .observe(highlight_on_pile)
             .observe(set_material_on::<PointerOut>(shop.wood.clone()))

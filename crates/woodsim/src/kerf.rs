@@ -1,48 +1,118 @@
-use crate::{Axis, Length};
+use crate::{
+    Angle, Length,
+    face::{Direction, Edge, Region},
+};
 
 /// A slot a round saw blade cut into a board without cutting it apart: everything within the
 /// blade's radius of the path its center took, between the slot's two faces. A stopped cut, a
-/// groove, a dado, and a rabbet are all kerfs.
+/// groove, a dado, a rabbet, and a miter saw's scar are all kerfs.
 ///
 /// Positions are in the board's own coordinates: `l` along its length from one end, `w` across
 /// its width from one edge, and `t` up through its thickness from its bottom face. A slot runs
-/// along the board (a rip or a groove) or across it (a crosscut or a dado), and the blade came
-/// at it through the bottom face or the top one.
+/// in some direction across the board's face (along it for a rip or a groove, across it for a
+/// crosscut or a dado, or slanted for a miter), and the blade came at it through the bottom
+/// face or the top one.
+///
+/// Positions across and along the slot are `across · (l, w)` and `along · (l, w)`. For a slot
+/// square to the board, the directions are the board's axes and these are plain positions on
+/// them; for a slanted one, they're nanometers times the direction's `scale`, which keeps them
+/// whole numbers wherever the slot ends up.
 ///
 /// The slot is stored as the saw left it, not trimmed to the board, so it stays exact when the
 /// board is cut into pieces. It can reach past the board's edges and ends.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Kerf {
-    /// The board axis the slot's faces are square to: `Width` for a slot running along the
-    /// board, `Length` for one running across it.
-    pub across: Axis,
-    /// The slot's two faces, as positions on that axis, `near` < `far`.
+    /// Square to the slot's faces.
+    pub across: Direction,
+    /// The way the slot runs, which the blade's center traveled: square to `across`.
+    pub along: Direction,
+    /// The slot's two faces, `near` < `far`.
     pub near: Length,
     pub far: Length,
     pub radius: Length,
     /// The `t` of the blade's center: below zero when the blade came up through the bottom
     /// face, past the thickness when it came down through the top.
     pub center: Length,
-    /// How far the blade's center traveled on the board's other axis, `start` <= `end`.
+    /// How far the blade's center traveled along the slot, `start` <= `end`.
     pub start: Length,
     pub end: Length,
 }
 
 impl Kerf {
-    /// The board axis the slot runs along.
-    pub fn along(&self) -> Axis {
-        self.across.other()
+    /// A slot between the faces `across · (l, w) = near` and `far`, whose blade's center
+    /// traveled from `along · (l, w) = start` to `end`. Each direction is written one way, so
+    /// equal slots compare equal.
+    pub(crate) fn new(
+        across: Direction,
+        (near, far): (Length, Length),
+        along: Direction,
+        (start, end): (Length, Length),
+        radius: Length,
+        center: Length,
+    ) -> Kerf {
+        let turned = |(low, high): (Length, Length), reversed: bool| {
+            if reversed { (-high, -low) } else { (low, high) }
+        };
+        let (across, across_reversed) = across.canonical();
+        let (along, along_reversed) = along.canonical();
+        let (near, far) = turned((near, far), across_reversed);
+        let (start, end) = turned((start, end), along_reversed);
+        Kerf {
+            across,
+            along,
+            near,
+            far,
+            radius,
+            center,
+            start,
+            end,
+        }
     }
 
-    /// Whether any of the slot is inside a board of these dimensions. A blade that only grazes
-    /// a face takes no wood.
-    pub fn touches(&self, length: Length, width: Length, thickness: Length) -> bool {
-        let span = self.across.pick(length, width);
-        let reach = self.along().pick(length, width);
-        let across = self.near < span && self.far > Length::ZERO;
-        let along = gap(self.start, self.end, Length::ZERO, reach);
+    /// How far the slot is turned from running square across the board, or straight along it:
+    /// the angle the saw was set to.
+    pub fn slant(&self) -> Angle {
+        let (l, w) = (self.along.l.abs() as f64, self.along.w.abs() as f64);
+        Angle::nearest(l.min(w).atan2(l.max(w)))
+    }
+
+    /// The slot's width, square to its faces.
+    pub fn width(&self) -> Length {
+        let scaled = (self.far - self.near).as_nm() as f64;
+        Length::from_nm((scaled / self.across.scale()).round() as i64)
+    }
+
+    /// Whether any of the slot is inside `region` of a board `thickness` thick. A blade that
+    /// only grazes a face takes no wood.
+    pub(crate) fn touches(&self, region: &Region, thickness: Length) -> bool {
         let up = gap(self.center, self.center, Length::ZERO, thickness);
-        across && along.squared() + up.squared() < self.radius.squared()
+        if up >= self.radius {
+            return false;
+        }
+        let Some(inside) = region.clip_all(self.faces()) else {
+            return false;
+        };
+        // How far past either end of the blade's path along the slot the wood is, against
+        // how far the blade reached at the height of the nearest face. Both are worked out
+        // exactly unless the numbers get too big, where they're within a billionth of a
+        // nanometer.
+        let (low, high) = inside.extremes(self.along);
+        let reach = (self.radius.squared() - up.squared()) * self.along.scale_squared();
+        let within = |(off, over): (i128, i128)| {
+            off <= 0
+                || match (
+                    off.checked_mul(off),
+                    reach.checked_mul(over).and_then(|r| r.checked_mul(over)),
+                ) {
+                    (Some(off), Some(reach)) => off < reach,
+                    _ => (off as f64 / over as f64).powi(2) < reach as f64,
+                }
+        };
+        let nm = |length: Length| length.as_nm() as i128;
+        let (low, over_low) = low.along_exactly(self.along);
+        let (high, over_high) = high.along_exactly(self.along);
+        within((low - nm(self.end) * over_low, over_low))
+            && within((nm(self.start) * over_high - high, over_high))
     }
 
     /// Where along the slot it goes all the way through a board `thickness` thick, or `None` if
@@ -55,14 +125,37 @@ impl Kerf {
         (start <= end).then_some((start, end))
     }
 
+    /// Where on the board's face the slot goes all the way through a board `thickness` thick.
+    pub(crate) fn through_hole(&self, thickness: Length) -> Option<Region> {
+        let (start, end) = self.through_span(thickness)?;
+        let nm = |length: Length| length.as_nm() as i128;
+        let [face_near, face_far] = self.faces();
+        Region::within([
+            face_near,
+            face_far,
+            Edge::new(self.along, nm(end)),
+            Edge::new(self.along.reversed(), -nm(start)),
+        ])
+    }
+
+    /// The slot's two faces, as edges with the slot inside them.
+    pub(crate) fn faces(&self) -> [Edge; 2] {
+        let nm = |length: Length| length.as_nm() as i128;
+        [
+            Edge::new(self.across.reversed(), -nm(self.near)),
+            Edge::new(self.across, nm(self.far)),
+        ]
+    }
+
     /// How far the slot runs along the board at height `t`, or `None` if the blade didn't reach
     /// it. The round blade cuts a stopped slot longer on the face it came through than on the
-    /// other. Rounded in to the nanometer.
+    /// other. Rounded in to the nanometer, times the scale of `along`.
     pub fn span_at(&self, t: Length) -> Option<(Length, Length)> {
         let up = (t - self.center).squared();
         let reach = self.radius.squared();
         (up <= reach).then(|| {
-            let half = Length::from_nm((reach - up).isqrt() as i64);
+            let half = ((reach - up) * self.along.scale_squared()).isqrt();
+            let half = Length::from_nm(half as i64);
             (self.start - half, self.end + half)
         })
     }
@@ -86,10 +179,8 @@ impl Kerf {
     /// The same slot, measured from a new corner at `(l, w)`: where it sits in a piece cut from
     /// the board.
     pub(crate) fn moved_to(self, l: Length, w: Length) -> Kerf {
-        let (across, along) = match self.across {
-            Axis::Width => (w, l),
-            Axis::Length => (l, w),
-        };
+        let shift = |direction: Direction| Length::from_nm(direction.dot(l, w) as i64);
+        let (across, along) = (shift(self.across), shift(self.along));
         Kerf {
             near: self.near - across,
             far: self.far - across,
@@ -122,15 +213,21 @@ mod tests {
     /// A 1/8" slot along the board, cut by a 10" blade raised 1" through a board 3/4" thick,
     /// its center moving from 6" before the board's end to 10" along it.
     fn stopped_cut() -> Kerf {
-        Kerf {
-            across: Axis::Width,
-            near: inches(1),
-            far: inches(1) + Length::from_inch_fraction(1, 8),
-            radius: inches(5),
-            center: inches(1) - inches(5),
-            start: -inches(6),
-            end: inches(10),
-        }
+        Kerf::new(
+            Direction::WIDTH,
+            (inches(1), inches(1) + Length::from_inch_fraction(1, 8)),
+            Direction::LENGTH,
+            (-inches(6), inches(10)),
+            inches(5),
+            inches(1) - inches(5),
+        )
+    }
+
+    fn board(length: i64, width: i64) -> Region {
+        Region::rectangle(
+            (Length::ZERO, inches(length)),
+            (Length::ZERO, inches(width)),
+        )
     }
 
     #[test]
@@ -181,26 +278,41 @@ mod tests {
     fn touches_only_boards_the_slot_is_inside() {
         let kerf = stopped_cut();
         let thickness = Length::from_inch_fraction(3, 4);
-        assert!(kerf.touches(inches(24), inches(6), thickness));
+        assert!(kerf.touches(&board(24, 6), thickness));
         // The slot is 1" in from the edge, so a board 1" wide is untouched.
-        assert!(!kerf.touches(inches(24), inches(1), thickness));
+        assert!(!kerf.touches(&board(24, 1), thickness));
         let lowered = Kerf {
             center: -inches(5),
             ..kerf
         };
-        assert!(!lowered.touches(inches(24), inches(6), thickness));
+        assert!(!lowered.touches(&board(24, 6), thickness));
+    }
+
+    #[test]
+    fn touches_a_board_its_blade_reaches_by_a_nanometer() {
+        let thickness = Length::from_inch_fraction(3, 4);
+        // The blade's 3" reach along the bottom face stops a nanometer into a board starting
+        // 13" - 1 nm along, and exactly at one starting at 13".
+        let kerf = stopped_cut();
+        let start = |at: Length| Region::rectangle((at, inches(24)), (Length::ZERO, inches(6)));
+        assert!(kerf.touches(&start(inches(13) - Length::from_nm(1)), thickness));
+        assert!(!kerf.touches(&start(inches(13)), thickness));
     }
 
     #[test]
     fn a_slot_across_the_board_measures_its_faces_along_the_length() {
-        let dado = Kerf {
-            across: Axis::Length,
-            ..stopped_cut()
-        };
+        let dado = Kerf::new(
+            Direction::LENGTH,
+            (inches(1), inches(1) + Length::from_inch_fraction(1, 8)),
+            Direction::WIDTH,
+            (-inches(6), inches(10)),
+            inches(5),
+            inches(1) - inches(5),
+        );
         let thickness = Length::from_inch_fraction(3, 4);
         // Its faces are 1" along the board, so a board 1" long is untouched by it.
-        assert!(dado.touches(inches(24), inches(12), thickness));
-        assert!(!dado.touches(inches(1), inches(12), thickness));
+        assert!(dado.touches(&board(24, 12), thickness));
+        assert!(!dado.touches(&board(1, 12), thickness));
     }
 
     #[test]
@@ -210,15 +322,35 @@ mod tests {
             (kerf.near, kerf.start, kerf.end),
             (Length::ZERO, -inches(8), inches(8))
         );
-        // A slot across the board shifts its faces with `l` and its travel with `w`.
-        let dado = Kerf {
-            across: Axis::Length,
-            ..stopped_cut()
-        }
-        .moved_to(inches(1), inches(2));
-        assert_eq!(
-            (dado.near, dado.start, dado.end),
-            (Length::ZERO, -inches(8), inches(8))
+    }
+
+    #[test]
+    fn a_slot_written_backward_is_turned_around() {
+        let backward = Kerf::new(
+            Direction::WIDTH.reversed(),
+            (-inches(2), -inches(1)),
+            Direction::LENGTH,
+            (Length::ZERO, inches(1)),
+            inches(5),
+            -inches(4),
         );
+        assert_eq!(backward.across, Direction::WIDTH);
+        assert_eq!((backward.near, backward.far), (inches(1), inches(2)));
+    }
+
+    #[test]
+    fn a_slanted_slot_is_as_wide_as_the_blade_square_to_its_faces() {
+        let kerf = Length::from_inch_fraction(1, 8);
+        let across = Direction::new(1, 1);
+        let scaled = Length::from_nm((kerf.as_nm() as f64 * across.scale()).round() as i64);
+        let slanted = Kerf::new(
+            across,
+            (inches(10), inches(10) + scaled),
+            across.square(),
+            (Length::ZERO, Length::ZERO),
+            inches(6),
+            inches(6),
+        );
+        assert_eq!(slanted.width(), kerf);
     }
 }

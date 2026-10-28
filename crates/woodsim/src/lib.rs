@@ -4,13 +4,17 @@
 //! each tool does to them. It has no engine dependency: the game only draws what
 //! this crate reports, so everything here can be tested with plain `cargo test`.
 
+mod angle;
 mod board;
+mod face;
 mod kerf;
 mod length;
 mod orientation;
 mod saw;
 
-pub use board::{Board, Cutaway, Piece};
+pub use angle::Angle;
+pub use board::{Board, Piece, Run, SlotSize};
+pub use face::{Direction, Edge, Region};
 pub use kerf::Kerf;
 pub use length::Length;
 pub use orientation::{Axis, Orientation};

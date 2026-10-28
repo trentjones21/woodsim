@@ -12,7 +12,7 @@
 use std::f32::consts::FRAC_PI_2;
 
 use bevy::prelude::*;
-use woodsim::{Board, Cut, CutError, Length, MiterSaw, Orientation, Pass};
+use woodsim::{Angle, Board, Cut, CutError, Length, MiterSaw, Orientation, Pass};
 
 use crate::shop::{Part, Placed, SawBoards, describe_board, describe_cut, describe_kerf, inches};
 
@@ -20,6 +20,14 @@ pub const STOP_MIN: Length = Length::from_inch_fraction(1, 16);
 pub const STOP_MAX: Length = Length::from_inches(36);
 /// The highest the depth stop can hold the blade above the table.
 const DEPTH_STOP_MAX: Length = Length::from_inches(4);
+/// Where the saw's table clicks into place as it turns, either way from square.
+pub const MITER_STOPS: [Angle; 5] = [
+    Angle::ZERO,
+    Angle::from_degrees(15),
+    Angle::from_hundredths(2250),
+    Angle::from_degrees(30),
+    Angle::from_degrees(45),
+];
 
 /// The parts pile is stacked flat behind the fence, starting near the bench's left end.
 const PILE_LEFT: f32 = inches(-38.0);
@@ -134,6 +142,33 @@ impl MiterSawStation {
         if let Work::Ready { missed, .. } = &mut self.work {
             *missed = None;
         }
+    }
+
+    /// Turns the saw's table to `miter`, as far as it goes either way: positive swings the
+    /// blade's front toward the stop. Only with the blade up.
+    pub fn set_miter(&mut self, miter: Angle) {
+        if !self.blade_up() {
+            return;
+        }
+        let most = self.saw.max_miter;
+        self.saw.miter = miter.clamp(-most, most);
+        if let Work::Ready { missed, .. } = &mut self.work {
+            *missed = None;
+        }
+    }
+
+    /// Turns the table to the next place it clicks into, toward the stop or away from it, or
+    /// as far as it goes past the last one.
+    pub fn swing_to_next_stop(&mut self, toward_stop: bool) {
+        let now = self.saw.miter;
+        let stops = MITER_STOPS.iter().flat_map(|&stop| [stop, -stop]);
+        let most = self.saw.max_miter;
+        let next = if toward_stop {
+            stops.filter(|&stop| stop > now).min().unwrap_or(most)
+        } else {
+            stops.filter(|&stop| stop < now).max().unwrap_or(-most)
+        };
+        self.set_miter(next);
     }
 
     /// Lowers the blade by `amount` of its travel, as far as the depth stop lets it go. Into
@@ -854,6 +889,56 @@ mod tests {
         assert_eq!(
             MiterSawStation::default().cut_list(),
             "Cut list: no parts set aside yet"
+        );
+    }
+
+    #[test]
+    fn the_table_clicks_from_stop_to_stop_and_turns_only_with_the_blade_up() {
+        let mut station = loaded();
+        station.swing_to_next_stop(true);
+        assert_eq!(station.saw.miter, Angle::from_degrees(15));
+        station.swing_to_next_stop(true);
+        assert_eq!(station.saw.miter, Angle::from_hundredths(2250));
+        // It turns 50° either way, past its last stop.
+        station.set_miter(-Angle::from_degrees(60));
+        assert_eq!(station.saw.miter, -Angle::from_degrees(50));
+        station.swing_to_next_stop(false);
+        assert_eq!(station.saw.miter, -Angle::from_degrees(50));
+        station.swing_to_next_stop(true);
+        assert_eq!(station.saw.miter, -Angle::from_degrees(45));
+
+        station.lower(0.1);
+        station.set_miter(Angle::ZERO);
+        assert_eq!(station.saw.miter, -Angle::from_degrees(45));
+    }
+
+    #[test]
+    fn a_cut_at_an_angle_leaves_a_mitered_piece() {
+        let mut station = loaded();
+        station.set_miter(Angle::from_degrees(30));
+        chop(&mut station);
+        let Work::Cut { cut, .. } = &station.work else {
+            panic!("the blade should have cut the board");
+        };
+        assert_eq!(cut.piece.board.miters(), [Angle::from_degrees(30)]);
+        assert!(
+            station
+                .status()
+                .contains("The piece is mitered 30 deg at one end."),
+            "{}",
+            station.status()
+        );
+    }
+
+    #[test]
+    fn turned_further_the_blade_reaches_across_less() {
+        let mut station = loaded();
+        station.set_miter(Angle::from_degrees(45));
+        chop(&mut station);
+        assert_eq!(
+            station.status(),
+            "No cut: the blade can't reach across 6\" of board; it cuts boards up to 5-19/64\" \
+             wide."
         );
     }
 }

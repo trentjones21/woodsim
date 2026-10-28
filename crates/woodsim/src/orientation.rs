@@ -1,4 +1,4 @@
-use crate::{Board, Length};
+use crate::{Board, Direction, Length};
 
 /// One of the two directions in a board's face: along its length (with the grain), or across
 /// its width.
@@ -99,6 +99,39 @@ impl Orientation {
             1 => (Axis::Width, !self.flipped),
             2 => (Axis::Length, true),
             _ => (Axis::Width, self.flipped),
+        }
+    }
+
+    /// The direction on the board that runs `across` the table toward the fence and `along` it,
+    /// in those proportions.
+    pub(crate) fn direction_onto_board(self, across: i64, along: i64) -> Direction {
+        let (across_axis, across_backward) = self.across();
+        let (_, along_backward) = self.along();
+        let across = if across_backward { -across } else { across };
+        let along = if along_backward { -along } else { along };
+        match across_axis {
+            Axis::Width => Direction::new(along, across),
+            Axis::Length => Direction::new(across, along),
+        }
+    }
+
+    /// Where the point `across` and `along` the table from the near corner of `board` is on
+    /// the board, as `(l, w)`.
+    pub(crate) fn point_onto_board(
+        self,
+        board: &Board,
+        across: Length,
+        along: Length,
+    ) -> (Length, Length) {
+        let (across_axis, across_backward) = self.across();
+        let (along_axis, along_backward) = self.along();
+        let (across, _) =
+            Orientation::onto_board((across, across), across_axis.of(board), across_backward);
+        let (along, _) =
+            Orientation::onto_board((along, along), along_axis.of(board), along_backward);
+        match across_axis {
+            Axis::Width => (along, across),
+            Axis::Length => (across, along),
         }
     }
 

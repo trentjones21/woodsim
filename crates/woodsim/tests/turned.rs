@@ -7,8 +7,7 @@ use common::CutApart;
 
 use proptest::prelude::*;
 use woodsim::{
-    Axis, Blade, Board, Cut, CutError, Cutaway, Length, MiterSaw, Orientation, Pass, Piece,
-    TableSaw,
+    Blade, Board, Cut, CutError, Direction, Length, MiterSaw, Orientation, Pass, Piece, TableSaw,
 };
 
 fn inches(n: i64) -> Length {
@@ -122,7 +121,7 @@ fn turned_with_the_blade_low_it_cuts_a_dado_across_the_board() {
     let board = kerfed(table_saw(inches(12), fraction(1, 4)).rip(&one_by_eight(), lie));
 
     let dado = board.kerfs()[0];
-    assert_eq!(dado.across, Axis::Length);
+    assert_eq!(dado.across, Direction::LENGTH);
     assert_eq!(
         (dado.near, dado.far),
         (inches(12) - Blade::FULL_KERF, inches(12))
@@ -171,13 +170,10 @@ fn a_rip_and_a_crosscut_that_meet_cut_out_the_corner_between_them() {
     assert_eq!((corner.l, corner.w), (Length::ZERO, fraction(21, 4)));
     // The rest of the board is still 24" long and 7-1/4" wide, less that corner.
     assert_eq!(cut.piece.board.to_string(), "3/4\" x 7-1/4\" x 24\"");
-    assert_eq!(
-        cut.piece.board.cutaways(),
-        [Cutaway {
-            l: (Length::ZERO, inches(9)),
-            w: (fraction(21, 4), fraction(29, 4)),
-        }]
-    );
+    let rest = &cut.piece.board;
+    assert!(!rest.has_wood_at(inches(4), inches(6)));
+    assert!(rest.has_wood_at(inches(10), inches(6)));
+    assert!(rest.has_wood_at(inches(4), inches(5)));
     assert!(cut.loose.is_empty());
 }
 
@@ -232,24 +228,7 @@ fn lying(turns: u8, flipped: bool) -> Orientation {
 /// Whether `piece`, with its corner at `corner` on the original board, has wood all the way
 /// through at the point `(l, w)` of the original board.
 fn wood_at(piece: &Board, corner: (Length, Length), (l, w): (Length, Length)) -> bool {
-    let (l, w) = (l - corner.0, w - corner.1);
-    let inside = Length::ZERO < l && l < piece.length() && Length::ZERO < w && w < piece.width();
-    let cut_away = piece
-        .cutaways()
-        .iter()
-        .any(|c| c.l.0 < l && l < c.l.1 && c.w.0 < w && w < c.w.1);
-    let sawn_through = piece.kerfs().iter().any(|kerf| {
-        let (across, along) = match kerf.across {
-            Axis::Width => (w, l),
-            Axis::Length => (l, w),
-        };
-        kerf.near < across
-            && across < kerf.far
-            && kerf
-                .through_span(piece.thickness())
-                .is_some_and(|(start, end)| start < along && along < end)
-    });
-    inside && !cut_away && !sawn_through
+    piece.has_wood_at(l - corner.0, w - corner.1)
 }
 
 proptest! {

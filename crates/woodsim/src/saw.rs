@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::{Axis, Board, Kerf, Length, Orientation, Piece};
+use crate::{Angle, Axis, Board, Direction, Kerf, Length, Orientation, Piece};
 
 /// A round saw blade. Every cut turns a strip of wood as wide as the kerf into sawdust.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -149,20 +149,19 @@ impl TableSaw {
         let (start, end) = Orientation::onto_board((start, end), along.of(board), along_backward);
         let radius = self.blade.radius();
         let center = self.height - radius;
-        let kerf = Kerf {
-            across,
-            near,
-            far,
+        let kerf = Kerf::new(
+            Direction::of(across),
+            (near, far),
+            Direction::of(along),
+            (start, end),
             radius,
-            center: if lie.is_flipped() {
+            if lie.is_flipped() {
                 board.thickness() - center
             } else {
                 center
             },
-            start,
-            end,
-        };
-        if !kerf.touches(board.length(), board.width(), board.thickness()) {
+        );
+        if !board.touched_by(&kerf) {
             return Ok(Pass::Missed);
         }
         let kerfed = board.with_kerf(kerf);
@@ -191,15 +190,24 @@ impl TableSaw {
     }
 }
 
-/// A miter saw that doesn't slide: its blade swings down on an arm to chop square across a
-/// board lying along the fence. The board's far end along the fence rests against the stop.
+/// A miter saw that doesn't slide: its blade swings down on an arm to chop across a board lying
+/// along the fence, square or at the angle its table is turned to. The board's far end along
+/// the fence rests against the stop.
 ///
-/// Heights are above the saw's table; distances across it are out in front of the fence.
+/// Heights are above the saw's table; distances across it are out in front of the fence. The
+/// table turns about the point where the blade's stop-side face crosses the fence, so wherever
+/// it's turned, the cut leaves the board against the stop the same length along the fence.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MiterSaw {
     pub blade: Blade,
-    /// The widest board the blade can cut across.
+    /// The widest board the blade can cut square across.
     pub capacity: Length,
+    /// How far the table is turned from square to the fence: positive when the blade's front
+    /// swings toward the stop, so the board against the stop comes out shorter along its front
+    /// edge than along the fence.
+    pub miter: Angle,
+    /// How far the table turns either way.
+    pub max_miter: Angle,
     /// The pivot the arm swings on: how far behind the fence, and how high.
     pub pivot: (Length, Length),
     /// How far the blade's center is from the pivot.
@@ -218,10 +226,20 @@ impl MiterSaw {
                 kerf: Blade::FULL_KERF,
             },
             capacity: Length::from_inch_fraction(15, 2),
+            miter: Angle::ZERO,
+            max_miter: Angle::from_degrees(50),
             pivot: (Length::from_inches(4), Length::from_inches(6)),
             arm: Length::from_inches(8),
             stroke: (Length::from_inch_fraction(9, 2), -Length::from_inches(3)),
         }
+    }
+
+    /// The widest board the blade can cut across at its miter angle, to the 64th below: at an
+    /// angle, it reaches less far out from the fence.
+    pub fn widest(&self) -> Length {
+        let sixty_fourth = Length::from_inch_fraction(1, 64).as_nm();
+        let reach = self.capacity.as_nm() as f64 * self.miter.radians().cos();
+        Length::from_nm((reach / sixty_fourth as f64).floor() as i64 * sixty_fourth)
     }
 
     /// Where the blade's center is when its lowest point is `bottom` high: how far out in
@@ -238,8 +256,14 @@ impl MiterSaw {
     /// two. Stopped short, by hand or by a depth stop, it leaves a scar shaped like the blade's
     /// circle: deepest under the blade's center and shallower toward the fence and the front.
     ///
+    /// The stop touches the board where it reaches furthest toward it: the long point, if that
+    /// end is mitered. Along the fence, the piece against the stop comes out exactly `length`
+    /// long whatever the miter angle.
+    ///
     /// The blade's center swings along an arc on the way down; within the board, the circle at
     /// its lowest takes all the wood the higher ones did, so the scar is that one circle.
+    ///
+    /// Panics if the miter is past `max_miter`.
     pub fn chop(
         &self,
         board: &Board,
@@ -247,15 +271,22 @@ impl MiterSaw {
         length: Length,
         bottom: Length,
     ) -> Result<Pass, CutError> {
+        assert!(
+            self.miter.abs() <= self.max_miter,
+            "the table turns {} either way, not {}",
+            self.max_miter,
+            self.miter
+        );
         let (across, across_backward) = lie.across();
         let span = across.of(board);
-        if span > self.capacity {
+        let widest = self.widest();
+        if span > widest {
             return Err(CutError::TooWide {
                 width: span,
-                capacity: self.capacity,
+                capacity: widest,
             });
         }
-        let (along, along_backward) = lie.along();
+        let (along, _) = lie.along();
         let total = along.of(board);
         if length <= Length::ZERO {
             return Err(CutError::NonPositiveSetting(length));
@@ -266,26 +297,31 @@ impl MiterSaw {
                 available: total,
             });
         }
-        // Along the fence, the blade is `length` from the stop at the board's far end.
-        let slot = (total - length - self.blade.kerf, total - length);
-        let (near, far) = Orientation::onto_board(slot, total, along_backward);
-        // Across the saw, the board reaches out from the fence to its front edge.
+        // The blade's stop-side face crosses the fence `length` from the stop, at the board's
+        // far end, and swings out from there at the miter angle. The blade's center is out in
+        // front of the fence along it.
+        let (cos, sin) = self.miter.unit();
+        let toward_stop = lie.direction_onto_board(sin, cos);
+        let outward = lie.direction_onto_board(-cos, sin);
+        let (l, w) = lie.point_onto_board(board, span, total - length);
+        let at = |direction: Direction| Length::from_nm(direction.dot(l, w) as i64);
+        let face = at(toward_stop);
+        let kerf_width = scaled(self.blade.kerf, toward_stop);
         let (out, height) = self.center(bottom);
-        let (at, _) = Orientation::onto_board((span - out, span - out), span, across_backward);
-        let kerf = Kerf {
-            across: along,
-            near,
-            far,
-            radius: self.blade.radius(),
-            center: if lie.is_flipped() {
+        let middle = at(outward) + scaled(out, outward);
+        let kerf = Kerf::new(
+            toward_stop,
+            (face - kerf_width, face),
+            outward,
+            (middle, middle),
+            self.blade.radius(),
+            if lie.is_flipped() {
                 board.thickness() - height
             } else {
                 height
             },
-            start: at,
-            end: at,
-        };
-        if !kerf.touches(board.length(), board.width(), board.thickness()) {
+        );
+        if !board.touched_by(&kerf) {
             return Ok(Pass::Missed);
         }
         let kerfed = board.with_kerf(kerf);
@@ -295,16 +331,20 @@ impl MiterSaw {
         {
             return Ok(Pass::Kerfed(kerfed));
         }
+        // Along the fence, a slanted kerf is wider than the blade.
+        let along_fence = Length::from_nm(
+            (self.blade.kerf.as_nm() as f64 / self.miter.radians().cos()).round() as i64,
+        );
+        let slot = (total - length - along_fence, total - length);
         let waste = slot.1.min(total) - slot.0.max(Length::ZERO);
         let toward_fence = |piece: &Piece| on_table(piece, across, span, across_backward).1;
-        let toward_stop =
-            |piece: &Piece| past_middle(on_table(piece, along, total, along_backward), slot);
-        Ok(Pass::Cut(sort_out(
-            pieces,
-            toward_stop,
-            toward_fence,
-            waste,
-        )))
+        // Each piece is wholly on one side of the slot, so any corner of it says which.
+        let slot_middle = 2 * face.as_nm() as i128 - kerf_width.as_nm() as i128;
+        let measured = |piece: &Piece| {
+            let (l, w) = piece.board.face()[0].corners()[0];
+            2 * toward_stop.dot(piece.l + l, piece.w + w) > slot_middle
+        };
+        Ok(Pass::Cut(sort_out(pieces, measured, toward_fence, waste)))
     }
 
     /// Brings the blade all the way down on `board`, crosscutting it so the measured piece
@@ -317,6 +357,11 @@ impl MiterSaw {
     ) -> Result<Pass, CutError> {
         self.chop(board, lie, length, self.stroke.1)
     }
+}
+
+/// `length` times the scale of `direction`, as positions along it are measured.
+fn scaled(length: Length, direction: Direction) -> Length {
+    Length::from_nm((length.as_nm() as f64 * direction.scale()).round() as i64)
 }
 
 /// Where `piece` reaches on one of the saw's axes, measured from the near side of a board
@@ -332,7 +377,9 @@ fn past_middle((from, to): (Length, Length), slot: (Length, Length)) -> bool {
 }
 
 /// Sorts the pieces of a board the blade cut apart: the measured piece is the biggest on the
-/// measured side of the slot, the offcut the biggest on the other, and any more are loose.
+/// measured side of the slot, the offcut the biggest on the other, and any more are loose. If
+/// no wood is on the measured side, the blade only trimmed the board: the biggest piece is
+/// the piece, and there's no offcut.
 fn sort_out(
     pieces: Vec<Piece>,
     measured: impl Fn(&Piece) -> bool,
@@ -340,8 +387,10 @@ fn sort_out(
     waste: Length,
 ) -> Cut {
     let (mut near, mut far): (Vec<Piece>, Vec<Piece>) = pieces.into_iter().partition(measured);
-    let piece = take_biggest(&mut near, toward_fence)
-        .expect("the wood beside the fence or stop is never in the blade's path");
+    if near.is_empty() {
+        std::mem::swap(&mut near, &mut far);
+    }
+    let piece = take_biggest(&mut near, toward_fence).expect("a cut leaves some wood");
     let offcut = take_biggest(&mut far, toward_fence);
     near.append(&mut far);
     Cut {
