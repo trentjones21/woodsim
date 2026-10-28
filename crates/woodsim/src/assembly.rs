@@ -204,6 +204,46 @@ impl Assembly {
         })
     }
 
+    /// The ways `board` can go against `onto`, a member's surface, best first: which of its
+    /// surfaces, and which way that surface turns to face (as `place` counts them). Best is
+    /// facing most nearly, then the surface most nearly the same size, then keeping the board
+    /// face up like the member: a frame piece's miter against the next one's, a board's bottom
+    /// flat on another's top.
+    pub fn ways(&self, board: &Board, onto: (usize, Surface)) -> Vec<(Surface, usize)> {
+        let Some(target) = self.members.get(onto.0) else {
+            return Vec::new();
+        };
+        let Some(theirs) = target.patch(onto.1) else {
+            return Vec::new();
+        };
+        let up = target.turn.apply([0, 0, 1]);
+        let their_size = size(&theirs, target.turn, onto.1);
+        let mut ways: Vec<((i64, i64, bool), Surface, usize)> = Vec::new();
+        for surface in surfaces(board) {
+            let Some(mine) = patch(board, surface) else {
+                continue;
+            };
+            let my_size = size(&mine, Turn::NONE, surface);
+            let alike = (their_size.min(my_size) / their_size.max(my_size) * 1e6).round() as i64;
+            for (way, turn) in ways_to_face(mine.normal, theirs.normal, target.turn)
+                .into_iter()
+                .enumerate()
+            {
+                let how = facing(turn.apply(mine.normal), theirs.normal);
+                let rank = (
+                    -(how * 1e9).round() as i64,
+                    -alike,
+                    turn.apply([0, 0, 1]) != up,
+                );
+                ways.push((rank, surface, way));
+            }
+        }
+        ways.sort_by_key(|(rank, ..)| *rank);
+        ways.into_iter()
+            .map(|(_, surface, way)| (surface, way))
+            .collect()
+    }
+
     /// Adds `member`, put against another's surface as `place` worked out, held by
     /// `fastener`.
     pub fn join(
@@ -402,6 +442,22 @@ fn in_plane(normal: Vector, turn: Turn, surface: Surface) -> (Vector, Vector) {
         }
         Surface::Bottom | Surface::Top => (turn.apply([1, 0, 0]), turn.apply([0, 1, 0])),
     }
+}
+
+/// How big a surface on a member turned `turn` is: its extent along one direction across it
+/// times the other.
+fn size(patch: &Patch, turn: Turn, surface: Surface) -> f64 {
+    let (u, v) = in_plane(patch.normal, turn, surface);
+    let extent = |along: Vector| {
+        let values: Vec<f64> = patch
+            .corners
+            .iter()
+            .map(|&p| dot(along, p) as f64 / length(along))
+            .collect();
+        values.iter().copied().fold(f64::MIN, f64::max)
+            - values.iter().copied().fold(f64::MAX, f64::min)
+    };
+    extent(u) * extent(v)
 }
 
 /// How far apart `b` is from `a`, along `a`'s normal, at the corners of where they overlap

@@ -10,7 +10,7 @@ use bevy::{
     camera::Exposure,
     core_pipeline::tonemapping::Tonemapping,
     diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin},
-    ecs::system::EntityCommands,
+    ecs::system::{EntityCommands, SystemParam},
     input::{
         gestures::PinchGesture,
         mouse::{AccumulatedMouseScroll, MouseScrollUnit},
@@ -28,6 +28,7 @@ use crate::{
     bench,
     chop::MiterSawStation,
     feed::TableSawStation,
+    hand::{self, Gesture, Hand, set_down},
     join::BenchStation,
     meshes::{lumber_mesh, rounded_box},
     miter_saw,
@@ -167,7 +168,10 @@ pub enum ShopView {
 
 pub const OVERVIEW_HELP: &str = "W/A/S/D or arrows: pan   Drag the floor: pan   \
                                  Scroll or pinch: zoom   Q/E: rotate\n\
-                                 Click a saw to work at it   Tab: go to the table saw";
+                                 Click a station to work at it   Tab: go to the table saw\n\
+                                 Click a board to pick it up; new ones are on the lumber rack\n\
+                                 Holding one: click a station or the pile to set it down \
+                                 there, or the scrap bin to throw it away";
 
 /// The floor runs this far from the middle of the shop in each direction, in meters.
 pub const SHOP_HALF_SIZE: f32 = 3.0;
@@ -202,10 +206,10 @@ struct OverviewCamera {
 impl Default for OverviewCamera {
     fn default() -> OverviewCamera {
         OverviewCamera {
-            // Between the two saws.
-            focus: Vec3::new(-0.4, 0.5, -0.4),
+            // Between the saws and the workbench.
+            focus: Vec3::new(0.0, 0.5, 0.1),
             yaw: 30.0 * PI / 180.0,
-            distance: 7.6,
+            distance: 8.0,
         }
     }
 }
@@ -258,6 +262,8 @@ enum ReadoutLine {
     CutList,
     /// Frame rate and frame time, so performance can be checked while playing.
     Fps,
+    /// The board in hand.
+    Hand,
 }
 
 /// Textures and materials more than one part of the shop uses.
@@ -411,11 +417,43 @@ pub fn station_part(mut entity: EntityCommands, station: ShopView) {
                 }
             },
         )
-        .observe(move |click: On<PointerClick>, mut view: ResMut<ShopView>| {
-            if click.button == PointerButton::Primary && *view != station {
-                *view = station;
+        .observe(move |click: On<PointerClick>, mut stations: Stations| {
+            if click.button != PointerButton::Primary || stations.gesture.dragged() {
+                return;
+            }
+            // Holding a board, a click on a station sets it down there.
+            if stations.hand.0.is_some() {
+                stations.set_down(station);
+            }
+            if *stations.view != station {
+                *stations.view = station;
             }
         });
+}
+
+/// Everything a click on a station can change: where the camera is, what's in hand, and the
+/// stations a board can be set down at.
+#[derive(SystemParam)]
+pub struct Stations<'w> {
+    pub view: ResMut<'w, ShopView>,
+    pub gesture: Res<'w, Gesture>,
+    pub hand: ResMut<'w, Hand>,
+    pub table_saw: ResMut<'w, TableSawStation>,
+    pub miter_saw: ResMut<'w, MiterSawStation>,
+    pub bench: ResMut<'w, BenchStation>,
+}
+
+impl Stations<'_> {
+    /// Sets the board in hand down at `station`, as `hand::set_down` does.
+    pub fn set_down(&mut self, station: ShopView) -> bool {
+        set_down(
+            station,
+            &mut self.hand,
+            &mut self.table_saw,
+            &mut self.miter_saw,
+            &mut self.bench,
+        )
+    }
 }
 
 /// Esc backs out to the overview; Tab goes around the stations: the table saw, the miter saw,
@@ -601,6 +639,19 @@ fn spawn_readout(mut commands: Commands) {
             Node {
                 bottom: px(16),
                 right: px(16),
+                ..panel.clone()
+            },
+        ),
+        // What's in hand, above the frame rate, while there's anything.
+        (
+            ReadoutLine::Hand,
+            18.0,
+            Color::srgb(0.88, 0.38, 0.1),
+            Node {
+                bottom: px(64),
+                right: px(16),
+                max_width: vw(36),
+                display: Display::None,
                 ..panel
             },
         ),
@@ -631,13 +682,15 @@ fn update_readout(
     table_saw: Res<TableSawStation>,
     miter_saw: Res<MiterSawStation>,
     bench: Res<BenchStation>,
+    hand: Res<Hand>,
     mut lines: Query<(&ReadoutLine, &mut Text, &mut Node)>,
 ) {
     if !(view.is_changed()
         || hovered.is_changed()
         || table_saw.is_changed()
         || miter_saw.is_changed()
-        || bench.is_changed())
+        || bench.is_changed()
+        || hand.is_changed())
     {
         return;
     }
@@ -647,11 +700,15 @@ fn update_readout(
                 "Fence: {}   Length: {}",
                 table_saw.saw.fence, miter_saw.stop
             ),
-            match hovered.station {
-                Some(ShopView::TableSaw) => "Click to work at the table saw.",
-                Some(ShopView::MiterSaw) => "Click to work at the miter saw.",
-                Some(ShopView::Bench) => "Click to work at the workbench.",
-                _ => "Click a saw to work at it.",
+            match (hovered.station, hand.0.is_some()) {
+                (Some(ShopView::TableSaw), false) => "Click to work at the table saw.",
+                (Some(ShopView::MiterSaw), false) => "Click to work at the miter saw.",
+                (Some(ShopView::Bench), false) => "Click to work at the workbench.",
+                (Some(ShopView::TableSaw), true) => "Click to set it down on the table saw.",
+                (Some(ShopView::MiterSaw), true) => "Click to set it down on the miter saw.",
+                (Some(ShopView::Bench), true) => "Click to set it down at the workbench.",
+                (_, true) => "Click a station, the pile, or the scrap bin to set it down.",
+                _ => "Click a station to work at it, or a board to pick it up.",
             }
             .to_string(),
             OVERVIEW_HELP,
@@ -682,24 +739,24 @@ fn update_readout(
         ),
         ShopView::Bench => (
             bench::reading(&bench),
-            bench.status(miter_saw.parts.len()),
+            bench.status(hand.0.as_ref()),
             bench::HELP,
         ),
     };
     for (line, mut text, mut node) in &mut lines {
-        // At the bench, the pile's parts are listed to click instead of the cut list.
-        if let ReadoutLine::CutList = line {
-            node.display = if *view == ShopView::Bench {
-                Display::None
-            } else {
-                Display::Flex
-            };
-        }
         text.0 = match line {
             ReadoutLine::Reading => reading.clone(),
             ReadoutLine::Status => status.clone(),
             ReadoutLine::Help => help.to_string(),
             ReadoutLine::CutList => miter_saw.cut_list(),
+            ReadoutLine::Hand => {
+                node.display = if hand.0.is_some() {
+                    Display::Flex
+                } else {
+                    Display::None
+                };
+                hand::describe(&hand)
+            }
             ReadoutLine::Fps => continue,
         };
     }

@@ -286,9 +286,9 @@ impl TableSawStation {
         }
     }
 
-    /// Puts a fresh 1x8 against the fence. Whatever was on the saw goes in the scrap bin.
-    pub fn new_board(&mut self) {
-        self.load(new_stock());
+    /// Whether a board can be set down on the saw: not while one is at the blade.
+    pub fn can_load(&self) -> bool {
+        !self.at_blade()
     }
 
     /// Puts `board` against the fence, unturned and ready to rip, and hands back whatever was on
@@ -413,7 +413,9 @@ impl TableSawStation {
     /// One line describing what's on the saw.
     pub fn status(&self) -> String {
         if self.on_saw().is_none() {
-            return "Nothing on the saw. Press R for a new board.".to_string();
+            return "Nothing on the saw. Take a board off the lumber rack and click the saw to set \
+                    it here."
+                .to_string();
         }
         let verb = match self.lie.across().0 {
             Axis::Width => "Ripped",
@@ -661,7 +663,7 @@ mod tests {
         assert_eq!(station.boards(), SawBoards::default());
         assert_eq!(
             station.status(),
-            "Nothing on the saw. Press R for a new board."
+            "Nothing on the saw. Take a board off the lumber rack and click the saw to set it here."
         );
     }
 
@@ -798,15 +800,24 @@ mod tests {
     }
 
     #[test]
-    fn new_board_clears_the_saw() {
+    fn setting_a_board_down_clears_the_saw() {
         let mut station = TableSawStation::default();
         push_through(&mut station);
         station.take(Part::Piece);
-        station.new_board();
+        // The offcut left on the saw comes back, for the pile.
+        assert_eq!(station.load(new_stock()).len(), 1);
 
         assert!(station.pass.is_none());
         assert!(station.boards().whole.is_some());
         assert!(station.taken.is_empty());
+    }
+
+    #[test]
+    fn no_board_goes_down_while_one_is_at_the_blade() {
+        let mut station = TableSawStation::default();
+        assert!(station.can_load());
+        push_to(&mut station, 6);
+        assert!(!station.can_load());
     }
 
     /// A 3/4" x 6" x 12" piece, as if carried over from the miter saw.

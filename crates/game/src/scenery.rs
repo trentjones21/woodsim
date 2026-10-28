@@ -8,12 +8,15 @@ use bevy::{
     ecs::system::EntityCommands,
     light::{CascadeShadowConfigBuilder, DirectionalLightShadowMap, NotShadowCaster},
     math::Affine2,
+    picking::pointer::PointerButton,
     prelude::*,
 };
+use woodsim::Length;
 
 use crate::{
+    hand::{Gesture, Hand, from_rack},
     meshes::{Grain, board_mesh, rounded_box},
-    shop::{SHOP_HALF_SIZE, ShopAssets, ShopView},
+    shop::{SHOP_HALF_SIZE, ShopAssets, ShopView, set_material_on},
     textures::{self, GRASS_TILE, PEGBOARD_TILE},
 };
 
@@ -682,13 +685,21 @@ fn spawn_furnishings(
             let z0 = -0.75 - length / 2.0 + 0.1 * (i % 2) as f32;
             let size = Vec3::new(width, thickness, length);
             let shift = Vec3::new(0.13 * (level * 5 + i) as f32, 0.0, 0.41 * i as f32);
-            commands.spawn((
-                Mesh3d(meshes.add(board_mesh(size, shift, Grain::Z))),
-                MeshMaterial3d(shop.wood.clone()),
-                Transform::from_xyz(x, arm_top, z0),
-                OnWall(WallSide::Left),
-                Pickable::IGNORE,
-            ));
+            let inches = |n: f32| Length::from_inch_fraction((n * 4.0).round() as i64, 4);
+            commands
+                .spawn((
+                    Mesh3d(meshes.add(board_mesh(size, shift, Grain::Z))),
+                    MeshMaterial3d(shop.wood.clone()),
+                    Transform::from_xyz(x, arm_top, z0),
+                    OnWall(WallSide::Left),
+                    RackBoard {
+                        width: inches(width / 0.0254),
+                        thickness: inches(thickness / 0.0254),
+                    },
+                ))
+                .observe(highlight_rack_board)
+                .observe(set_material_on::<PointerOut>(shop.wood.clone()))
+                .observe(take_from_rack);
             x += width + 0.008;
             if x > wall + arm_reach - 0.06 {
                 break;
@@ -802,12 +813,17 @@ fn spawn_furnishings(
 
     // A scrap bin by the table saw, with offcuts sticking out of it.
     let bin = Vec3::new(1.3, 0.0, 0.05);
-    commands.spawn((
-        Mesh3d(meshes.add(Cylinder::new(0.2, 0.6))),
-        MeshMaterial3d(green),
-        Transform::from_translation(bin + Vec3::Y * 0.3),
-        Pickable::IGNORE,
-    ));
+    let green_hover = paint(&mut materials, Color::srgb(0.5, 0.86, 0.52));
+    commands
+        .spawn((
+            Mesh3d(meshes.add(Cylinder::new(0.2, 0.6))),
+            MeshMaterial3d(green.clone()),
+            Transform::from_translation(bin + Vec3::Y * 0.3),
+            ScrapBin { hover: green_hover },
+        ))
+        .observe(highlight_bin)
+        .observe(set_material_on::<PointerOut>(green))
+        .observe(throw_away);
     for (i, (lean, turn, length, width)) in [
         (0.25, 0.3, 0.55, 0.06),
         (-0.2, 1.4, 0.48, 0.09),
@@ -831,5 +847,70 @@ fn spawn_furnishings(
             ),
             Pickable::IGNORE,
         ));
+    }
+}
+
+/// A board on the lumber rack: click it with empty hands to take a new board that size.
+#[derive(Component)]
+struct RackBoard {
+    width: Length,
+    thickness: Length,
+}
+
+/// The scrap bin: click it holding a board to throw the board away.
+#[derive(Component)]
+struct ScrapBin {
+    hover: Handle<StandardMaterial>,
+}
+
+/// Lights up a board on the rack under the pointer when a click would take one.
+fn highlight_rack_board(
+    over: On<PointerOver>,
+    hand: Res<Hand>,
+    shop: Res<ShopAssets>,
+    mut materials: Query<&mut MeshMaterial3d<StandardMaterial>>,
+) {
+    if hand.0.is_none()
+        && let Ok(mut material) = materials.get_mut(over.entity)
+    {
+        material.0 = shop.wood_highlight.clone();
+    }
+}
+
+fn take_from_rack(
+    click: On<PointerClick>,
+    boards: Query<&RackBoard>,
+    gesture: Res<Gesture>,
+    shop: Res<ShopAssets>,
+    mut materials: Query<&mut MeshMaterial3d<StandardMaterial>>,
+    mut hand: ResMut<Hand>,
+) {
+    if click.button != PointerButton::Primary || gesture.dragged() || hand.0.is_some() {
+        return;
+    }
+    if let Ok(board) = boards.get(click.entity) {
+        hand.0 = Some(from_rack(board.width, board.thickness));
+        if let Ok(mut material) = materials.get_mut(click.entity) {
+            material.0 = shop.wood.clone();
+        }
+    }
+}
+
+/// Lights up the scrap bin under the pointer when there's a board in hand to throw in it.
+fn highlight_bin(
+    over: On<PointerOver>,
+    hand: Res<Hand>,
+    mut bins: Query<(&ScrapBin, &mut MeshMaterial3d<StandardMaterial>)>,
+) {
+    if hand.0.is_some()
+        && let Ok((bin, mut material)) = bins.get_mut(over.entity)
+    {
+        material.0 = bin.hover.clone();
+    }
+}
+
+fn throw_away(click: On<PointerClick>, gesture: Res<Gesture>, mut hand: ResMut<Hand>) {
+    if click.button == PointerButton::Primary && !gesture.dragged() {
+        hand.0 = None;
     }
 }

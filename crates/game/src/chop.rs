@@ -15,7 +15,7 @@ use bevy::prelude::*;
 use woodsim::{Angle, Board, Cut, CutError, Length, MiterSaw, Orientation, Pass};
 
 use crate::shop::{
-    Part, Placed, SawBoards, degrees, describe_board, describe_cut, describe_kerf, inches,
+    Block, Part, Placed, SawBoards, degrees, describe_board, describe_cut, describe_kerf, inches,
 };
 
 pub const STOP_MIN: Length = Length::from_inch_fraction(1, 16);
@@ -31,9 +31,14 @@ pub const MITER_STOPS: [Angle; 5] = [
     Angle::from_degrees(45),
 ];
 
-/// The parts pile is stacked flat behind the fence, starting near the bench's left end.
+/// The parts pile is stacked flat behind the fence, starting near the bench's left end, on a
+/// tray (in the station's coordinates).
 const PILE_LEFT: f32 = inches(-38.0);
 const PILE_FRONT: f32 = inches(-1.25);
+pub const PILE_TRAY: Block = Block {
+    min: Vec3::new(inches(-39.0), inches(-0.05), inches(-10.0)),
+    max: Vec3::new(inches(-12.0), inches(0.25), inches(-1.1)),
+};
 /// A sliver of space between stacked parts so each one reads as its own board.
 const PILE_GAP: f32 = inches(1.0 / 16.0);
 
@@ -258,6 +263,11 @@ impl MiterSawStation {
         }
     }
 
+    /// Whether a board can be set down on the saw: only with the blade up.
+    pub fn can_load(&self) -> bool {
+        self.blade_up()
+    }
+
     /// Whether `part` is on the saw and can be handled: only with the blade up.
     pub fn can_take(&self, part: Part) -> bool {
         self.blade_up()
@@ -286,55 +296,6 @@ impl MiterSawStation {
                 Some(taken.board)
             }
         }
-    }
-
-    /// Slides one side of the last cut back against the stop for another cut, and sets the other
-    /// side aside. Returns false if there's no such piece or the blade is down.
-    pub fn pick_up(&mut self, part: Part) -> bool {
-        if !self.blade_up() {
-            return false;
-        }
-        let Work::Cut { cut, .. } = &self.work else {
-            return false;
-        };
-        let (picked, other) = match (part, &cut.offcut) {
-            (Part::Piece, offcut) => (&cut.piece, offcut.as_ref()),
-            (Part::Offcut, Some(offcut)) => (offcut, Some(&cut.piece)),
-            _ => return false,
-        };
-        let picked = picked.board.clone();
-        self.parts.extend(other.map(|piece| piece.board.clone()));
-        self.work = Work::Ready {
-            board: picked,
-            missed: None,
-            scarred: None,
-        };
-        true
-    }
-
-    /// Sets everything on the saw aside on the parts pile. Returns false if the blade is down.
-    pub fn set_aside(&mut self) -> bool {
-        if !self.blade_up() {
-            return false;
-        }
-        self.clear_saw();
-        true
-    }
-
-    /// Whether parts can come off the pile: only with the blade up.
-    pub fn can_take_from_pile(&self) -> bool {
-        self.blade_up()
-    }
-
-    /// Puts the part at `index` on the pile back against the stop, setting aside whatever was on
-    /// the saw. Returns false if there's no such part or the blade is down.
-    pub fn take_from_pile(&mut self, index: usize) -> bool {
-        if !self.can_take_from_pile() || index >= self.parts.len() {
-            return false;
-        }
-        let board = self.parts.remove(index);
-        self.load(board);
-        true
     }
 
     /// Lifts the part at `index` off the pile to carry it elsewhere.
@@ -395,7 +356,7 @@ impl MiterSawStation {
     /// with their length along the fence. The grain shifts from part to part, so they don't
     /// all look like copies of each other.
     pub fn pile(&self) -> Vec<Placed> {
-        let mut bottom = 0.0;
+        let mut bottom = PILE_TRAY.max.y;
         self.parts
             .iter()
             .enumerate()
@@ -467,12 +428,9 @@ impl MiterSawStation {
     /// One line describing what's on the saw.
     pub fn status(&self) -> String {
         match &self.work {
-            Work::Empty if self.parts.is_empty() => {
-                "Nothing on the saw yet. Rip a board at the table saw and carry a piece over."
-                    .to_string()
-            }
             Work::Empty => {
-                "Nothing on the saw. Carry another piece over from the table saw.".to_string()
+                "Nothing on the saw. Pick up a board and click the saw to set it against the stop."
+                    .to_string()
             }
             Work::Ready {
                 missed: Some(error),
@@ -618,10 +576,11 @@ mod tests {
     }
 
     #[test]
-    fn picking_up_one_side_puts_it_against_the_stop_and_sets_the_other_aside() {
+    fn one_side_taken_and_set_back_down_goes_against_the_stop() {
         let mut station = loaded();
         chop(&mut station);
-        assert!(station.pick_up(Part::Offcut));
+        let offcut = station.take(Part::Offcut).unwrap();
+        station.load(offcut);
 
         let (start, end) = x_span(&station.boards().whole.unwrap());
         assert_close(end, inches(12.0));
@@ -635,9 +594,8 @@ mod tests {
         let mut station = loaded();
         station.lower(1.0);
         assert!(!station.can_take(Part::Piece));
-        assert!(!station.pick_up(Part::Piece));
+        assert!(!station.can_load());
         assert_eq!(station.take(Part::Piece), None);
-        assert!(!station.set_aside());
         assert!(station.parts.is_empty());
         assert!(matches!(station.work, Work::Cut { .. }));
     }
@@ -666,8 +624,8 @@ mod tests {
 
     #[test]
     fn parts_can_be_lifted_off_the_pile() {
-        let mut station = loaded();
-        station.set_aside();
+        let mut station = MiterSawStation::default();
+        station.parts.push(ripped_piece());
 
         assert_eq!(station.remove_from_pile(1), None);
         assert_eq!(station.remove_from_pile(0), Some(ripped_piece()));
@@ -680,10 +638,12 @@ mod tests {
         station.set_stop(Length::from_inches(6));
         for _ in 0..2 {
             chop(&mut station);
-            assert!(station.pick_up(Part::Offcut));
+            let offcut = station.take(Part::Offcut).unwrap();
+            station.load(offcut);
         }
         chop(&mut station);
-        assert!(station.set_aside());
+        let last = station.take(Part::Piece).unwrap();
+        station.parts.push(last);
 
         assert!(matches!(station.work, Work::Empty));
         // Three 6" parts, what's left, and three kerfs add back up to the 24" board.
@@ -714,7 +674,8 @@ mod tests {
     fn pile_stacks_parts_behind_the_fence() {
         let mut station = loaded();
         chop(&mut station);
-        station.set_aside();
+        let piece = station.take(Part::Piece).unwrap();
+        station.parts.push(piece);
         let pile = station.pile();
 
         assert_eq!(pile.len(), 2);
@@ -724,36 +685,12 @@ mod tests {
             // Behind the fence, which is at x = 0.
             assert_close(near.x, -PILE_FRONT);
         }
-        assert_close(pile[0].bounds().0.y, 0.0);
-        assert_close(pile[1].bounds().0.y, inches(0.75) + PILE_GAP);
-    }
-
-    #[test]
-    fn taking_a_part_off_the_pile_swaps_it_with_whatever_is_on_the_saw() {
-        let mut station = loaded();
-        chop(&mut station);
-        station.set_aside();
-        station.load(ripped_piece());
-        // The pile is now the 12" piece, then the 11-7/8" offcut; the 24" board is on the saw.
-
-        assert!(station.take_from_pile(1));
-        let Work::Ready { board, .. } = &station.work else {
-            panic!("the offcut should be against the stop");
-        };
-        assert_eq!(board.length(), Length::from_inch_fraction(95, 8));
-        let lengths: Vec<Length> = station.parts.iter().map(Board::length).collect();
-        assert_eq!(lengths, [Length::from_inches(12), Length::from_inches(24)]);
-    }
-
-    #[test]
-    fn nothing_comes_off_the_pile_with_the_blade_down_or_past_its_end() {
-        let mut station = loaded();
-        station.set_aside();
-        assert!(!station.take_from_pile(1));
-
-        station.lower(0.5);
-        assert!(!station.take_from_pile(0));
-        assert_eq!(station.parts.len(), 1);
+        // On the tray.
+        assert_close(pile[0].bounds().0.y, PILE_TRAY.max.y);
+        assert_close(
+            pile[1].bounds().0.y,
+            PILE_TRAY.max.y + inches(0.75) + PILE_GAP,
+        );
     }
 
     /// A 1x8 off the table saw with a stopped cut 6" from its fence edge, slotted through for

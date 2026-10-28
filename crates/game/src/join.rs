@@ -7,28 +7,21 @@
 use bevy::prelude::*;
 use woodsim::{Assembly, Board, Contact, Corner, Fastener, Length, Member, Surface, surfaces};
 
-use crate::shop::describe_size;
-
 #[derive(Resource)]
 pub struct BenchStation {
     /// The parts put together so far, if any.
     pub assembly: Option<Assembly>,
-    /// A part brought over to go on the assembly.
-    pub held: Option<Board>,
-    /// The surface of the held part to put against the assembly, once picked.
-    pub picked: Option<Surface>,
     pub fastener: Fastener,
     /// How the last part went on.
     last: Option<Placing>,
 }
 
-/// How a part went onto the assembly: which of its surfaces against which member's, turned
-/// the `way`th way that faces, lined up at `corner`.
+/// How a part went onto the assembly: against which member's surface, the `option`th of the
+/// ways it can go there (`Assembly::ways`), lined up at `corner`.
 #[derive(Clone, Copy)]
 struct Placing {
-    surface: Surface,
     onto: (usize, Surface),
-    way: usize,
+    option: usize,
     corner: Corner,
     fastener: Fastener,
 }
@@ -37,8 +30,6 @@ impl Default for BenchStation {
     fn default() -> BenchStation {
         BenchStation {
             assembly: None,
-            held: None,
-            picked: None,
             fastener: Fastener::Glue,
             last: None,
         }
@@ -46,70 +37,49 @@ impl Default for BenchStation {
 }
 
 impl BenchStation {
-    /// Brings `board` to the bench: onto the bare bench to start an assembly, or into hand to
-    /// go on the one there. Hands back a part that was already in hand, for the pile.
-    pub fn bring(&mut self, board: Board) -> Option<Board> {
-        if self.assembly.is_none() {
-            self.assembly = Some(Assembly::of(board));
-            return None;
+    /// Puts `board` down: on the bare bench, to start an assembly, or against `onto`, a member's
+    /// surface, the best way it goes there, held with the chosen fastener. Hands the board back
+    /// if it can't go: on a bench with parts on it already, it needs a surface to go against.
+    pub fn put(&mut self, board: Board, onto: Option<(usize, Surface)>) -> Result<(), Board> {
+        match (&self.assembly, onto) {
+            (None, _) => {
+                self.assembly = Some(Assembly::of(board));
+                self.last = None;
+                Ok(())
+            }
+            (Some(_), None) => Err(board),
+            (Some(_), Some(onto)) => self.place(
+                board,
+                Placing {
+                    onto,
+                    option: 0,
+                    corner: Corner(0),
+                    fastener: self.fastener,
+                },
+            ),
         }
-        self.picked = None;
-        self.held.replace(board)
     }
 
-    /// Picks the surface of the part in hand that goes against the assembly.
-    pub fn pick(&mut self, surface: Surface) -> bool {
-        if self.held.is_none() {
-            return false;
-        }
-        self.picked = Some(surface);
-        true
-    }
-
-    /// Puts the part in hand on the assembly, its picked surface against `onto`, a member's
-    /// surface, held with the chosen fastener. Returns false if there's nothing picked to put
-    /// there, or the two surfaces can't face each other.
-    pub fn join(&mut self, onto: (usize, Surface)) -> bool {
-        let (Some(board), Some(surface)) = (&self.held, self.picked) else {
-            return false;
-        };
-        let placing = Placing {
-            surface,
-            onto,
-            way: 0,
-            corner: Corner(0),
-            fastener: self.fastener,
-        };
-        let board = board.clone();
-        if !self.place(board, placing) {
-            return false;
-        }
-        self.held = None;
-        self.picked = None;
-        true
-    }
-
-    fn place(&mut self, board: Board, placing: Placing) -> bool {
+    fn place(&mut self, board: Board, placing: Placing) -> Result<(), Board> {
         let Some(assembly) = &mut self.assembly else {
-            return false;
+            return Err(board);
         };
-        let Some(member) = assembly.place(
-            &board,
-            placing.surface,
-            placing.onto,
-            placing.way,
-            placing.corner,
-        ) else {
-            return false;
+        let ways = assembly.ways(&board, placing.onto);
+        let Some(&(surface, way)) = ways.get(placing.option % ways.len().max(1)) else {
+            return Err(board);
         };
-        assembly.join(member, placing.surface, placing.onto, placing.fastener);
+        let Some(member) = assembly.place(&board, surface, placing.onto, way, placing.corner)
+        else {
+            return Err(board);
+        };
+        assembly.join(member, surface, placing.onto, placing.fastener);
         self.last = Some(placing);
-        true
+        Ok(())
     }
 
-    /// Puts the last part on again, turned the next way its surface can face.
+    /// Puts the last part on again, the next way it can go against the same surface.
     pub fn turn_last(&mut self) -> bool {
-        self.redo(|placing| placing.way += 1)
+        self.redo(|placing| placing.option += 1)
     }
 
     /// Puts the last part on again, lined up at the next corner of the surface it's against.
@@ -125,46 +95,27 @@ impl BenchStation {
             return false;
         };
         change(&mut placing);
-        self.place(member.board, placing)
+        self.place(member.board, placing).is_ok()
     }
 
-    /// Takes the last part back off into hand, its surface still picked. A part on its own
-    /// comes off the bench into hand.
-    pub fn undo(&mut self) -> Option<Board> {
+    /// Whether `member` is the last part that went on, the one that can come back off.
+    pub fn is_last(&self, member: usize) -> bool {
+        self.assembly
+            .as_ref()
+            .is_some_and(|assembly| member + 1 == assembly.members().len())
+    }
+
+    /// Takes the last part back off the assembly, or the only part off the bench.
+    pub fn take_last(&mut self) -> Option<Board> {
         let assembly = self.assembly.as_mut()?;
-        let board = match assembly.remove_last() {
-            Some(member) => {
-                self.picked = self.last.map(|placing| placing.surface);
-                member.board
-            }
-            None => {
-                let only = assembly.members()[0].board.clone();
-                self.assembly = None;
-                self.picked = None;
-                only
-            }
-        };
         self.last = None;
-        self.held.replace(board)
-    }
-
-    /// Takes everything off the bench, for the pile.
-    pub fn clear(&mut self) -> Vec<Board> {
-        let mut boards: Vec<Board> = self
-            .assembly
-            .take()
-            .map(|assembly| {
-                assembly
-                    .members()
-                    .iter()
-                    .map(|member| member.board.clone())
-                    .collect()
-            })
-            .unwrap_or_default();
-        boards.extend(self.held.take());
-        self.picked = None;
-        self.last = None;
-        boards
+        match assembly.remove_last() {
+            Some(member) => Some(member.board),
+            None => self
+                .assembly
+                .take()
+                .map(|assembly| assembly.members()[0].board.clone()),
+        }
     }
 
     /// How the joints fit: the ones that aren't tight, worst first, or that they all are.
@@ -206,40 +157,45 @@ impl BenchStation {
             .join(" ")
     }
 
-    /// One line describing what's on the bench.
-    pub fn status(&self, parts_on_pile: usize) -> String {
+    /// One line describing what's on the bench, given what's in hand.
+    pub fn status(&self, holding: Option<&Board>) -> String {
         let fit = self.fit();
         let fit = if fit.is_empty() {
             String::new()
         } else {
             format!(" {fit}")
         };
-        match (&self.assembly, &self.held, self.picked) {
-            (None, _, _) if parts_on_pile == 0 => {
-                "Nothing on the bench. Cut some parts at the saws; they go on the pile by the \
-                 miter saw."
+        match (&self.assembly, holding) {
+            (None, None) => {
+                "Nothing on the bench. Pick up a part and click the bench to set it down."
                     .to_string()
             }
-            (None, _, _) => {
-                "Nothing on the bench. Click a part in the list to bring it over.".to_string()
+            (None, Some(_)) => {
+                "Click the bench to set it down and start putting parts together.".to_string()
             }
-            (Some(_), None, _) if self.last.is_none() => {
-                "Bring another part over to put against this one.".to_string()
+            (Some(_), Some(_)) => {
+                "Click where on the others it goes. R tries it another way.".to_string()
             }
-            (Some(assembly), None, _) => format!(
-                "Part {} is on, with {}.{fit}",
-                assembly.members().len(),
-                fastened(self.last.map_or(self.fastener, |placing| placing.fastener))
-            ),
-            (Some(_), Some(board), None) => format!(
-                "Holding a {}. Click the side of it that goes against the others.",
-                describe_size(board)
-            ),
-            (Some(_), Some(board), Some(surface)) => format!(
-                "Holding a {}: its {} goes against the others. Click where.",
-                describe_size(board),
-                name(surface)
-            ),
+            (Some(_), None) if self.last.is_none() => {
+                "Pick up another part and click where it goes on this one.".to_string()
+            }
+            (Some(assembly), None) => {
+                let fastener =
+                    fastened(self.last.map_or(self.fastener, |placing| placing.fastener));
+                match assembly.joints().last() {
+                    Some(joint) => {
+                        let [(onto, theirs), (part, mine)] = joint.between;
+                        format!(
+                            "Part {}'s {} is against part {}'s {}, with {fastener}.{fit}",
+                            part + 1,
+                            name(mine),
+                            onto + 1,
+                            name(theirs)
+                        )
+                    }
+                    None => format!("Part 1 is on the bench.{fit}"),
+                }
+            }
         }
     }
 }
@@ -382,30 +338,35 @@ mod tests {
     }
 
     #[test]
-    fn the_first_part_lands_on_the_bench_and_the_next_in_hand() {
+    fn the_first_part_goes_on_the_bare_bench_and_the_next_against_it() {
         let mut bench = BenchStation::default();
-        assert_eq!(bench.bring(frame_piece()), None);
-        assert!(bench.assembly.is_some() && bench.held.is_none());
-        assert_eq!(bench.bring(frame_piece()), None);
-        assert!(bench.held.is_some());
-        // A third goes into hand and the second comes back for the pile.
-        assert!(bench.bring(frame_piece()).is_some());
+        assert_eq!(bench.put(frame_piece(), None), Ok(()));
+        // With a part on the bench, the next one needs a surface to go against.
+        assert!(bench.put(frame_piece(), None).is_err());
+        let piece = frame_piece();
+        assert_eq!(
+            bench.put(piece.clone(), Some((0, miter(&piece, true)))),
+            Ok(())
+        );
+        assert_eq!(bench.assembly.as_ref().unwrap().members().len(), 2);
     }
 
     #[test]
     fn four_frame_pieces_go_together_tight() {
         let mut bench = BenchStation::default();
         let piece = frame_piece();
-        bench.bring(piece.clone());
+        bench.put(piece.clone(), None).unwrap();
         for last in 0..3 {
-            bench.bring(piece.clone());
-            assert!(bench.pick(miter(&piece, false)));
-            assert!(bench.join((last, miter(&piece, true))));
+            // The piece's matching miter goes against the last one's, face up, by itself.
+            bench
+                .put(piece.clone(), Some((last, miter(&piece, true))))
+                .unwrap();
         }
         assert_eq!(bench.assembly.as_ref().unwrap().members().len(), 4);
         assert_eq!(
-            bench.status(0),
-            "Part 4 is on, with glue. Every joint is tight."
+            bench.status(None),
+            "Part 4's mitered end is against part 3's mitered end, with glue. Every joint is \
+             tight."
         );
     }
 
@@ -413,22 +374,20 @@ mod tests {
     fn the_last_part_can_go_on_another_way_or_come_back_off() {
         let mut bench = BenchStation::default();
         let piece = frame_piece();
-        bench.bring(piece.clone());
-        bench.bring(piece.clone());
-        bench.pick(miter(&piece, false));
-        bench.join((0, miter(&piece, true)));
+        bench.put(piece.clone(), None).unwrap();
+        bench
+            .put(piece.clone(), Some((0, miter(&piece, true))))
+            .unwrap();
         let first = bench.assembly.as_ref().unwrap().members()[1].clone();
         assert!(bench.slide_last());
         assert!(bench.turn_last());
         assert_ne!(bench.assembly.as_ref().unwrap().members()[1], first);
 
-        assert_eq!(bench.undo(), None);
-        assert!(bench.held.is_some());
-        assert_eq!(bench.picked, Some(miter(&piece, false)));
-        assert_eq!(bench.assembly.as_ref().unwrap().members().len(), 1);
-        // Everything comes off for the pile.
-        assert_eq!(bench.clear().len(), 2);
-        assert!(bench.assembly.is_none() && bench.held.is_none());
+        // Only the last part on comes back off, then the one under it.
+        assert!(!bench.is_last(0) && bench.is_last(1));
+        assert_eq!(bench.take_last(), Some(piece.clone()));
+        assert_eq!(bench.take_last(), Some(piece));
+        assert!(bench.assembly.is_none());
     }
 
     #[test]
@@ -459,15 +418,13 @@ mod tests {
             }
             longer
         };
-        bench.bring(piece.clone());
+        bench.put(piece.clone(), None).unwrap();
         for (last, next) in [piece.clone(), long, piece.clone()].into_iter().enumerate() {
-            bench.bring(next.clone());
-            bench.pick(miter(&next, false));
             let onto = miter(
                 &bench.assembly.as_ref().unwrap().members()[last].board,
                 true,
             );
-            assert!(bench.join((last, onto)));
+            bench.put(next, Some((last, onto))).unwrap();
         }
         assert_eq!(bench.fit(), "Part 4 is open 3/64\" where it meets part 1.");
     }

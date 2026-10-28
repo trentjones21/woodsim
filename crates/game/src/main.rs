@@ -3,6 +3,7 @@
 mod bench;
 mod chop;
 mod feed;
+mod hand;
 mod join;
 mod meshes;
 mod miter_saw;
@@ -28,6 +29,7 @@ use bevy::{
 };
 
 use bench::BenchPlugin;
+use hand::HandPlugin;
 use miter_saw::MiterSawPlugin;
 use scenery::ScenePlugin;
 use shop::ShopPlugin;
@@ -87,6 +89,7 @@ fn main() {
         TableSawPlugin,
         MiterSawPlugin,
         BenchPlugin,
+        HandPlugin,
     ));
 
     if let Some(path) = screenshot {

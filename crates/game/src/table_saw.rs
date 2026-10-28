@@ -8,9 +8,10 @@ use woodsim::Length;
 use crate::{
     chop::MiterSawStation,
     feed::TableSawStation,
+    hand::Hand,
     meshes::{Grain, board_mesh, rounded_box},
     shop::{
-        Block, Part, Shape, ShopAssets, ShopView, inches, place_parts, pointer_on_plane,
+        Block, Part, Shape, ShopAssets, ShopView, Stations, inches, place_parts, pointer_on_plane,
         rounded_block, set_material_on, snap, snap_to_sixteenth, station_part,
     },
 };
@@ -31,8 +32,9 @@ pub const HELP: &str = "Left/Right: move the fence or gauge stop 1/16\"   Shift:
                         Up/Down: raise or lower the blade 1/16\"   Shift+Up/Down: 1/4\"\n\
                         Drag the board, or hold Space, to push it   Drag it back to back it out\n\
                         Q/E: turn the board   F: flip it   V: stand it on edge   \
-                        B: bring it back around   R: new board\n\
-                        Right-click a board or press C: carry it to the miter saw\n\
+                        B: bring it back around\n\
+                        Click a board clear of the blade: pick it up   \
+                        Holding one: click the saw to set it here\n\
                         Tab: go to the miter saw   Esc: back to the shop";
 
 /// The cast-iron top, in table space.
@@ -85,8 +87,6 @@ impl Plugin for TableSawPlugin {
                         turn_with_keys,
                         push_board,
                         bring_back_with_key,
-                        new_board,
-                        carry_with_key,
                     )
                         .run_if(resource_equals(ShopView::TableSaw)),
                     set_loose_aside,
@@ -393,7 +393,7 @@ fn spawn_saw(
             ))
             .observe(highlight_carryable)
             .observe(set_material_on::<PointerOut>(wood.clone()))
-            .observe(carry_clicked)
+            .observe(board_clicked)
             .observe(grab_board)
             .observe(drag_board);
     }
@@ -611,75 +611,48 @@ fn set_loose_aside(mut table_saw: ResMut<TableSawStation>, mut miter_saw: ResMut
     }
 }
 
-fn new_board(keys: Res<ButtonInput<KeyCode>>, mut station: ResMut<TableSawStation>) {
-    if keys.just_pressed(KeyCode::KeyR) {
-        station.new_board();
-    }
-}
-
-/// Carries a board off the saw to the miter saw. Up close, the camera follows it; in the
-/// overview, it stays put. Returns false if that board isn't there to take.
-fn carry(
-    part: Part,
-    table_saw: &mut TableSawStation,
-    miter_saw: &mut MiterSawStation,
-    view: &mut ShopView,
-) -> bool {
-    let Some(board) = table_saw.take(part) else {
-        return false;
-    };
-    miter_saw.load(board);
-    if *view != ShopView::Overview {
-        *view = ShopView::MiterSaw;
-    }
-    true
-}
-
-/// C carries the piece cut against the fence, the offcut once that piece is gone, or the board
-/// if it's still in one piece.
-fn carry_with_key(
-    keys: Res<ButtonInput<KeyCode>>,
-    mut table_saw: ResMut<TableSawStation>,
-    mut miter_saw: ResMut<MiterSawStation>,
-    mut view: ResMut<ShopView>,
-) {
-    if keys.just_pressed(KeyCode::KeyC) {
-        for part in [Part::Piece, Part::Offcut, Part::Whole] {
-            if carry(part, &mut table_saw, &mut miter_saw, &mut view) {
-                break;
-            }
-        }
-    }
-}
-
-fn carry_clicked(
+/// With empty hands, a click on a board clear of the blade picks it up; holding one, a click on
+/// the saw's board sets the one in hand down here instead.
+fn board_clicked(
     click: On<PointerClick>,
     parts: Query<&Part>,
     shop: Res<ShopAssets>,
     mut materials: Query<&mut MeshMaterial3d<StandardMaterial>>,
-    mut table_saw: ResMut<TableSawStation>,
-    mut miter_saw: ResMut<MiterSawStation>,
-    mut view: ResMut<ShopView>,
+    mut stations: Stations,
 ) {
-    if click.button == PointerButton::Secondary
-        && let Ok(part) = parts.get(click.entity)
-        && carry(*part, &mut table_saw, &mut miter_saw, &mut view)
-        && let Ok(mut material) = materials.get_mut(click.entity)
-    {
+    if click.button != PointerButton::Primary || stations.gesture.dragged() {
+        return;
+    }
+    let Ok(part) = parts.get(click.entity) else {
+        return;
+    };
+    let handled = if stations.hand.0.is_some() {
+        stations.set_down(ShopView::TableSaw)
+    } else {
+        stations.hand.0 = stations.table_saw.take(*part);
+        stations.hand.0.is_some()
+    };
+    if handled && let Ok(mut material) = materials.get_mut(click.entity) {
         material.0 = shop.wood.clone();
     }
 }
 
-/// Lights up a board under the pointer when it can be carried off.
+/// Lights up a board under the pointer when a click would pick it up, or set the one in hand
+/// down here.
 fn highlight_carryable(
     over: On<PointerOver>,
     station: Res<TableSawStation>,
+    hand: Res<Hand>,
     shop: Res<ShopAssets>,
     parts: Query<&Part>,
     mut materials: Query<&mut MeshMaterial3d<StandardMaterial>>,
 ) {
+    let clickable = |part: Part| match hand.0 {
+        Some(_) => station.can_load(),
+        None => station.can_take(part),
+    };
     if let Ok(part) = parts.get(over.entity)
-        && station.can_take(*part)
+        && clickable(*part)
         && let Ok(mut material) = materials.get_mut(over.entity)
     {
         material.0 = shop.wood_highlight.clone();

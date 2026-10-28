@@ -179,3 +179,24 @@ fn the_last_member_can_come_back_out() {
     assert_eq!(assembly.members().len(), 3);
     assert_eq!(assembly.joints().len(), 2);
 }
+
+#[test]
+fn the_best_way_on_for_a_frame_piece_is_its_matching_miter_face_up() {
+    let piece = frame_piece(inches(10), 4500, 4500);
+    let assembly = Assembly::of(piece.clone());
+    let ways = assembly.ways(&piece, (0, miter(&piece, true)));
+    assert_eq!(ways[0], (miter(&piece, false), 0));
+}
+
+#[test]
+fn the_best_way_on_for_a_board_on_a_board_is_flat() {
+    let board = Board::new(inches(12), inches(4), fraction(3, 4));
+    let assembly = Assembly::of(board.clone());
+    let ways = assembly.ways(&board, (0, Surface::Top));
+    assert_eq!(ways[0].0, Surface::Bottom);
+    // Its ends and edges can go against it too, further down the list.
+    assert!(
+        ways.iter()
+            .any(|(surface, _)| matches!(surface, Surface::Side(_)))
+    );
+}
