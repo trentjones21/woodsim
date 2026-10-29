@@ -42,7 +42,7 @@ fn facing(surface: Surface) -> [f64; 3] {
     match surface {
         Surface::Bottom => [0.0, 0.0, -1.0],
         Surface::Top => [0.0, 0.0, 1.0],
-        Surface::Side(edge) => {
+        Surface::Side(edge) | Surface::Slot(edge) => {
             let v = [edge.out.l as f64, edge.out.w as f64, edge.lean as f64];
             let size = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
             v.map(|c| c / size)

@@ -4,7 +4,7 @@
 //! being chosen (`work::Rest`); this shows it, and turns clicks into picks.
 
 use bevy::{light::NotShadowCaster, picking::backend::HitData, prelude::*};
-use woodsim::{Board, Surface, outline};
+use woodsim::{Board, Surface, exposed};
 
 use crate::{
     bench::sheet,
@@ -188,7 +188,7 @@ fn mark_surfaces(
             .as_ref()
             .is_some_and(|(built, on)| *built == board && *on == surface);
         if !built && let Some(mut sheet_mesh) = meshes.get_mut(&mesh.0) {
-            *sheet_mesh = sheet(&outline(&board, surface));
+            *sheet_mesh = sheet(&exposed(&board, surface));
             shape.0 = Some((board, surface));
         }
         if *visibility != Visibility::Inherited {

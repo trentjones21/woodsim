@@ -4,7 +4,12 @@
 //! across the joint it sits. Where surfaces meet or nearly do, the assembly measures how well:
 //! tight, open, or running into each other.
 
-use crate::{Angle, Board, Length, Orientation, face::Edge, history::next_number};
+use crate::{
+    Angle, Board, Length, Orientation,
+    exposed::{exposed, slot_shapes},
+    face::Edge,
+    history::next_number,
+};
 
 /// Why something can't rest on a saw the way it was asked to (`Assembly::resting`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -138,14 +143,19 @@ pub enum Fastener {
     Screws,
 }
 
-/// A flat surface of a board you could put against another: its bottom or top face, or one of
-/// its sides through the thickness, named by the straight edge of its outline it stands on (an
-/// end, an edge, or a miter).
+/// A flat surface of a board you could put against another: its bottom or top face, one of its
+/// sides through the thickness, named by the straight edge of its outline it stands on (an end,
+/// an edge, or a miter), or a surface a slot left inside its outline.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Surface {
     Bottom,
     Top,
     Side(Edge),
+    /// One of a slot's sides, or its bottom where the blade's teeth ran level, named by the
+    /// plane it's on, with the wood behind it as an `Edge` has it: facing up or down, like a
+    /// groove's bottom, it has no `out` and all `lean`. Slots that share a plane, like the
+    /// strokes of a dado nibbled out, share the surface (`slot_surfaces`).
+    Slot(Edge),
 }
 
 /// A board in an assembly: turned (`rotation` takes its `l`, `w`, and `t` to the assembly's
@@ -527,18 +537,27 @@ impl Assembly {
     /// picks out.
     pub(crate) fn contacts(&self, pair: impl Fn(usize, usize) -> bool) -> Vec<Contact> {
         let mut contacts = Vec::new();
-        for (i, first) in self.members.iter().enumerate() {
-            for (j, second) in self.members.iter().enumerate().skip(i + 1) {
+        // Each member's surfaces, its slots' too, worked out once, for the members `pair` picks.
+        let mut patches: Vec<Option<Vec<(Surface, Patch)>>> =
+            self.members.iter().map(|_| None).collect();
+        for i in 0..self.members.len() {
+            for j in i + 1..self.members.len() {
                 if !pair(i, j) {
                     continue;
                 }
-                for a in surfaces(&first.board) {
-                    for b in surfaces(&second.board) {
-                        if let (Some(pa), Some(pb)) = (first.patch(a), second.patch(b))
-                            && let Some((least, most)) = gap(&pa, &pb)
-                        {
+                for k in [i, j] {
+                    if patches[k].is_none() {
+                        patches[k] = Some(self.members[k].patches());
+                    }
+                }
+                let (Some(first), Some(second)) = (&patches[i], &patches[j]) else {
+                    unreachable!("both were just worked out");
+                };
+                for (a, pa) in first {
+                    for (b, pb) in second {
+                        if let Some((least, most)) = gap(pa, pb) {
                             contacts.push(Contact {
-                                between: [(i, a), (j, b)],
+                                between: [(i, *a), (j, *b)],
                                 least,
                                 most,
                             });
@@ -559,10 +578,28 @@ impl Member {
 
     /// One of the board's surfaces, in the assembly.
     fn patch(&self, surface: Surface) -> Option<Patch> {
-        let local = patch(&self.board, surface)?;
+        Some(self.placed(patch(&self.board, surface)?))
+    }
+
+    /// Every surface of the board, its slots' too, in the assembly.
+    fn patches(&self) -> Vec<(Surface, Patch)> {
+        let outside = surfaces(&self.board)
+            .into_iter()
+            .filter_map(|surface| Some((surface, patch(&self.board, surface)?)));
+        let slots = slot_shapes(&self.board)
+            .into_iter()
+            .filter_map(|(surface, shape)| Some((surface, patch_of(surface, shape)?)));
+        outside
+            .chain(slots)
+            .map(|(surface, local)| (surface, self.placed(local)))
+            .collect()
+    }
+
+    /// `local`, a surface in the board's own axes, where the board is in the assembly.
+    fn placed(&self, local: Patch) -> Patch {
         let at = self.at.map(|length| length.as_nm() as f64);
         let turn = |v| self.rotation.apply(v);
-        Some(Patch {
+        Patch {
             normal: turn(local.normal),
             u: turn(local.u),
             v: turn(local.v),
@@ -574,7 +611,7 @@ impl Member {
                     [p[0] + at[0], p[1] + at[1], p[2] + at[2]]
                 })
                 .collect(),
-        })
+        }
     }
 
     /// Where the point `(l, w, t)` of the board is in the assembly, to the nanometer.
@@ -586,7 +623,8 @@ impl Member {
     }
 }
 
-/// The flat surfaces of `board`: its bottom, its top, and each straight side around its outline.
+/// The flat surfaces of `board`'s outline: its bottom, its top, and each straight side around
+/// it. The surfaces its slots leave inside it are `slot_surfaces`.
 pub fn surfaces(board: &Board) -> Vec<Surface> {
     let edges: Vec<Edge> = board
         .face()
@@ -609,8 +647,18 @@ pub fn surfaces(board: &Board) -> Vec<Surface> {
 
 /// The outline of one of `board`'s surfaces, in its own axes (`l`, `w`, `t`): flat polygons,
 /// each going around counterclockwise seen from outside the board. Empty if it has no such
-/// surface.
+/// surface. A face or a side is outlined as if no slot had touched it, and a slot's surface
+/// (`Surface::Slot`) where it's wood; `exposed` has where any surface is wood.
 pub fn outline(board: &Board, surface: Surface) -> Vec<Vec<[Length; 3]>> {
+    if let Surface::Slot(_) = surface {
+        return exposed(board, surface);
+    }
+    solid_outline(board, surface)
+}
+
+/// The outline of one of the surfaces of `board`'s outline, as if no slot had touched it, as
+/// `outline` has it. Empty for a slot's surface.
+pub(crate) fn solid_outline(board: &Board, surface: Surface) -> Vec<Vec<[Length; 3]>> {
     let thickness = board.thickness();
     if board.face().iter().any(|region| region.leans()) {
         // Leaning sides: each region's face on the surface's plane, wherever it has one.
@@ -641,6 +689,7 @@ pub fn outline(board: &Board, surface: Surface) -> Vec<Vec<[Length; 3]>> {
                 corners
             })
             .collect(),
+        Surface::Slot(_) => Vec::new(),
         Surface::Side(side) => board
             .face()
             .iter()
@@ -672,10 +721,14 @@ struct Patch {
     corners: Vec<[f64; 3]>,
 }
 
-/// One of `board`'s surfaces, in its own axes: `l`, `w`, `t`. Across a face, `u` runs along
-/// the length; across a side, along the side, with `v` up the thickness.
+/// One of `board`'s surfaces, where it's wood (`exposed`), in its own axes: `l`, `w`, `t`.
 fn patch(board: &Board, surface: Surface) -> Option<Patch> {
-    let corners: Vec<[f64; 3]> = outline(board, surface)
+    patch_of(surface, exposed(board, surface))
+}
+
+/// A surface whose wood is `shape`, as `exposed` has it.
+fn patch_of(surface: Surface, shape: Vec<Vec<[Length; 3]>>) -> Option<Patch> {
+    let corners: Vec<[f64; 3]> = shape
         .into_iter()
         .flatten()
         .map(|p| p.map(|length| length.as_nm() as f64))
@@ -683,22 +736,35 @@ fn patch(board: &Board, surface: Surface) -> Option<Patch> {
     if corners.is_empty() {
         return None;
     }
-    let (normal, u, v) = match surface {
-        Surface::Bottom => ([0.0, 0.0, -1.0], [1.0, 0.0, 0.0], [0.0, -1.0, 0.0]),
-        Surface::Top => ([0.0, 0.0, 1.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]),
-        Surface::Side(side) => {
-            // Along the side square to the thickness, and up it, which a leaning side leans.
-            let n = unit([side.out.l as f64, side.out.w as f64, side.lean as f64]);
-            let u = unit([-side.out.w as f64, side.out.l as f64, 0.0]);
-            (n, u, cross(n, u))
-        }
-    };
+    let (normal, u, v) = axes(surface);
     Some(Patch {
         normal,
         u,
         v,
         corners,
     })
+}
+
+/// The way `surface` faces out of the wood, a unit vector, and two directions across it, `u`
+/// and `v`, turning counterclockwise from one to the other seen from outside, in the board's
+/// own axes (`l`, `w`, `t`). Across a face, or anything facing straight up or down, `u` runs
+/// along the length; across a side, along the side square to the thickness, with `v` up it,
+/// leaning as the side leans.
+pub(crate) fn axes(surface: Surface) -> ([f64; 3], [f64; 3], [f64; 3]) {
+    let out = match surface {
+        Surface::Bottom => [0.0, 0.0, -1.0],
+        Surface::Top => [0.0, 0.0, 1.0],
+        Surface::Side(edge) | Surface::Slot(edge) => {
+            [edge.out.l as f64, edge.out.w as f64, edge.lean as f64]
+        }
+    };
+    let n = unit(out);
+    let u = if out[0] == 0.0 && out[1] == 0.0 {
+        [1.0, 0.0, 0.0]
+    } else {
+        unit([-out[1], out[0], 0.0])
+    };
+    (n, u, cross(n, u))
 }
 
 /// The turn that brings `mine` around to face back against `theirs`, the `turn`th of the four

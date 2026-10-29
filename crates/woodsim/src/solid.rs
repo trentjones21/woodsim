@@ -552,6 +552,7 @@ impl Solid<'_> {
             Surface::Bottom => sides,
             Surface::Top => sides + 1,
             Surface::Side(edge) => self.region.edges().iter().position(|&e| e == edge)?,
+            Surface::Slot(_) => return None,
         };
         shape.face(m).then(|| {
             shape

@@ -28,8 +28,8 @@
 //! where its corner was on the board it was cut from, and which side of the cut it was on.
 //! Then either `board`, the piece itself, or a `member` line for each board of a glue-up (which
 //! board, where its corner is, and its turn) and a `joint` line for each joint (each member and
-//! its surface, `top`, `bottom`, or `side` and the side's edge, then the fastener and when it
-//! was fastened). A `saw` line, the saw and how what's on it lies, as a pass has them, says
+//! its surface, `top`, `bottom`, `side` and the side's edge, or `slot` and the plane of a
+//! slot's side or bottom, then the fastener and when it was fastened). A `saw` line, the saw and how what's on it lies, as a pass has them, says
 //! how it's set up now.
 
 use std::{collections::HashMap, fmt::Write, sync::Arc};
@@ -138,6 +138,10 @@ fn surface(surface: Surface) -> String {
         Surface::Bottom => "bottom".to_string(),
         Surface::Side(edge) => format!(
             "side {} {} {} {}",
+            edge.out.l, edge.out.w, edge.lean, edge.at
+        ),
+        Surface::Slot(edge) => format!(
+            "slot {} {} {} {}",
             edge.out.l, edge.out.w, edge.lean, edge.at
         ),
     }
@@ -354,18 +358,24 @@ impl<'a> Words<'a> {
         })
     }
 
+    /// A plane, as an `Edge` has it: `out`, `lean`, and `at`.
+    fn plane(&mut self) -> Result<Edge, String> {
+        Ok(Edge {
+            out: Direction {
+                l: self.number()?,
+                w: self.number()?,
+            },
+            lean: self.number()?,
+            at: self.number()?,
+        })
+    }
+
     fn surface(&mut self) -> Result<Surface, String> {
         Ok(match self.word()? {
             "top" => Surface::Top,
             "bottom" => Surface::Bottom,
-            "side" => Surface::Side(Edge {
-                out: Direction {
-                    l: self.number()?,
-                    w: self.number()?,
-                },
-                lean: self.number()?,
-                at: self.number()?,
-            }),
+            "side" => Surface::Side(self.plane()?),
+            "slot" => Surface::Slot(self.plane()?),
             other => return Err(format!("`{other}` isn't a surface")),
         })
     }

@@ -8,7 +8,8 @@
 
 use bevy::{math::DVec3, prelude::*};
 use woodsim::{
-    Assembly, Board, Contact, Fastener, Length, Mating, Member, Motion, Rotation, Surface, surfaces,
+    Assembly, Board, Contact, Fastener, Length, Mating, Member, Motion, Rotation, Surface,
+    slot_bottoms, slot_surfaces, surfaces,
 };
 
 use crate::{hand::Workpiece, shop::inches, work::glue_up_bounds};
@@ -646,6 +647,12 @@ impl BenchStation {
         }
     }
 
+    /// What the surface at `spot` is called: "end", "slot bottom".
+    fn called(&self, spot: Spot) -> &'static str {
+        let board = &self.groups[spot.group].assembly.members()[spot.member].board;
+        name_on(board, spot.surface)
+    }
+
     fn doing(&self, holding: bool) -> String {
         if holding {
             return "Click the bench to set it down.".to_string();
@@ -677,7 +684,7 @@ impl BenchStation {
                  side you want faces away, click the part and turn it around.{last}"
             );
         };
-        let mine = name(picked.surface);
+        let mine = self.called(picked);
         let (Some(lining_up), Some(preview)) = (self.lining_up, self.preview()) else {
             let take = if self.groups[picked.group].is_loose() {
                 "pick it up"
@@ -689,7 +696,7 @@ impl BenchStation {
                  to look around), or {take}."
             );
         };
-        let theirs = name(lining_up.onto.surface);
+        let theirs = self.called(lining_up.onto);
         let lined_up = self.stops().map_or(String::new(), |stops| {
             describe_slide(lining_up.mating.slide, stops)
         });
@@ -780,7 +787,9 @@ fn describe_fit(assembly: &Assembly, first: usize) -> String {
     let lines: Vec<String> = loose
         .iter()
         .map(|contact| {
-            let [(_, a), (_, b)] = contact.between;
+            let [a, b] = contact
+                .between
+                .map(|(member, surface)| name_on(&assembly.members()[member].board, surface));
             let (least, most) = (measured(contact.least), measured(contact.most));
             let how = if contact.most.as_nm() < 0 {
                 format!("runs into it by {}", measured(-contact.least))
@@ -791,11 +800,7 @@ fn describe_fit(assembly: &Assembly, first: usize) -> String {
             } else {
                 format!("is open {least} to {most}")
             };
-            format!(
-                "A {} {how} where it meets a {}, so it's not fastened there.",
-                name(b),
-                name(a)
-            )
+            format!("A {b} {how} where it meets a {a}, so it's not fastened there.")
         })
         .collect();
     format!(" {}", lines.join(" "))
@@ -810,19 +815,20 @@ fn measured(length: Length) -> Length {
 /// board's mesh axes (`w`, `t`, `l` along x, y, z, in meters): of the surfaces facing about the
 /// same way, the one whose plane the point is on. Every surface is a plane, the faces like any
 /// side, so a side that leans, even one sloping nearly as flat as a face, as a scarf does, is
-/// found the same way.
+/// found the same way, and so is a slot's bottom or side.
 pub fn surface_at(board: &Board, point: Vec3, normal: Vec3) -> Option<Surface> {
     let normal = normal.normalize_or_zero().as_dvec3();
     let point = point.as_dvec3();
     let thickness = board.thickness().as_meters_f32() as f64;
     let mut found: Vec<(Surface, f64, f64)> = surfaces(board)
         .into_iter()
+        .chain(slot_surfaces(board))
         .filter_map(|surface| {
             // Facing out of the wood, and where its plane is that way, in meters.
             let (out, at) = match surface {
                 Surface::Top => (DVec3::Y, thickness),
                 Surface::Bottom => (DVec3::NEG_Y, 0.0),
-                Surface::Side(edge) => {
+                Surface::Side(edge) | Surface::Slot(edge) => {
                     let out = DVec3::new(edge.out.w as f64, edge.lean as f64, edge.out.l as f64);
                     let scale = out.length();
                     (out / scale, edge.at as f64 / scale / 1e9)
@@ -855,10 +861,21 @@ pub fn fastened(fastener: Fastener) -> &'static str {
     }
 }
 
+/// What `board`'s surface is called, as `name` has it, with a slot's bottom told from its
+/// sides: "slot bottom", "slot side".
+pub fn name_on(board: &Board, surface: Surface) -> &'static str {
+    match surface {
+        Surface::Slot(plane) if slot_bottoms(board).contains(&plane) => "slot bottom",
+        Surface::Slot(_) => "slot side",
+        surface => name(surface),
+    }
+}
+
 /// What a board's surface is called: a face, an edge, an end, or a mitered end, any of the
-/// sides beveled, or a face that tapers.
+/// sides beveled, a face that tapers, or a slot (`name_on` says which of its surfaces).
 pub fn name(surface: Surface) -> &'static str {
     match surface {
+        Surface::Slot(_) => "slot",
         Surface::Bottom => "bottom face",
         Surface::Top => "top face",
         Surface::Side(edge) if edge.tapers() => "tapered face",
@@ -1390,7 +1407,7 @@ mod tests {
                         let (out, at) = match surface {
                             Surface::Top => (Vec3::Y, thickness),
                             Surface::Bottom => (Vec3::NEG_Y, 0.0),
-                            Surface::Side(edge) => {
+                            Surface::Side(edge) | Surface::Slot(edge) => {
                                 let out = Vec3::new(
                                     edge.out.w as f32,
                                     edge.lean as f32,
@@ -1419,6 +1436,127 @@ mod tests {
                         assert!(picked.contains(&surface), "{lie:?}: {}", name(surface));
                     }
                 }
+            }
+        }
+    }
+
+    /// The pasted rabbet: 7/8" wide and 3/8" deep across a 1x8's end, in seven strokes.
+    const RABBET: &str = include_str!("../../woodsim/tests/pasted/rabbet-across-the-end.txt");
+
+    #[test]
+    fn a_click_in_a_slot_picks_its_bottom_or_side() {
+        let saw = |fence: Length, height: Length, tilt: i32| woodsim::TableSaw {
+            blade: woodsim::Blade {
+                diameter: Length::from_inches(10),
+                kerf: woodsim::Blade::FULL_KERF,
+            },
+            fence,
+            height,
+            miter_gauge: None,
+            gauge_angle: Angle::ZERO,
+            tilt: Angle::from_degrees(tilt),
+        };
+        let board = Board::new(
+            Length::from_inches(24),
+            Length::from_inches(3),
+            Length::from_inch_fraction(3, 4),
+        );
+        let quarter = Length::from_inch_fraction(1, 4);
+        let grooved = |saw: woodsim::TableSaw, lie: Orientation| {
+            let Ok(Pass::Kerfed(grooved)) = saw.rip(&board, lie) else {
+                panic!("expected a groove");
+            };
+            grooved
+        };
+        let woodsim::Wood::GlueUp(rabbeted) = woodsim::Recipe::read(RABBET).unwrap().wood else {
+            panic!("a glue-up of one");
+        };
+        // A groove in the bottom face, one in the top tilted 15°, one in an edge, a rabbet at
+        // the fence, and the rabbet nibbled across an end.
+        for (piece, sides) in [
+            (
+                grooved(
+                    saw(Length::from_inches(1), quarter, 0),
+                    Orientation::default(),
+                ),
+                2,
+            ),
+            (
+                grooved(
+                    saw(Length::from_inches(1), quarter, 15),
+                    Orientation::default().flipped(),
+                ),
+                2,
+            ),
+            (
+                grooved(
+                    saw(Length::from_inch_fraction(5, 16), quarter, 0),
+                    Orientation::default().tipped(),
+                ),
+                2,
+            ),
+            (
+                grooved(saw(Length::ZERO, quarter, 0), Orientation::default()),
+                1,
+            ),
+            (rabbeted.members()[0].board.clone(), 1),
+        ] {
+            let mesh = crate::meshes::lumber_mesh(&piece, Vec3::ZERO);
+            let (
+                Some(VertexAttributeValues::Float32x3(points)),
+                Some(VertexAttributeValues::Float32x3(normals)),
+                Some(Indices::U32(indices)),
+            ) = (
+                mesh.attribute(Mesh::ATTRIBUTE_POSITION),
+                mesh.attribute(Mesh::ATTRIBUTE_NORMAL),
+                mesh.indices(),
+            )
+            else {
+                panic!("lumber meshes have positions, normals, and indices");
+            };
+            let slots = slot_surfaces(&piece);
+            let mut picked = Vec::new();
+            for triangle in indices.chunks(3) {
+                let corners = [0, 1, 2].map(|k| Vec3::from(points[triangle[k] as usize]));
+                let normal = Vec3::from(normals[triangle[0] as usize]);
+                // The slot's surface whose plane the triangle lies in, facing the way it does.
+                let Some(&surface) = slots.iter().find(|&&surface| {
+                    let Surface::Slot(edge) = surface else {
+                        return false;
+                    };
+                    let out = Vec3::new(edge.out.w as f32, edge.lean as f32, edge.out.l as f32);
+                    let scale = out.length();
+                    let at = (edge.at as f64 / scale as f64 / 1e9) as f32;
+                    (out / scale).dot(normal) > 0.999
+                        && corners
+                            .iter()
+                            .all(|&p| ((out / scale).dot(p) - at).abs() < 1e-5)
+                }) else {
+                    continue;
+                };
+                let middle = corners.iter().sum::<Vec3>() / 3.0;
+                assert_eq!(
+                    surface_at(&piece, middle, normal),
+                    Some(surface),
+                    "at {middle}"
+                );
+                picked.push(surface);
+            }
+            // Its bottom and each side are there to click, and were picked.
+            let names: Vec<&str> = slots
+                .iter()
+                .map(|&surface| name_on(&piece, surface))
+                .collect();
+            assert_eq!(
+                names.iter().filter(|&&name| name == "slot bottom").count(),
+                1
+            );
+            assert_eq!(
+                names.iter().filter(|&&name| name == "slot side").count(),
+                sides
+            );
+            for &surface in &slots {
+                assert!(picked.contains(&surface), "{}", name_on(&piece, surface));
             }
         }
     }

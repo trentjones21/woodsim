@@ -578,7 +578,7 @@ impl Board {
         match surface {
             Surface::Top => ([0.0, 0.0, 1.0], self.thickness.as_nm() as f64),
             Surface::Bottom => ([0.0, 0.0, -1.0], 0.0),
-            Surface::Side(edge) => (
+            Surface::Side(edge) | Surface::Slot(edge) => (
                 [edge.out.l as f64, edge.out.w as f64, edge.lean as f64],
                 edge.at as f64,
             ),

@@ -610,6 +610,7 @@ fn notes(board: &Board) -> String {
 fn called(surface: Surface) -> &'static str {
     match surface {
         Surface::Bottom | Surface::Top => "face",
+        Surface::Slot(_) => "slot",
         Surface::Side(edge) if edge.tapers() => "tapered face",
         Surface::Side(edge) if edge.leans() => "bevel",
         Surface::Side(edge) if edge.out.l != 0 && edge.out.w != 0 => "miter",
@@ -678,7 +679,9 @@ fn across(member: &Member, surface: Surface) -> [Vec3; 2] {
     let [l, w, t] = member.axes();
     match surface {
         Surface::Bottom | Surface::Top => [w, l],
-        Surface::Side(edge) => {
+        // A slot's bottom facing up or down, like a face.
+        Surface::Slot(edge) if edge.out.l == 0 && edge.out.w == 0 => [w, l],
+        Surface::Side(edge) | Surface::Slot(edge) => {
             let (out_l, out_w) = (edge.out.l as f64, edge.out.w as f64);
             let facing = normal(member, surface);
             let up = add(t, scaled(facing, -dot(t, facing)));
@@ -693,7 +696,7 @@ fn normal(member: &Member, surface: Surface) -> Vec3 {
     match surface {
         Surface::Bottom => scaled(t, -1.0),
         Surface::Top => t,
-        Surface::Side(edge) => unit(add(
+        Surface::Side(edge) | Surface::Slot(edge) => unit(add(
             add(scaled(l, edge.out.l as f64), scaled(w, edge.out.w as f64)),
             scaled(t, edge.lean as f64),
         )),

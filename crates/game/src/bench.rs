@@ -16,7 +16,7 @@ use bevy::{
     prelude::*,
     render::render_resource::PrimitiveTopology,
 };
-use woodsim::{Board, Rotation, Surface, outline};
+use woodsim::{Board, Rotation, Surface, exposed};
 
 use crate::{
     controls::{Action, Actions, Arrow},
@@ -634,7 +634,7 @@ fn mark_surfaces(
             .as_ref()
             .is_some_and(|(board, built)| *board == part.board && *built == surface);
         if !built && let Some(mut sheet_mesh) = meshes.get_mut(&mesh.0) {
-            *sheet_mesh = sheet(&outline(&part.board, surface));
+            *sheet_mesh = sheet(&exposed(&part.board, surface));
             shape.0 = Some((part.board.clone(), surface));
         }
         if *visibility != Visibility::Inherited {
@@ -735,7 +735,7 @@ mod tests {
             woodsim::Length::from_inches(4),
             woodsim::Length::from_inch_fraction(3, 4),
         );
-        let mesh = sheet(&outline(&board, Surface::Top));
+        let mesh = sheet(&exposed(&board, Surface::Top));
         let Some(bevy::mesh::VertexAttributeValues::Float32x3(positions)) =
             mesh.attribute(Mesh::ATTRIBUTE_POSITION)
         else {
