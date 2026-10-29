@@ -31,6 +31,8 @@ pub enum Action {
     SwitchGuide,
     Guide(Step),
     Blade(Step),
+    /// Tilting the table saw's blade further from square, or back toward it.
+    Tilt(Step),
     /// Feeding the board into the table saw's blade, held, and bringing it back around.
     Push,
     BringBack,
@@ -129,6 +131,7 @@ pub fn bound(view: ShopView, key: KeyCode, shift: bool) -> Option<Action> {
         (TableSaw, KeyG) => SwitchGuide,
         (TableSaw, ArrowLeft | ArrowRight) => Guide(step(key == ArrowRight)),
         (TableSaw, ArrowUp | ArrowDown) => Blade(step(key == ArrowUp)),
+        (TableSaw, Comma | Period) => Tilt(step(key == Comma)),
         (TableSaw, Space) => Push,
         (TableSaw, KeyB) => BringBack,
         (MiterSaw, ArrowLeft | ArrowRight) => Stop(step(key == ArrowRight)),
@@ -149,7 +152,7 @@ pub fn bound(view: ShopView, key: KeyCode, shift: bool) -> Option<Action> {
 }
 
 /// Every key some action is bound to, in the order they're named on buttons.
-const KEYS: [KeyCode; 33] = [
+const KEYS: [KeyCode; 35] = [
     KeyCode::KeyQ,
     KeyCode::KeyE,
     KeyCode::KeyF,
@@ -180,6 +183,8 @@ const KEYS: [KeyCode; 33] = [
     KeyCode::ArrowDown,
     KeyCode::BracketLeft,
     KeyCode::BracketRight,
+    KeyCode::Comma,
+    KeyCode::Period,
     KeyCode::Equal,
     KeyCode::Minus,
     KeyCode::NumpadEnter,
@@ -243,6 +248,8 @@ fn key_name(key: KeyCode) -> (&'static str, Option<&'static str>) {
         KeyCode::ArrowDown => ("Down arrow", None),
         KeyCode::BracketLeft => ("[", Some("[")),
         KeyCode::BracketRight => ("]", Some("]")),
+        KeyCode::Comma => (",", Some(",")),
+        KeyCode::Period => (".", Some(".")),
         KeyCode::Equal => ("+", Some("+")),
         KeyCode::Minus => ("-", Some("-")),
         _ => ("?", None),

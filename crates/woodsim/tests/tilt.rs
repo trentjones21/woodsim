@@ -7,8 +7,8 @@ mod common;
 use common::CutApart;
 use proptest::prelude::*;
 use woodsim::{
-    Angle, Assembly, Blade, Board, Cut, CutError, Kerf, Length, Orientation, Pass, Piece, Rotation,
-    Source, TableSaw,
+    Angle, Assembly, Blade, Board, Cut, CutError, Fastener, Kerf, Length, Mating, Orientation,
+    Pass, Piece, Rotation, Source, Surface, TableSaw, surfaces,
 };
 
 fn inches(n: i64) -> Length {
@@ -227,6 +227,45 @@ fn with_the_stop_past_the_board_a_tilted_blade_still_takes_the_top_corner() {
         }
         other => panic!("{other:?}"),
     }
+}
+
+#[test]
+fn two_45_degree_bevels_glued_together_make_a_square_corner() {
+    let board = one_by_six();
+    let piece = tilted(inches(2), 4500)
+        .rip(&board, Orientation::default())
+        .cut_apart()
+        .piece
+        .board;
+    let bevels = piece.bevels();
+    assert_eq!(bevels.len(), 1);
+    assert_eq!(bevels[0].1, Angle::from_degrees(45));
+    let bevel = Surface::Side(bevels[0].0);
+    assert!(surfaces(&piece).contains(&bevel));
+    // One of the four ways around the joint stands the second piece square to the first, its
+    // bevel flat against the first's.
+    let corners: Vec<f64> = (0..4)
+        .filter_map(|turn| {
+            let mut corner = Assembly::of(piece.clone());
+            let mating = Mating {
+                turn,
+                ..Mating::default()
+            };
+            let other = Assembly::of(piece.clone());
+            corner.attach((0, bevel), &other, (0, bevel), mating, Fastener::Glue);
+            let fit = corner.fit();
+            if fit.is_empty() || !fit.iter().all(|contact| contact.is_tight()) {
+                return None;
+            }
+            let [first, second] = [0, 1].map(|k| corner.members()[k].axes()[2]);
+            let cos: f64 = (0..3).map(|k| first[k] * second[k]).sum();
+            Some(cos.acos().to_degrees())
+        })
+        .collect();
+    assert!(
+        corners.iter().any(|&degrees| (degrees - 90.0).abs() < 1e-6),
+        "{corners:?}"
+    );
 }
 
 #[test]

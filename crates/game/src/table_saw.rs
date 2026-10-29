@@ -73,6 +73,7 @@ impl Plugin for TableSawPlugin {
                         move_guide,
                         switch_guide,
                         swing_gauge,
+                        tilt_blade,
                         raise_blade,
                         turn_board,
                         push_board,
@@ -404,6 +405,21 @@ fn move_guide(actions: Res<Actions>, mut station: ResMut<TableSawStation>) {
 }
 
 /// Swings the miter gauge's head 1°, or a big step to the next place it clicks into.
+fn tilt_blade(actions: Res<Actions>, mut station: ResMut<TableSawStation>) {
+    for action in actions.started() {
+        let Action::Tilt(Step { more, big }) = action else {
+            continue;
+        };
+        if big {
+            station.tilt_to_next_stop(more);
+        } else {
+            let step = woodsim::Angle::from_degrees(if more { 1 } else { -1 });
+            let tilt = station.saw.tilt + step;
+            station.set_tilt(tilt);
+        }
+    }
+}
+
 fn swing_gauge(actions: Res<Actions>, mut station: ResMut<TableSawStation>) {
     for action in actions.started() {
         let Action::Miter(Step { more, big }) = action else {
@@ -687,8 +703,9 @@ fn draw_gauge(
     }
 }
 
-/// Raises the blade and riving knife to the blade's height. The blade's center is its radius
-/// below its top.
+/// Raises the blade and riving knife to the blade's height, and tilts them about where the
+/// blade's fence-side face meets the table, leaning away from the fence. The blade's top is
+/// its radius above its center, up its tilted plane, and reaches the blade's height.
 fn draw_blade(
     station: Res<TableSawStation>,
     mut blade: Single<&mut Transform, (With<BladeDisc>, Without<RivingKnife>)>,
@@ -698,10 +715,18 @@ fn draw_blade(
         let saw = station.saw;
         let height = saw.height.as_meters_f32();
         let kerf = saw.blade.kerf.as_meters_f32();
-        let center = height - saw.blade.radius().as_meters_f32();
-        blade.translation = ORIGIN + Vec3::new(-kerf / 2.0, center, 0.0);
-        let knife_top = height - KNIFE_BELOW_BLADE;
-        knife.translation = ORIGIN + Vec3::new(-kerf * 0.8, knife_top - KNIFE_HEIGHT, inches(-6.5));
+        let radius = saw.blade.radius().as_meters_f32();
+        let tilt = saw.tilt.radians() as f32;
+        let turn = Quat::from_rotation_z(tilt);
+        // Up the blade's own plane, from the table to its top: the height up the table's, less
+        // how much lower the mid-plane is there, tilted.
+        let top = (height + kerf / 2.0 * tilt.sin()) / tilt.cos();
+        let tilted = |x: f32, y: f32, z: f32| ORIGIN + turn * Vec3::new(x, y, z);
+        blade.translation = tilted(-kerf / 2.0, top - radius, 0.0);
+        blade.rotation = turn * Quat::from_rotation_z(FRAC_PI_2);
+        let knife_top = top - KNIFE_BELOW_BLADE;
+        knife.translation = tilted(-kerf * 0.8, knife_top - KNIFE_HEIGHT, inches(-6.5));
+        knife.rotation = turn;
     }
 }
 

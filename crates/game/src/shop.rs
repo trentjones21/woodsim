@@ -602,8 +602,15 @@ pub fn describe_cut(verb: &str, cut: &Cut) -> String {
             format!("{verb} a {piece} piece, and the blade turned the last {waste} to sawdust.")
         }
     };
-    if let Some(mitered) = describe_miters(&cut.piece.board) {
-        description.push_str(&format!(" The piece is {mitered}."));
+    let shaped: Vec<String> = [
+        describe_miters(&cut.piece.board),
+        describe_bevels(&cut.piece.board),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if !shaped.is_empty() {
+        description.push_str(&format!(" The piece is {}.", shaped.join(" and ")));
     }
     let loose: Vec<String> = cut
         .loose
@@ -667,6 +674,39 @@ pub fn describe_miters(board: &Board) -> Option<String> {
     }
 }
 
+/// How a board's sides are beveled, if any are: "beveled 45° along one edge", "beveled 30°
+/// at both ends", or both, "beveled 45° along one edge and 30° at one end".
+pub fn describe_bevels(board: &Board) -> Option<String> {
+    let bevels = board.bevels();
+    let along = |ends: bool| -> Option<String> {
+        let angles: Vec<woodsim::Angle> = bevels
+            .iter()
+            .filter(|(edge, _)| (edge.out.l != 0) == ends)
+            .map(|&(_, angle)| angle)
+            .collect();
+        let (one, both, where_) = if ends {
+            ("at one end", "at both ends", "at its ends")
+        } else {
+            ("along one edge", "along both edges", "along its edges")
+        };
+        match angles.as_slice() {
+            [] => None,
+            [angle] => Some(format!("{angle} {one}")),
+            [a, b] if a == b => Some(format!("{a} {both}")),
+            angles => Some(format!(
+                "{} {where_}",
+                angles
+                    .iter()
+                    .map(|angle| angle.to_string())
+                    .collect::<Vec<_>>()
+                    .join(" and ")
+            )),
+        }
+    };
+    let described: Vec<String> = [along(false), along(true)].into_iter().flatten().collect();
+    (!described.is_empty()).then(|| format!("beveled {}", described.join(" and ")))
+}
+
 /// Describes a board, its mitered ends, and the slots sawn into it, e.g. "3/4" x 7-1/4" x 24",
 /// with a stopped cut 11-9/16" long on top and 13" on the bottom". Slots that match once
 /// measured are counted rather than listed: "with three 3/4"-wide, 1/4"-deep dados all the way
@@ -690,6 +730,9 @@ pub fn describe_board(board: &Board) -> String {
     let mut description = describe_size(board);
     if let Some(mitered) = describe_miters(board) {
         description.push_str(&format!(", {mitered}"));
+    }
+    if let Some(beveled) = describe_bevels(board) {
+        description.push_str(&format!(", {beveled}"));
     }
     if !slots.is_empty() {
         description.push_str(&format!(", with {}", slots.join(" and ")));

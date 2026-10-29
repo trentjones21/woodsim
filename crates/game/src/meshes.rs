@@ -8,7 +8,7 @@ use bevy::{
     asset::RenderAssetUsages, mesh::Indices, prelude::*, render::render_resource::PrimitiveTopology,
 };
 
-use woodsim::{Across, Board, Direction, Length};
+use woodsim::{Across, Board, Direction, Edge, Length};
 
 use crate::textures::{WOOD_TILE_ACROSS, WOOD_TILE_ALONG};
 
@@ -64,53 +64,112 @@ pub fn board_mesh(size: Vec3, offset: Vec3, grain: Grain) -> Mesh {
     )
 }
 
-/// A board as the simulation has it, slots, mitered ends and all: from its corner at the
-/// origin, with `w` along x, `t` along y, and `l` (and the grain) along z. `grain` is where that
-/// corner sits in the wood the grain pattern is laid out on, so pieces cut from one board line
-/// up.
+/// A board as the simulation has it, slots, mitered ends, bevels and all: from its corner at
+/// the origin, with `w` along x, `t` along y, and `l` (and the grain) along z. `grain` is where
+/// that corner sits in the wood the grain pattern is laid out on, so pieces cut from one board
+/// line up.
 ///
-/// The board's face starts as the convex regions woodsim gives, and each region is split along
-/// every slot's faces and, inside a slot, at points around its curved ends, and around each
-/// resaw slot square to the thickness. At any point in a region, the wood runs from a bottom to
-/// a top: a slot cut up from below raises the bottom, one cut down from above lowers the top,
-/// and where they meet there's no wood. A resaw slot takes a layer out of the middle, so the
-/// wood there is in two spans, or more. Walls go wherever a region has wood the region beside
-/// it doesn't.
+/// The board's face starts as the convex regions woodsim gives, each as it's seen from above,
+/// and each region is split along every slot's faces and, inside a slot, at points around its
+/// curved ends, and around each resaw slot square to the thickness. At any point in a region,
+/// the wood runs from a bottom to a top: a side leaning out going up lowers the bottom and one
+/// leaning in lowers the top, a slot cut up from below raises the bottom, one cut down from
+/// above lowers the top, and where they meet there's no wood. A resaw slot takes a layer out of
+/// the middle, and a tilted slot a slanted band, so the wood there is in two spans, or more.
+/// Regions are split wherever a leaning side or a tilted slot's face meets a face, and where
+/// two leaning sides cross, so tops and bottoms are flat within each piece. Walls go wherever
+/// a region has wood the region beside it doesn't.
 pub fn lumber_mesh(board: &Board, grain: Vec3) -> Mesh {
     let thickness = board.thickness().as_meters_f32();
     let slots: Vec<Slot> = board.kerfs().iter().filter_map(Slot::of).collect();
     let resaws: Vec<Resaw> = board.kerfs().iter().filter_map(Resaw::of).collect();
-    let mut cells: Vec<Vec<Vec2>> = board
+    let tilted: Vec<Tilted> = board.kerfs().iter().filter_map(Tilted::of).collect();
+    let leans: Vec<Vec<Lean>> = board
         .face()
         .iter()
-        .map(|region| {
-            region
-                .corners()
+        .map(|region| region.edges().iter().filter_map(Lean::of).collect())
+        .collect();
+    // Each cell, and the region of the face it's in.
+    let mut cells: Vec<(Vec<Vec2>, usize)> = board
+        .face()
+        .iter()
+        .enumerate()
+        .map(|(k, region)| {
+            let corners = region
+                .footprint(board.thickness())
                 .into_iter()
                 .map(|(l, w)| Vec2::new(w.as_meters_f32(), l.as_meters_f32()))
-                .collect()
+                .collect();
+            (corners, k)
         })
         .collect();
+    let split_all =
+        |cells: Vec<(Vec<Vec2>, usize)>, lines: &[(Vec2, f32)], region: Option<usize>| {
+            lines.iter().fold(cells, |cells, &(direction, at)| {
+                cells
+                    .into_iter()
+                    .flat_map(|(cell, k)| {
+                        if region.is_some_and(|region| region != k) {
+                            return vec![(cell, k)];
+                        }
+                        split(&cell, direction, at)
+                            .into_iter()
+                            .map(|part| (part, k))
+                            .collect()
+                    })
+                    .collect()
+            })
+        };
+    for (k, leans) in leans.iter().enumerate() {
+        cells = split_all(cells, &lines_between(leans, thickness), Some(k));
+    }
     for slot in &slots {
-        for at in [slot.near, slot.far] {
-            cells = cells
-                .iter()
-                .flat_map(|cell| split(cell, slot.across, at))
-                .collect();
-        }
+        cells = split_all(
+            cells,
+            &[(slot.across, slot.near), (slot.across, slot.far)],
+            None,
+        );
+    }
+    for slot in &tilted {
+        cells = split_all(cells, &slot.faces(thickness), None);
     }
     for slot in &slots {
         let stops: Vec<f32> = slot.outline(thickness).collect();
         cells = cells
             .into_iter()
-            .flat_map(|cell| {
+            .flat_map(|(cell, k)| {
                 if !slot.covers(centroid(&cell)) {
-                    return vec![cell];
+                    return vec![(cell, k)];
                 }
-                stops.iter().fold(vec![cell], |cells, &at| {
+                stops.iter().fold(vec![(cell, k)], |cells, &at| {
                     cells
                         .iter()
-                        .flat_map(|cell| split(cell, slot.along, at))
+                        .flat_map(|(cell, k)| {
+                            split(cell, slot.along, at)
+                                .into_iter()
+                                .map(|part| (part, *k))
+                        })
+                        .collect()
+                })
+            })
+            .collect();
+    }
+    for slot in &tilted {
+        let stops: Vec<f32> = slot.outline(thickness).collect();
+        cells = cells
+            .into_iter()
+            .flat_map(|(cell, k)| {
+                if !slot.cuts(centroid(&cell), thickness) {
+                    return vec![(cell, k)];
+                }
+                stops.iter().fold(vec![(cell, k)], |cells, &at| {
+                    cells
+                        .iter()
+                        .flat_map(|(cell, k)| {
+                            split(cell, slot.along, at)
+                                .into_iter()
+                                .map(|part| (part, *k))
+                        })
                         .collect()
                 })
             })
@@ -119,34 +178,36 @@ pub fn lumber_mesh(board: &Board, grain: Vec3) -> Mesh {
     for resaw in &resaws {
         cells = cells
             .iter()
-            .flat_map(|cell| carve(cell, &resaw.outline))
+            .flat_map(|(cell, k)| {
+                carve(cell, &resaw.outline)
+                    .into_iter()
+                    .map(|part| (part, *k))
+            })
             .collect();
     }
 
     // Each cell, what's cutting it, and the spans of wood at each of its corners.
     let cells: Vec<Cell> = cells
         .into_iter()
-        .map(|corners| {
+        .map(|(corners, k)| {
             let middle = centroid(&corners);
-            let slots: Vec<&Slot> = slots.iter().filter(|slot| slot.covers(middle)).collect();
-            let layers = layers_out(&resaws, middle, thickness);
-            let columns = corners
-                .iter()
-                .map(|&p| column(&slots, &layers, p, thickness))
-                .collect();
-            Cell {
+            let mut cell = Cell {
                 corners,
-                slots,
-                layers,
-                columns,
-            }
+                leans: &leans[k],
+                slots: slots.iter().filter(|slot| slot.covers(middle)).collect(),
+                cutouts: cutouts(&resaws, &tilted, middle, thickness),
+                thickness,
+                columns: Vec::new(),
+            };
+            cell.columns = cell.corners.iter().map(|&p| cell.column(p)).collect();
+            cell
         })
         .collect();
 
     let mut mesh = MeshBuilder::new(grain);
     for cell in &cells {
         let corners = &cell.corners;
-        for span in 0..=cell.layers.len() {
+        for span in 0..=cell.cutouts.len() {
             let spans: Vec<(f32, f32)> = cell.columns.iter().map(|column| column[span]).collect();
             mesh.surfaces(corners, &spans);
         }
@@ -180,9 +241,7 @@ pub fn lumber_mesh(board: &Board, grain: Vec3) -> Mesh {
                 let theirs = cells
                     .iter()
                     .find(|other| contains(&other.corners, beside))
-                    .map(|other| {
-                        [p, q].map(|point| column(&other.slots, &other.layers, point, thickness))
-                    });
+                    .map(|other| [p, q].map(|point| other.column(point)));
                 for span in 0..from.len() {
                     let ours = |t: f32| {
                         let (from, to) = (from[span], to[span]);
@@ -201,15 +260,163 @@ pub fn lumber_mesh(board: &Board, grain: Vec3) -> Mesh {
     mesh.build()
 }
 
-/// A convex piece of a board's face, what's cutting it, and the spans of wood at each of its
-/// corners.
+/// A convex piece of a board's face, what shapes the wood over it, and the spans of wood at
+/// each of its corners.
 struct Cell<'a> {
     corners: Vec<Vec2>,
+    /// The leaning sides of the region of the face it's in.
+    leans: &'a [Lean],
     slots: Vec<&'a Slot>,
-    /// The layers resaw slots take out of the middle of the wood here, bottom to top.
-    layers: Vec<(f32, f32)>,
-    /// At each corner, a span of wood below each layer taken out and one above them all.
+    /// What resaw and tilted slots take out of the middle of the wood here, bottom to top.
+    cutouts: Vec<Cutout<'a>>,
+    thickness: f32,
+    /// At each corner, a span of wood below each cutout and one above them all.
     columns: Vec<Vec<(f32, f32)>>,
+}
+
+impl Cell<'_> {
+    /// The spans of wood at `point`, bottom to top: one below each cutout, and one above them
+    /// all, each running from where the leaning sides and the slots in the face leave the
+    /// wood. A span with no wood is empty where it would have been, so spans always run
+    /// upward.
+    fn column(&self, point: Vec2) -> Vec<(f32, f32)> {
+        let (low, high) = leaning(self.leans, point, self.thickness);
+        let (bottom, top) = wood_at(&self.slots, point, (low, high), self.thickness);
+        let taken: Vec<(f32, f32)> = self.cutouts.iter().map(|cutout| cutout.at(point)).collect();
+        (0..=taken.len())
+            .map(|k| {
+                let low = if k == 0 {
+                    bottom
+                } else {
+                    taken[k - 1].1.max(bottom)
+                };
+                let high = if k == taken.len() {
+                    top
+                } else {
+                    taken[k].0.min(top)
+                };
+                (low.min(high), high)
+            })
+            .collect()
+    }
+}
+
+/// A leaning side of a region, as how high or low the wood reaches under it: where `out · p +
+/// lean t = at`, with `out` on the face as the mesh lays it out, `w` along x and `l` along y,
+/// all in nanometers times the side's scale.
+struct Lean {
+    out: [f64; 2],
+    lean: f64,
+    at: f64,
+}
+
+impl Lean {
+    fn of(edge: &Edge) -> Option<Lean> {
+        edge.leans().then_some(Lean {
+            out: [edge.out.w as f64, edge.out.l as f64],
+            lean: edge.lean as f64,
+            at: edge.at as f64,
+        })
+    }
+
+    /// How high the side is above `point`, in meters.
+    fn height(&self, point: Vec2) -> f32 {
+        let across = self.out[0] * point.x as f64 + self.out[1] * point.y as f64;
+        ((self.at - across * 1e9) / self.lean / 1e9) as f32
+    }
+
+    /// Where on the face it's `t` meters up, as a line `direction · p = at` in meters.
+    fn line_at(&self, t: f32) -> Option<(Vec2, f32)> {
+        let size = self.out[0].hypot(self.out[1]);
+        (size > 0.0).then(|| {
+            let direction = Vec2::new((self.out[0] / size) as f32, (self.out[1] / size) as f32);
+            (
+                direction,
+                ((self.at - self.lean * t as f64 * 1e9) / size / 1e9) as f32,
+            )
+        })
+    }
+}
+
+/// How low and high the wood reaches at `point` under a region's leaning sides, in a board
+/// `thickness` thick: a side leaning in going up holds the top down, one leaning out the
+/// bottom up.
+fn leaning(leans: &[Lean], point: Vec2, thickness: f32) -> (f32, f32) {
+    let (mut low, mut high) = (0.0_f32, thickness);
+    for lean in leans {
+        let height = lean.height(point);
+        if lean.lean > 0.0 {
+            high = high.min(height);
+        } else {
+            low = low.max(height);
+        }
+    }
+    (low.min(high), high)
+}
+
+/// The lines on the face where a region's tops and bottoms bend: where each leaning side meets
+/// the bottom face and the top, and where two of them are at the same height.
+fn lines_between(leans: &[Lean], thickness: f32) -> Vec<(Vec2, f32)> {
+    let mut lines: Vec<(Vec2, f32)> = leans
+        .iter()
+        .flat_map(|lean| [lean.line_at(0.0), lean.line_at(thickness)])
+        .flatten()
+        .collect();
+    for (i, a) in leans.iter().enumerate() {
+        for b in &leans[i + 1..] {
+            // `(at_a - out_a · p) / lean_a = (at_b - out_b · p) / lean_b`.
+            let out = [0, 1].map(|k| b.lean * a.out[k] - a.lean * b.out[k]);
+            let size = out[0].hypot(out[1]);
+            if size < 1e-9 * a.out[0].hypot(a.out[1]) * b.lean.abs() {
+                continue;
+            }
+            let at = (b.lean * a.at - a.lean * b.at) / size / 1e9;
+            lines.push((
+                Vec2::new((out[0] / size) as f32, (out[1] / size) as f32),
+                at as f32,
+            ));
+        }
+    }
+    lines
+}
+
+/// Something taking wood out of the middle: a layer a resaw slot took, the same height all
+/// over, or the slanted band a tilted slot took.
+enum Cutout<'a> {
+    Layer(f32, f32),
+    Band(&'a Tilted),
+}
+
+impl Cutout<'_> {
+    /// The heights it takes out at `point`, low to high; the same height twice if none.
+    fn at(&self, point: Vec2) -> (f32, f32) {
+        match self {
+            Cutout::Layer(near, far) => (*near, *far),
+            Cutout::Band(slot) => slot.band(point),
+        }
+    }
+}
+
+/// What resaw and tilted slots take out of the middle of the wood at `point` of a board
+/// `thickness` thick, bottom to top: resaw layers merged where they overlap.
+fn cutouts<'a>(
+    resaws: &[Resaw],
+    tilted: &'a [Tilted],
+    point: Vec2,
+    thickness: f32,
+) -> Vec<Cutout<'a>> {
+    let mut cutouts: Vec<Cutout> = layers_out(resaws, point, thickness)
+        .into_iter()
+        .map(|(near, far)| Cutout::Layer(near, far))
+        .chain(
+            tilted
+                .iter()
+                .filter(|slot| slot.cuts(point, thickness))
+                .map(Cutout::Band),
+        )
+        .collect();
+    cutouts.sort_by(|a, b| a.at(point).0.total_cmp(&b.at(point).0));
+    cutouts
 }
 
 /// The parts of the convex `cell` on either side of the line `direction · p = at`.
@@ -327,6 +534,9 @@ impl Slot {
         let Across::Face(across) = kerf.across else {
             return None;
         };
+        if kerf.lean != 0 {
+            return None;
+        }
         let (across, across_meters) = unit(across);
         let (along, along_meters) = unit(kerf.along);
         Some(Slot {
@@ -383,6 +593,117 @@ impl Resaw {
     }
 }
 
+/// A slot sawn by a tilted blade, in meters, on the board's face as the mesh lays it out. Its
+/// faces lean, so at a point on the face it takes out a band of height between them, as far as
+/// the blade reached.
+struct Tilted {
+    /// The faces' normal across the face, `w` along x and `l` along y, its length, and its
+    /// lean, all in the kerf's whole-number units.
+    out: [f64; 2],
+    size: f64,
+    lean: f64,
+    /// Where the faces are, in nanometers times the normal's length.
+    near: f64,
+    far: f64,
+    along: Vec2,
+    radius: f32,
+    center: f32,
+    start: f32,
+    end: f32,
+    /// How much of the blade's reach up its own plane is up the board's thickness.
+    cos: f32,
+}
+
+impl Tilted {
+    fn of(kerf: &woodsim::Kerf) -> Option<Tilted> {
+        let Across::Face(across) = kerf.across else {
+            return None;
+        };
+        if kerf.lean == 0 {
+            return None;
+        }
+        let (along, along_meters) = unit(kerf.along);
+        let out = [across.w as f64, across.l as f64];
+        let size = out[0].hypot(out[1]);
+        let lean = kerf.lean as f64;
+        Some(Tilted {
+            out,
+            size,
+            lean,
+            near: kerf.near.as_nm() as f64,
+            far: kerf.far.as_nm() as f64,
+            along,
+            radius: kerf.radius.as_meters_f32(),
+            center: kerf.center.as_meters_f32(),
+            start: along_meters(kerf.start),
+            end: along_meters(kerf.end),
+            cos: (size / size.hypot(lean)) as f32,
+        })
+    }
+
+    /// Where its face at `face` is above `point`, in meters.
+    fn face_height(&self, face: f64, point: Vec2) -> f32 {
+        let across = (self.out[0] * point.x as f64 + self.out[1] * point.y as f64) * 1e9;
+        ((face - across) / self.lean / 1e9) as f32
+    }
+
+    /// The band of height it takes out at `point`, low to high: between its faces, as far up
+    /// and down as the blade reached there.
+    fn band(&self, point: Vec2) -> (f32, f32) {
+        let faces = [self.near, self.far].map(|face| self.face_height(face, point));
+        let (low, high) = (faces[0].min(faces[1]), faces[0].max(faces[1]));
+        let along = self.along.dot(point);
+        let past = (self.start - along).max(along - self.end).max(0.0);
+        if past >= self.radius {
+            return (high, high);
+        }
+        let reach = (self.radius * self.radius - past * past).sqrt() * self.cos;
+        let (low, high) = (low.max(self.center - reach), high.min(self.center + reach));
+        (low.min(high), high)
+    }
+
+    /// Whether it takes any wood out at `point` of a board `thickness` thick.
+    fn cuts(&self, point: Vec2, thickness: f32) -> bool {
+        let (low, high) = self.band(point);
+        low < high && high > 0.0 && low < thickness
+    }
+
+    /// Where its faces meet the board's bottom face and its top, as lines `direction · p = at`
+    /// in meters.
+    fn faces(&self, thickness: f32) -> Vec<(Vec2, f32)> {
+        let direction = Vec2::new(
+            (self.out[0] / self.size) as f32,
+            (self.out[1] / self.size) as f32,
+        );
+        [self.near, self.far]
+            .into_iter()
+            .flat_map(|face| {
+                [0.0, thickness].map(|t| {
+                    (
+                        direction,
+                        ((face - self.lean * t as f64 * 1e9) / self.size / 1e9) as f32,
+                    )
+                })
+            })
+            .collect()
+    }
+
+    /// Points along the slot where its outline needs a vertex, as for a slot square to the
+    /// face, with the blade's reach up its tilted plane.
+    fn outline(&self, thickness: f32) -> impl Iterator<Item = f32> + '_ {
+        let reach = self.radius * self.cos;
+        let low = (self.center - reach).max(0.0);
+        let high = (self.center + reach).min(thickness);
+        let arc = (0..=ARC_STEPS).flat_map(move |step| {
+            let t = low + (high - low) * step as f32 / ARC_STEPS as f32;
+            let up = (t - self.center) / self.cos;
+            let along = (self.radius * self.radius - up * up).max(0.0).sqrt();
+            [self.start - along, self.end + along]
+        });
+        [self.start, self.end].into_iter().chain(arc)
+    }
+}
+
 /// The layers the resaw slots covering `point` take out of a board `thickness` thick, merged
 /// where they overlap, bottom to top.
 fn layers_out(resaws: &[Resaw], point: Vec2, thickness: f32) -> Vec<(f32, f32)> {
@@ -401,28 +722,6 @@ fn layers_out(resaws: &[Resaw], point: Vec2, thickness: f32) -> Vec<(f32, f32)> 
         }
     }
     merged
-}
-
-/// The spans of wood at `point`, bottom to top: one below each of `layers` taken out, and one
-/// above them all, each running from where the slots in the face leave the wood. A span with no
-/// wood is empty where it would have been, so spans always run upward.
-fn column(slots: &[&Slot], layers: &[(f32, f32)], point: Vec2, thickness: f32) -> Vec<(f32, f32)> {
-    let (bottom, top) = wood_at(slots, point, thickness);
-    (0..=layers.len())
-        .map(|k| {
-            let low = if k == 0 {
-                bottom
-            } else {
-                layers[k - 1].1.max(bottom)
-            };
-            let high = if k == layers.len() {
-                top
-            } else {
-                layers[k].0.min(top)
-            };
-            (low.min(high), high)
-        })
-        .collect()
 }
 
 /// Points around each curved end of a slot, between where it meets the board's faces.
@@ -462,10 +761,10 @@ impl Slot {
 }
 
 /// The span of wood at `point` on the board's face, bottom to top, given the slots cutting
-/// there. A slot reaches in from the bottom face or the top one; where the wood's gone, bottom
-/// and top are equal.
-fn wood_at(slots: &[&Slot], point: Vec2, thickness: f32) -> (f32, f32) {
-    let (mut bottom, mut top) = (0.0_f32, thickness);
+/// there and how low and high the wood reaches without them. A slot reaches in from the bottom
+/// face or the top one; where the wood's gone, bottom and top are equal.
+fn wood_at(slots: &[&Slot], point: Vec2, (low, high): (f32, f32), thickness: f32) -> (f32, f32) {
+    let (mut bottom, mut top) = (low, high);
     for slot in slots {
         let Some((low, high)) = slot.cut_at(slot.along.dot(point)) else {
             continue;
@@ -1016,6 +1315,95 @@ mod tests {
             .iter()
             .any(|n| n.abs_diff_eq(Vec3::new(-1.0, 0.0, -1.0).normalize(), 1e-4));
         assert!(slanted);
+    }
+
+    /// A table saw with its blade 1" up and tilted 45°, the fence 2" from it.
+    fn tilted_saw() -> TableSaw {
+        TableSaw {
+            blade: Blade {
+                diameter: Length::from_inches(10),
+                kerf: Blade::FULL_KERF,
+            },
+            fence: Length::from_inches(2),
+            height: Length::from_inches(1),
+            miter_gauge: None,
+            gauge_angle: woodsim::Angle::ZERO,
+            tilt: woodsim::Angle::from_degrees(45),
+        }
+    }
+
+    /// The total area of the triangles lying flat on the board's bottom face.
+    fn bottom_area(mesh: &Mesh) -> f32 {
+        triangles(mesh)
+            .iter()
+            .filter(|corners| corners.iter().all(|p| p.y.abs() < 1e-6))
+            .map(|[a, b, c]| (b - a).cross(c - a).length() / 2.0)
+            .sum()
+    }
+
+    fn square_inches(n: f32) -> f32 {
+        n * 0.0254 * 0.0254
+    }
+
+    #[test]
+    fn a_beveled_edge_is_drawn_leaning_under_the_wider_top() {
+        let Ok(Pass::Cut(cut)) = tilted_saw().rip(&plank(), Orientation::default()) else {
+            panic!("expected a rip");
+        };
+        let board = cut.piece.board;
+        let mesh = lumber_mesh(&board, Vec3::ZERO);
+        let thickness = board.thickness().as_meters_f32();
+        // 2" wide on the bottom, 2-3/4" on top, 24" long.
+        assert!((top_area(&mesh, thickness) - square_inches(24.0 * 2.75)).abs() < 1e-6);
+        assert!((bottom_area(&mesh) - square_inches(24.0 * 2.0)).abs() < 1e-6);
+        // The bevel faces down and out at 45°.
+        let normals = normals(&mesh);
+        assert!(
+            normals
+                .iter()
+                .any(|n| n.y < -0.7 && n.x.abs() > 0.7 && n.z.abs() < 1e-3),
+            "no bevel among {normals:?}"
+        );
+        for (i, [a, b, c]) in triangles(&mesh).into_iter().enumerate() {
+            assert!(
+                (b - a).cross(c - a).dot(normals[i * 3]) > 0.0,
+                "triangle {i} faces backward"
+            );
+        }
+    }
+
+    #[test]
+    fn a_tilted_cut_partway_opens_a_slanted_slot() {
+        let saw = TableSaw {
+            fence: Length::from_inches(6),
+            ..tilted_saw()
+        };
+        let Ok(Pass::Kerfed(board)) = saw.feed(
+            &plank(),
+            Orientation::default(),
+            -Length::from_inches(6),
+            Length::from_inches(10),
+        ) else {
+            panic!("expected a stopped cut");
+        };
+        let mesh = lumber_mesh(&board, Vec3::ZERO);
+        let face = square_inches(24.0 * 7.25);
+        // About 12" of a slot 0.18" across shows on each face.
+        for area in [
+            top_area(&mesh, board.thickness().as_meters_f32()),
+            bottom_area(&mesh),
+        ] {
+            let open = (face - area) / square_inches(1.0);
+            assert!(open > 1.5 && open < 3.0, "{open} square inches open");
+        }
+        let normals = normals(&mesh);
+        assert!(normals.iter().any(|n| n.y.abs() > 0.6 && n.x.abs() > 0.6));
+        for (i, [a, b, c]) in triangles(&mesh).into_iter().enumerate() {
+            assert!(
+                (b - a).cross(c - a).dot(normals[i * 3]) > 0.0,
+                "triangle {i} faces backward"
+            );
+        }
     }
 
     #[test]

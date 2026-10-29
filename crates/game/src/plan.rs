@@ -11,7 +11,10 @@ use std::{
     process::Command,
 };
 
-use woodsim::{Across, Angle, Assembly, Board, Fastener, Joint, Length, Member, Surface, surfaces};
+use woodsim::{
+    Across, Angle, Assembly, Board, Edge, Fastener, Joint, Length, Member, Region, Surface,
+    surfaces,
+};
 
 use crate::{
     cutting::Cutting,
@@ -488,10 +491,11 @@ fn notes(board: &Board) -> String {
         .to_string()
 }
 
-/// What a surface is called in a plan's steps: a face, an edge, an end, or a miter.
+/// What a surface is called in a plan's steps: a face, an edge, an end, a miter, or a bevel.
 fn called(surface: Surface) -> &'static str {
     match surface {
         Surface::Bottom | Surface::Top => "face",
+        Surface::Side(edge) if edge.leans() => "bevel",
         Surface::Side(edge) if edge.out.l != 0 && edge.out.w != 0 => "miter",
         Surface::Side(edge) if edge.out.l != 0 => "end",
         Surface::Side(_) => "edge",
@@ -553,14 +557,16 @@ fn alignment(label: &str, sides: [&str; 2], low: f64, high: f64) -> String {
 }
 
 /// The two ways across a member's surface, in its assembly: along the board and across it for
-/// a face; for a side, through the thickness and then along it.
+/// a face; for a side, up it through the thickness, leaning as it leans, and then along it.
 fn across(member: &Member, surface: Surface) -> [Vec3; 2] {
     let [l, w, t] = member.axes();
     match surface {
         Surface::Bottom | Surface::Top => [w, l],
         Surface::Side(edge) => {
             let (out_l, out_w) = (edge.out.l as f64, edge.out.w as f64);
-            [t, unit(add(scaled(l, -out_w), scaled(w, out_l)))]
+            let facing = normal(member, surface);
+            let up = add(t, scaled(facing, -dot(t, facing)));
+            [unit(up), unit(add(scaled(l, -out_w), scaled(w, out_l)))]
         }
     }
 }
@@ -572,8 +578,8 @@ fn normal(member: &Member, surface: Surface) -> Vec3 {
         Surface::Bottom => scaled(t, -1.0),
         Surface::Top => t,
         Surface::Side(edge) => unit(add(
-            scaled(l, edge.out.l as f64),
-            scaled(w, edge.out.w as f64),
+            add(scaled(l, edge.out.l as f64), scaled(w, edge.out.w as f64)),
+            scaled(t, edge.lean as f64),
         )),
     }
 }
@@ -798,6 +804,9 @@ struct Sketch {
     slots: Vec<(Vec<Vec2>, Seen)>,
     /// Where each slanted end's middle is, which way it faces, and its angle from square.
     miters: Vec<(Vec2, Vec2, Angle)>,
+    /// Each beveled side as seen from above, whether it faces up into view or down away from
+    /// it, and its angle from square to the faces.
+    bevels: Vec<(Vec<Vec2>, Seen, Angle)>,
     /// What tells it apart from other parts: its thickness and its drawing, to a 64th.
     key: String,
 }
@@ -815,21 +824,39 @@ impl Sketch {
         let mut regions = Vec::new();
         // Each side's runs, to join where a side passes from one region of the face to the next.
         let mut runs: Vec<(woodsim::Edge, Vec<[Vec2; 2]>)> = Vec::new();
+        let thickness = board.thickness();
         for region in board.face() {
-            let corners: Vec<Vec2> = region.corners().into_iter().map(point).collect();
-            let edges = region.edges();
-            for (i, edge) in edges.iter().enumerate() {
-                if !sides.contains(edge) {
+            let corners: Vec<Vec2> = region.footprint(thickness).into_iter().map(point).collect();
+            for (i, edge) in sides_around(region, &corners, thickness) {
+                if !sides.contains(&edge) {
                     continue;
                 }
                 let run = [corners[i], corners[(i + 1) % corners.len()]];
-                match runs.iter_mut().find(|(side, _)| side == edge) {
+                match runs.iter_mut().find(|(side, _)| *side == edge) {
                     Some((_, list)) => list.push(run),
-                    None => runs.push((*edge, vec![run])),
+                    None => runs.push((edge, vec![run])),
                 }
             }
             regions.push(corners);
         }
+        let bevels = board
+            .bevels()
+            .into_iter()
+            .flat_map(|(edge, angle)| {
+                // Leaning in going up, a bevel faces up into view.
+                let seen = if edge.lean > 0 {
+                    Seen::Above
+                } else {
+                    Seen::Below
+                };
+                woodsim::outline(board, Surface::Side(edge))
+                    .into_iter()
+                    .map(move |polygon| {
+                        let from_above = polygon.iter().map(|&[l, w, _]| point((l, w))).collect();
+                        (from_above, seen, angle)
+                    })
+            })
+            .collect();
         let mut edges = Vec::new();
         let mut miters = Vec::new();
         for (side, list) in runs {
@@ -845,7 +872,6 @@ impl Sketch {
             }
             edges.extend(joined);
         }
-        let thickness = board.thickness();
         let mut slots = Vec::new();
         for kerf in board.kerfs() {
             let Across::Face(across) = kerf.across else {
@@ -905,6 +931,7 @@ impl Sketch {
             edges,
             slots,
             miters,
+            bevels,
             key: String::new(),
         };
         [(false, false), (true, false), (false, true), (true, true)]
@@ -960,6 +987,18 @@ impl Sketch {
                 .iter()
                 .map(|&(middle, out, angle)| (at(middle), way(out), angle))
                 .collect(),
+            bevels: self
+                .bevels
+                .iter()
+                .map(|(points, seen, angle)| {
+                    let seen = match (seen, over) {
+                        (Seen::Above, true) => Seen::Below,
+                        (Seen::Below, true) => Seen::Above,
+                        (seen, _) => *seen,
+                    };
+                    (points.iter().map(|&p| at(p)).collect(), seen, *angle)
+                })
+                .collect(),
             key: String::new(),
         }
     }
@@ -991,7 +1030,17 @@ impl Sketch {
             })
             .collect();
         slots.sort();
-        format!("{edges:?} {slots:?}")
+        let mut bevels: Vec<_> = self
+            .bevels
+            .iter()
+            .map(|(points, seen, angle)| {
+                let mut points: Vec<_> = points.iter().map(|&p| round(p)).collect();
+                points.sort();
+                (*seen, angle.hundredths(), points)
+            })
+            .collect();
+        bevels.sort();
+        format!("{edges:?} {slots:?} {bevels:?}")
     }
 
     /// The part on its face, to scale, with its length and width and the angle of each miter.
@@ -1040,6 +1089,17 @@ impl Sketch {
                 path(&mut std::iter::once(points))
             );
         }
+        for (points, seen, _) in &self.bevels {
+            let class = match seen {
+                Seen::Below => "bevel-below",
+                _ => "bevel",
+            };
+            let _ = write!(
+                svg,
+                "<path class=\"{class}\" d=\"{}\"/>",
+                path(&mut std::iter::once(points))
+            );
+        }
         svg.push_str("</g><path class=\"edge\" d=\"");
         for &[a, b] in &self.edges {
             let ([ax, ay], [bx, by]) = (at(a), at(b));
@@ -1079,6 +1139,19 @@ impl Sketch {
             text_x = up + 8.0,
             middle_y = TOP + wide / 2.0,
         );
+        for (points, _, angle) in &self.bevels {
+            // In the middle of the bevel, along it.
+            let middle = points
+                .iter()
+                .fold([0.0, 0.0], |sum, p| [sum[0] + p[0], sum[1] + p[1]])
+                .map(|sum| sum / points.len() as f64);
+            let [x, y] = at(middle);
+            let _ = write!(
+                svg,
+                "<text class=\"angle\" x=\"{x:.1}\" y=\"{y:.1}\" text-anchor=\"middle\" \
+                 dominant-baseline=\"middle\">{angle} bevel</text>"
+            );
+        }
         for &(middle, out, angle) in &self.miters {
             // Inside the end, back from its middle.
             let [x, y] = at(middle);
@@ -1092,6 +1165,38 @@ impl Sketch {
         svg.push_str("</svg>");
         svg
     }
+}
+
+/// Which of `region`'s sides each straight run of its outline from above, `corners` as
+/// `Region::footprint` gives them, lies along, by where the run starts: a side square to the
+/// faces all the way up, or a leaning one where it meets the bottom face or the top.
+fn sides_around(region: &Region, corners: &[Vec2], thickness: Length) -> Vec<(usize, Edge)> {
+    if !region.leans() {
+        return region.edges().iter().copied().enumerate().collect();
+    }
+    let n = corners.len();
+    (0..n)
+        .filter_map(|i| {
+            let (a, b) = (corners[i], corners[(i + 1) % n]);
+            region
+                .edges()
+                .iter()
+                .find(|edge| {
+                    let size = (edge.out.l as f64)
+                        .hypot(edge.out.w as f64)
+                        .hypot(edge.lean as f64);
+                    [Length::ZERO, thickness].into_iter().any(|t| {
+                        [a, b].iter().all(|&[l, w]| {
+                            let at = edge.out.l as f64 * l
+                                + edge.out.w as f64 * w
+                                + edge.lean as f64 * t.as_nm() as f64;
+                            (at - edge.at as f64).abs() < 4.0 * size
+                        })
+                    })
+                })
+                .map(|&edge| (i, edge))
+        })
+        .collect()
 }
 
 /// Straight runs along one side of a board joined end to end where one starts as another
@@ -1217,6 +1322,8 @@ svg text { font: 12px -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif; f
 .wood { fill: #fbf6ee; }
 .slot { fill: #d9cbb5; stroke: #1d2026; stroke-width: 0.8; }
 .slot-below { fill: none; stroke: #1d2026; stroke-width: 0.8; stroke-dasharray: 4 3; }
+.bevel { fill: #efe3cf; stroke: #1d2026; stroke-width: 0.8; }
+.bevel-below { fill: none; stroke: #1d2026; stroke-width: 0.8; stroke-dasharray: 4 3; }
 .slot-through { fill: #1d2026; }
 .dimension path { fill: none; stroke: #777; stroke-width: 0.8; }
 .angle { font-size: 11px; fill: #c4581a; }
@@ -1617,6 +1724,59 @@ mod tests {
         // What the rip left on the far side of the blade never went into the frame.
         assert!(!page.contains("2-5/8"), "{page}");
         assert!(page.contains("A4"));
+    }
+
+    #[test]
+    fn a_beveled_corner_says_how_the_blade_was_tilted() {
+        let saw = woodsim::TableSaw {
+            blade: woodsim::Blade {
+                diameter: Length::from_inches(10),
+                kerf: woodsim::Blade::FULL_KERF,
+            },
+            fence: Length::from_inches(2),
+            height: Length::from_inches(1),
+            miter_gauge: None,
+            gauge_angle: Angle::ZERO,
+            tilt: Angle::from_degrees(45),
+        };
+        let beveled = || {
+            let stock = Board::new(
+                Length::from_inches(24),
+                Length::from_inch_fraction(11, 2),
+                Length::from_inch_fraction(3, 4),
+            );
+            let Ok(Pass::Cut(cut)) = saw.rip(&stock, Orientation::default()) else {
+                panic!("expected a beveled rip");
+            };
+            cut.piece.board
+        };
+        let (first, second) = (beveled(), beveled());
+        let bevel = Surface::Side(first.bevels()[0].0);
+        // Bevel to bevel, whichever way around makes a tight corner.
+        let corner = (0..4)
+            .find_map(|turn| {
+                let mut corner = Assembly::of(first.clone());
+                let mating = Mating {
+                    turn,
+                    ..Mating::default()
+                };
+                corner.attach(
+                    (0, bevel),
+                    &Assembly::of(second.clone()),
+                    (0, bevel),
+                    mating,
+                    Fastener::Glue,
+                );
+                let fit = corner.fit();
+                (!fit.is_empty() && fit.iter().all(|contact| contact.is_tight())).then_some(corner)
+            })
+            .expect("a tight corner");
+        let page = Plan::of(corner).page();
+        assert!(page.contains("blade 1\" high and tilted 45°"), "{page}");
+        assert!(page.contains("beveled 45° along one edge"), "{page}");
+        assert!(page.contains("class=\"bevel"), "{page}");
+        assert!(page.contains("45° bevel"), "{page}");
+        assert!(page.contains("bevel to"), "{page}");
     }
 
     #[test]

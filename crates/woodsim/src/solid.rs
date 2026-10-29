@@ -295,6 +295,61 @@ pub(crate) fn region(mut sides: Vec<Edge>, thickness: Length) -> Option<Region> 
     }
 }
 
+impl Region {
+    /// Its corners in a board `thickness` thick, `[l, w, t]` to the nearest nanometer: on the
+    /// bottom face and the top, and wherever leaning sides meet between.
+    pub fn corners_through(&self, thickness: Length) -> Vec<[Length; 3]> {
+        self.solid(thickness)
+            .corners()
+            .into_iter()
+            .map(Corner::nearest)
+            .collect()
+    }
+
+    /// Its outline seen from above, in a board `thickness` thick: its corners, as `corners`
+    /// gives them, counterclockwise. With sides leaning, wherever it reaches furthest, on
+    /// whichever face or between.
+    pub fn footprint(&self, thickness: Length) -> Vec<(Length, Length)> {
+        if !self.leans() {
+            return self.corners();
+        }
+        hull(
+            self.corners_through(thickness)
+                .into_iter()
+                .map(|[l, w, _]| (l, w))
+                .collect(),
+        )
+    }
+}
+
+/// The convex hull of `points`, counterclockwise from the length toward the width, exactly.
+fn hull(mut points: Vec<(Length, Length)>) -> Vec<(Length, Length)> {
+    points.sort();
+    points.dedup();
+    if points.len() < 3 {
+        return points;
+    }
+    let turn = |o: (Length, Length), a: (Length, Length), b: (Length, Length)| {
+        let (ax, ay) = (nm(a.0 - o.0), nm(a.1 - o.1));
+        let (bx, by) = (nm(b.0 - o.0), nm(b.1 - o.1));
+        ax * by - ay * bx
+    };
+    let mut around: Vec<(Length, Length)> = Vec::new();
+    for ordered in [points.clone(), points.iter().rev().copied().collect()] {
+        let start = around.len();
+        for p in ordered {
+            while around.len() >= start + 2
+                && turn(around[around.len() - 2], around[around.len() - 1], p) <= 0
+            {
+                around.pop();
+            }
+            around.push(p);
+        }
+        around.pop();
+    }
+    around
+}
+
 /// A region as wood in a board `thickness` thick.
 #[derive(Clone, Copy)]
 pub(crate) struct Solid<'a> {

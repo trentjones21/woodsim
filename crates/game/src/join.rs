@@ -6,7 +6,7 @@
 //! `woodsim` puts the parts together and measures how the joints fit; this module keeps track
 //! of what's on the bench and where, and puts it into words.
 
-use bevy::prelude::*;
+use bevy::{math::DVec3, prelude::*};
 use woodsim::{
     Assembly, Board, Contact, Fastener, Length, Mating, Member, Motion, Rotation, Surface, surfaces,
 };
@@ -805,18 +805,19 @@ pub fn surface_at(board: &Board, point: Vec3, normal: Vec3) -> Option<Surface> {
             Surface::Bottom
         });
     }
-    // The side facing the same way whose plane the point is nearest.
+    // The side facing the same way whose plane the point is nearest. A beveled side leans,
+    // facing up or down some.
     surfaces(board)
         .into_iter()
         .filter_map(|surface| {
             let Surface::Side(edge) = surface else {
                 return None;
             };
-            let out = Vec2::new(edge.out.w as f32, edge.out.l as f32);
+            let out = DVec3::new(edge.out.w as f64, edge.lean as f64, edge.out.l as f64);
             let scale = out.length();
-            let facing = out.dot(Vec2::new(normal.x, normal.z)) / scale;
-            let plane = edge.at as f64 / scale as f64 / 1e9;
-            let off = (out.dot(Vec2::new(point.x, point.z)) / scale) as f64 - plane;
+            let facing = out.dot(normal.as_dvec3()) / scale;
+            let plane = edge.at as f64 / scale / 1e9;
+            let off = out.dot(point.as_dvec3()) / scale - plane;
             (facing > 0.95 && off.abs() < 0.002).then_some((surface, off.abs()))
         })
         .min_by(|a, b| a.1.total_cmp(&b.1))
@@ -832,11 +833,17 @@ pub fn fastened(fastener: Fastener) -> &'static str {
     }
 }
 
-/// What a board's surface is called: a face, an edge, an end, or a mitered end.
+/// What a board's surface is called: a face, an edge, an end, or a mitered end, any of the
+/// sides beveled.
 pub fn name(surface: Surface) -> &'static str {
     match surface {
         Surface::Bottom => "bottom face",
         Surface::Top => "top face",
+        Surface::Side(edge) if edge.leans() && edge.out.l != 0 && edge.out.w != 0 => {
+            "beveled miter"
+        }
+        Surface::Side(edge) if edge.leans() && edge.out.l != 0 => "beveled end",
+        Surface::Side(edge) if edge.leans() => "beveled edge",
         Surface::Side(edge) if edge.out.l != 0 && edge.out.w != 0 => "mitered end",
         Surface::Side(edge) if edge.out.l != 0 => "end",
         Surface::Side(_) => "edge",
@@ -1295,6 +1302,45 @@ mod tests {
         );
         click(&mut bench, spot(0, 0, Surface::Top));
         assert!(bench.status(false).starts_with("Moving its top face."));
+    }
+
+    #[test]
+    fn a_click_on_a_bevel_picks_the_beveled_edge() {
+        let saw = woodsim::TableSaw {
+            blade: woodsim::Blade {
+                diameter: Length::from_inches(10),
+                kerf: woodsim::Blade::FULL_KERF,
+            },
+            fence: Length::from_inches(2),
+            height: Length::from_inches(1),
+            miter_gauge: None,
+            gauge_angle: Angle::ZERO,
+            tilt: Angle::from_degrees(45),
+        };
+        let Ok(Pass::Cut(cut)) = saw.rip(&plain(), Orientation::default()) else {
+            panic!("expected a beveled rip");
+        };
+        let piece = cut.piece.board;
+        let [(bevel, angle)] = piece.bevels()[..] else {
+            panic!("expected one bevel");
+        };
+        assert_eq!(angle, Angle::from_degrees(45));
+        let surface = Surface::Side(bevel);
+        assert_eq!(name(surface), "beveled edge");
+        // The middle of the bevel, in the mesh's axes, facing the way it leans.
+        let outline = &woodsim::outline(&piece, surface)[0];
+        let middle = outline
+            .iter()
+            .map(|&[l, w, t]| Vec3::new(w.as_meters_f32(), t.as_meters_f32(), l.as_meters_f32()))
+            .sum::<Vec3>()
+            / outline.len() as f32;
+        let normal = Vec3::new(bevel.out.w as f32, bevel.lean as f32, bevel.out.l as f32);
+        assert_eq!(
+            surface_at(&piece, middle, normal.normalize()),
+            Some(surface)
+        );
+        // It faces 45° up or down, so it isn't the top or bottom face.
+        assert!(normal.normalize().y.abs() > 0.7);
     }
 
     #[test]

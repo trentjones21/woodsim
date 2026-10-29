@@ -10,7 +10,9 @@
 //! quarter turn, across it, crosscutting.
 
 use bevy::prelude::*;
-use woodsim::{Angle, Axis, Blade, Board, CutError, Length, MAX_GAUGE, Orientation, TableSaw};
+use woodsim::{
+    Angle, Axis, Blade, Board, CutError, Length, MAX_GAUGE, MAX_TILT, Orientation, TableSaw,
+};
 
 use crate::{
     chop::MITER_STOPS,
@@ -177,6 +179,35 @@ impl TableSawStation {
 
     /// Whether the gauge's head can be turned: not while a board is at the blade.
     pub fn can_swing_gauge(&self) -> bool {
+        !self.at_blade()
+    }
+
+    /// Tilts the blade, from square to as far as it goes. It stays put while a board is at the
+    /// blade.
+    pub fn set_tilt(&mut self, tilt: Angle) {
+        if !self.at_blade() {
+            self.saw.tilt = tilt.clamp(Angle::ZERO, MAX_TILT);
+        }
+    }
+
+    /// Tilts the blade to the next stop on its scale, further or back, or as far as it goes
+    /// past the last one.
+    pub fn tilt_to_next_stop(&mut self, further: bool) {
+        let now = self.saw.tilt;
+        let stops = MITER_STOPS.into_iter();
+        let next = if further {
+            stops.filter(|&stop| stop > now).min().unwrap_or(MAX_TILT)
+        } else {
+            stops
+                .filter(|&stop| stop < now)
+                .max()
+                .unwrap_or(Angle::ZERO)
+        };
+        self.set_tilt(next);
+    }
+
+    /// Whether the blade can be tilted: not while a board is at it.
+    pub fn can_tilt(&self) -> bool {
         !self.at_blade()
     }
 

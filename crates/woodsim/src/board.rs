@@ -506,6 +506,23 @@ impl Board {
         }
     }
 
+    /// The board's leaning sides, each with how far it leans from square to the faces: what
+    /// a tilted blade cut it at. In order by `Edge`'s ordering.
+    pub fn bevels(&self) -> Vec<(Edge, Angle)> {
+        let edges: Vec<Edge> = self.face.iter().flat_map(Region::edges).copied().collect();
+        let mut bevels: Vec<(Edge, Angle)> = edges
+            .iter()
+            .filter(|edge| edge.leans() && !edges.contains(&edge.flipped()))
+            .map(|&edge| {
+                let lean = (edge.lean.abs() as f64).atan2(edge.out.scale());
+                (edge, Angle::nearest(lean))
+            })
+            .collect();
+        bevels.sort();
+        bevels.dedup();
+        bevels
+    }
+
     /// The angles of the board's slanted ends, from square: what a miter saw cut them at. The
     /// end at `l = 0` comes first.
     pub fn miters(&self) -> Vec<Angle> {

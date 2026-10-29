@@ -30,6 +30,8 @@ pub enum Icon {
     Lower,
     Fence,
     Blade,
+    /// The blade leaning from square.
+    Tilt,
     Stop,
     Miter,
     Depth,
@@ -61,7 +63,7 @@ pub enum Icon {
 }
 
 impl Icon {
-    const ALL: [Icon; 33] = [
+    const ALL: [Icon; 34] = [
         Icon::TurnLeft,
         Icon::TurnRight,
         Icon::Flip,
@@ -72,6 +74,7 @@ impl Icon {
         Icon::Lower,
         Icon::Fence,
         Icon::Blade,
+        Icon::Tilt,
         Icon::Stop,
         Icon::Miter,
         Icon::Depth,
@@ -168,6 +171,23 @@ impl Icon {
                 ),
                 Rounded(p(0.06, 0.66), p(0.94, 0.78), 0.03),
             ],
+            Icon::Tilt => {
+                // The blade leans left about where it meets the table, past a dashed upright.
+                let pivot = p(0.5, 0.7);
+                let (sin, cos) = (-30f32).to_radians().sin_cos();
+                let lean = |q: Vec2| {
+                    let c = q - pivot;
+                    pivot + Vec2::new(c.x * cos - c.y * sin, c.x * sin + c.y * cos)
+                };
+                let below = || Box::new(Rounded(p(-0.5, 0.7), p(1.5, 1.5), 0.0));
+                let blade = Cut(Box::new(Fill(teeth(pivot, 0.4, 0.33, 16))), below());
+                vec![
+                    Cut(Box::new(blade.moved(&lean)), below()),
+                    Line(vec![p(0.62, 0.1), p(0.62, 0.22)], 0.05),
+                    Line(vec![p(0.62, 0.32), p(0.62, 0.44)], 0.05),
+                    Rounded(p(0.06, 0.7), p(0.94, 0.82), 0.03),
+                ]
+            }
             Icon::Stop => {
                 let mut shapes = vec![
                     Line(vec![p(0.12, 0.26), p(0.12, 0.74)], 0.08),
@@ -584,7 +604,7 @@ pub fn picture(work: &Workpiece) -> Image {
                 .iter()
                 .map(|region| {
                     region
-                        .corners()
+                        .footprint(board.thickness())
                         .into_iter()
                         .map(|(l, w)| Vec2::new(l.as_meters_f32(), w.as_meters_f32()))
                         .collect()
@@ -602,12 +622,9 @@ pub fn picture(work: &Workpiece) -> Image {
                     .map(|region| {
                         // The region through the board's thickness, seen from above.
                         let corners: Vec<Vec2> = region
-                            .corners()
+                            .corners_through(member.board.thickness())
                             .into_iter()
-                            .flat_map(|(l, w)| {
-                                [woodsim::Length::ZERO, member.board.thickness()]
-                                    .map(|t| member.point(l, w, t))
-                            })
+                            .map(|[l, w, t]| member.point(l, w, t))
                             .map(|[x, y, _]| Vec2::new(x.as_meters_f32(), y.as_meters_f32()))
                             .collect();
                         hull(corners)

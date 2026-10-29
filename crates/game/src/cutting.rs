@@ -1070,7 +1070,7 @@ fn diagram(stock: &Stock, index: usize, members: &[Member], labels: &[String]) -
         let mut corners = 0.0;
         let mut path = String::new();
         for region in board.face() {
-            for (k, (l, w)) in region.corners().into_iter().enumerate() {
+            for (k, (l, w)) in region.footprint(board.thickness()).into_iter().enumerate() {
                 let [x, y] = at(l0 + nm(l), w0 + nm(w));
                 let _ = write!(path, "{}{x:.1} {y:.1}", if k == 0 { "M" } else { "L" });
                 middle = [middle[0] + x, middle[1] + y];
