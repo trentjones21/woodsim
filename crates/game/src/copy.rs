@@ -163,7 +163,7 @@ fn end_notice(time: Res<Time>, mut notice: ResMut<Notice>) {
 }
 
 /// Puts `text` on the clipboard, with whatever the system has to do it.
-fn to_clipboard(text: &str) -> Result<(), String> {
+pub fn to_clipboard(text: &str) -> Result<(), String> {
     let tools: &[(&str, &[&str])] = if cfg!(target_os = "macos") {
         &[("pbcopy", &[])]
     } else if cfg!(target_os = "windows") {

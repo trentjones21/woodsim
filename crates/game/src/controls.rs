@@ -9,6 +9,7 @@ use crate::{
     edit::Knob,
     parts::{Entry, Fold, Where},
     shop::ShopView,
+    upload::Sharing,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -65,6 +66,11 @@ pub enum Action {
     TakeApart,
     PickUp,
     Plans,
+    /// At the bench, put plans up on the marketplace to share at a link: name them, then put
+    /// them up under the title typed, or don't.
+    Share,
+    PutUp,
+    StopSharing,
     /// At the bench, take a glue-up into the photo studio to render it.
     Studio,
     /// In the studio: pick the `n`th light (key, fill, rim) to move; swing it around the
@@ -236,6 +242,7 @@ pub fn bound(view: ShopView, key: KeyCode, shift: bool) -> Option<Action> {
         (Bench, KeyU) => TakeApart,
         (Bench, Space) => PickUp,
         (Bench, KeyP) => Plans,
+        (Bench, KeyS) => Share,
         (Bench, KeyM) => History,
         (Bench, KeyL) => Loosen,
         (Bench, KeyR) => Action::Studio,
@@ -288,9 +295,23 @@ const KEYS: [KeyCode; 41] = [
     KeyCode::NumpadEnter,
 ];
 
+/// What `key` does while a title's being typed, when every other key types: put the plans up,
+/// or don't.
+fn while_typing(key: KeyCode) -> Option<Action> {
+    match key {
+        KeyCode::Enter | KeyCode::NumpadEnter => Some(Action::PutUp),
+        KeyCode::Escape => Some(Action::StopSharing),
+        _ => None,
+    }
+}
+
 /// The key that does `action` at `view`, in words for a tooltip ("Shift+Right arrow"), and
 /// short for the badge on its button ("Q"), if it's short enough to fit.
 pub fn key_for(view: ShopView, action: Action) -> Option<(String, Option<&'static str>)> {
+    if let Some(&key) = KEYS.iter().find(|&&key| while_typing(key) == Some(action)) {
+        let (words, badge) = key_name(key);
+        return Some((words.to_string(), badge));
+    }
     for shift in [false, true] {
         for key in KEYS {
             if bound(view, key, shift) != Some(action) {
@@ -413,10 +434,24 @@ impl Plugin for ControlsPlugin {
     }
 }
 
-/// Starts this frame's actions afresh from the keys pressed, and those held.
-fn read_keys(keys: Res<ButtonInput<KeyCode>>, view: Res<ShopView>, mut actions: ResMut<Actions>) {
+/// Starts this frame's actions afresh from the keys pressed, and those held. While plans are
+/// being named, keys type the title, all but the two that put them up or don't.
+fn read_keys(
+    keys: Res<ButtonInput<KeyCode>>,
+    view: Res<ShopView>,
+    sharing: Res<Sharing>,
+    mut actions: ResMut<Actions>,
+) {
     actions.started.clear();
     actions.held.clear();
+    if sharing.naming().is_some() {
+        for &key in keys.get_just_pressed() {
+            if let Some(action) = while_typing(key) {
+                actions.start(action);
+            }
+        }
+        return;
+    }
     let shift = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
     for &key in keys.get_just_pressed() {
         if let Some(action) = bound(*view, key, shift) {
@@ -508,6 +543,19 @@ mod tests {
         assert_eq!(
             key_for(ShopView::Overview, Action::GoTo(ShopView::Bench)),
             None
+        );
+        // Naming plans, Enter puts them up and Esc doesn't, whatever they do at the bench.
+        assert_eq!(
+            key_for(ShopView::Bench, Action::Share),
+            Some(("S".to_string(), Some("S")))
+        );
+        assert_eq!(
+            key_for(ShopView::Bench, Action::PutUp),
+            Some(("Enter".to_string(), Some("Enter")))
+        );
+        assert_eq!(
+            key_for(ShopView::Bench, Action::StopSharing),
+            Some(("Esc".to_string(), Some("Esc")))
         );
     }
 }

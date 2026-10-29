@@ -45,6 +45,8 @@ pub enum Icon {
     TakeApart,
     PickUp,
     Plans,
+    /// A globe: plans put up on the marketplace, for anyone with the link.
+    Share,
     Shop,
     TableSaw,
     MiterSaw,
@@ -101,7 +103,7 @@ pub enum Icon {
 }
 
 impl Icon {
-    const ALL: [Icon; 55] = [
+    const ALL: [Icon; 56] = [
         Icon::TurnLeft,
         Icon::TurnRight,
         Icon::Flip,
@@ -130,6 +132,7 @@ impl Icon {
         Icon::TakeApart,
         Icon::PickUp,
         Icon::Plans,
+        Icon::Share,
         Icon::Shop,
         Icon::TableSaw,
         Icon::MiterSaw,
@@ -389,6 +392,23 @@ impl Icon {
                     shapes.push(Line(vec![p(0.38, y), p(0.62, y)], 0.07));
                 }
                 shapes
+            }
+            Icon::Share => {
+                let center = p(0.5, 0.5);
+                // A meridian, an ellipse through the poles.
+                let meridian = (0..=48)
+                    .map(|step| {
+                        let angle = (step as f32 / 48.0) * std::f32::consts::TAU;
+                        center + Vec2::new(0.15 * angle.cos(), 0.36 * angle.sin())
+                    })
+                    .collect();
+                vec![
+                    Ring(center, 0.36, 0.08),
+                    Line(meridian, 0.07),
+                    Line(vec![p(0.14, 0.5), p(0.86, 0.5)], 0.07),
+                    Line(vec![p(0.2, 0.32), p(0.8, 0.32)], 0.06),
+                    Line(vec![p(0.2, 0.68), p(0.8, 0.68)], 0.06),
+                ]
             }
             Icon::Shop => vec![
                 Fill(vec![p(0.08, 0.52), p(0.5, 0.12), p(0.92, 0.52)]),

@@ -32,6 +32,7 @@ mod table_saw;
 mod textures;
 mod thickness;
 mod trace;
+mod upload;
 mod work;
 
 use std::{path::PathBuf, time::Duration};
@@ -69,6 +70,7 @@ use scenery::ScenePlugin;
 use shop::ShopPlugin;
 use studio::StudioPlugin;
 use table_saw::TableSawPlugin;
+use upload::UploadPlugin;
 
 fn main() {
     let screenshot = std::env::var_os("WOODSHOP_SCREENSHOT").map(PathBuf::from);
@@ -137,7 +139,7 @@ fn main() {
         HudPlugin,
         FlightsPlugin,
         RestPlugin,
-        CopyPlugin,
+        (CopyPlugin, UploadPlugin),
         SavedPlugin,
         StudioPlugin,
     ));

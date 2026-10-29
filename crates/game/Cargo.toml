@@ -8,6 +8,8 @@ rust-version.workspace = true
 [dependencies]
 bevy.workspace = true
 plans.workspace = true
+serde_json.workspace = true
+ureq.workspace = true
 woodsim.workspace = true
 
 [features]

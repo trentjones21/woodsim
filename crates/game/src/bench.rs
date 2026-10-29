@@ -4,6 +4,7 @@
 
 use std::{
     f32::consts::PI,
+    ffi::OsStr,
     fs, io,
     path::{Path, PathBuf},
     process::Command,
@@ -36,6 +37,7 @@ use crate::{
         Block, Placed, Shape, ShopAssets, ShopCamera, ShopView, inches, rounded_block, station_part,
     },
     studio,
+    upload::Sharing,
 };
 
 /// Where the station's coordinates start in the shop: the middle of the bench top. It stands in
@@ -321,7 +323,8 @@ fn arrow_slides(directions: [Vec3; 2], right: Vec3, up: Vec3) -> [(usize, bool);
 /// Does what's asked at the bench: picks the fastener; turns or flips the part under the
 /// pointer, or else the picked one (or the only one), or the part being lined up around the
 /// joint; slides it across the joint; fastens it or lets go; takes the last joint apart; picks
-/// a part up; draws up plans; or takes a glue-up into the studio.
+/// a part up; draws up plans, or names them to put up on the marketplace; or takes a glue-up
+/// into the studio.
 #[allow(clippy::too_many_arguments)]
 fn work_at_bench(
     actions: Res<Actions>,
@@ -331,6 +334,7 @@ fn work_at_bench(
     mut bench: ResMut<BenchStation>,
     mut hand: ResMut<Hand>,
     mut studio: ResMut<Studio>,
+    mut sharing: ResMut<Sharing>,
     mut view: ResMut<ShopView>,
 ) {
     let (camera, picture) = *camera;
@@ -387,6 +391,11 @@ fn work_at_bench(
                 }
             }
             Action::Plans => draw_up_plans(&mut bench, under_pointer),
+            Action::Share => {
+                if let Some(glue_up) = bench.to_plan(under_pointer) {
+                    sharing.name(glue_up);
+                }
+            }
             Action::Studio => {
                 if let Some(piece) = bench.to_plan(under_pointer) {
                     studio::open(&mut studio, &piece, picture);
@@ -430,8 +439,8 @@ fn save_plans(page: &str, folder: &Path) -> io::Result<PathBuf> {
     Ok(path)
 }
 
-/// Opens a saved page in the browser, to read or print.
-fn open_in_browser(path: &Path) -> io::Result<()> {
+/// Opens a saved page, or a link, in the browser.
+pub fn open_in_browser(page: impl AsRef<OsStr>) -> io::Result<()> {
     #[cfg(target_os = "macos")]
     let mut command = Command::new("open");
     #[cfg(target_os = "windows")]
@@ -442,7 +451,7 @@ fn open_in_browser(path: &Path) -> io::Result<()> {
     };
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let mut command = Command::new("xdg-open");
-    command.arg(path).spawn().map(|_| ())
+    command.arg(page).spawn().map(|_| ())
 }
 
 /// A part drawn on the bench, with what `draw_bench` keeps up to date on it.

@@ -11,15 +11,20 @@ use bevy::{
     diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin},
     ecs::{relationship::RelatedSpawner, spawn::SpawnWith, system::SystemParam},
     input::mouse::{MouseScrollUnit, MouseWheel},
+    input_focus::AutoFocus,
     picking::{
         PickingSystems,
         hover::{HoverMap, Hovered},
         pointer::PointerId,
     },
     prelude::*,
+    text::{EditableText, TextCursorStyle, TextEdit},
     time::common_conditions::on_real_timer,
     ui::{InteractionDisabled, Pressed},
-    ui_widgets::{Activate, Button, ControlOrientation, Scrollbar, ScrollbarThumb},
+    ui_widgets::{
+        Activate, Button, ControlOrientation, Scrollbar, ScrollbarThumb, SelectAllOnFocus,
+        TextInput,
+    },
 };
 use plans::{LUMBER, describe_miter, plan};
 use std::time::Duration;
@@ -43,6 +48,7 @@ use crate::{
     shoot::Studio,
     shop::{HoveredStation, SawView, ShopView},
     thickness::PlanerStation,
+    upload::{self, Sharing, TitleBox},
 };
 
 const INK: Color = Color::srgb(0.17, 0.2, 0.27);
@@ -109,6 +115,7 @@ impl Plugin for HudPlugin {
                 (
                     toggle_panels,
                     build_for_view,
+                    show_naming_card,
                     build_tree,
                     scroll_inventory,
                     fit_inventory,
@@ -304,7 +311,11 @@ fn dock(view: ShopView) -> Vec<Vec<Tool>> {
                 tool(Loosen, Icon::Unglue),
                 tool(History, Icon::Pencil),
             ],
-            vec![tool(Plans, Icon::Plans), tool(Studio, Icon::Camera)],
+            vec![
+                tool(Plans, Icon::Plans),
+                tool(Share, Icon::Share),
+                tool(Studio, Icon::Camera),
+            ],
             look,
         ],
         ShopView::Studio => vec![
@@ -430,6 +441,7 @@ struct Game<'w> {
     editor: Res<'w, Editor>,
     notice: Res<'w, Notice>,
     studio: Res<'w, Studio>,
+    sharing: Res<'w, Sharing>,
     views: (Res<'w, SawView>, Res<'w, BenchView>),
 }
 
@@ -450,6 +462,7 @@ impl Game<'_> {
             editor: &self.editor,
             notice: self.notice.0.as_ref().map(|(notice, _)| notice.as_str()),
             studio: &self.studio,
+            sharing: &self.sharing,
             saw_view: &self.views.0,
             bench_view: &self.views.1,
         }
@@ -470,6 +483,7 @@ impl Game<'_> {
             || self.tree.is_changed()
             || self.editor.is_changed()
             || self.studio.is_changed()
+            || self.sharing.is_changed()
             || self.views.0.is_changed()
             || self.views.1.is_changed()
     }
@@ -492,6 +506,7 @@ struct Shop<'a> {
     /// A line in place of the status for now, like where a copy went.
     notice: Option<&'a str>,
     studio: &'a Studio,
+    sharing: &'a Sharing,
     /// How the view's been turned at the saw you're at, or the bench.
     saw_view: &'a SawView,
     bench_view: &'a BenchView,
@@ -624,6 +639,9 @@ impl Shop<'_> {
             TakeApart => "Take the last joint apart".to_string(),
             PickUp => "Pick it up".to_string(),
             Plans => "Plans to print".to_string(),
+            Share => "Put plans up on the marketplace, to share at a link".to_string(),
+            PutUp => "Put them up".to_string(),
+            StopSharing => "Don't put them up".to_string(),
             Studio => "Render it in the studio".to_string(),
             Light(index) => format!(
                 "Move the {}",
@@ -828,6 +846,8 @@ impl Shop<'_> {
             (ShopView::Bench, PickUp) => bench.picked.is_some() && self.hand.0.is_none(),
             (ShopView::Bench, TakeApart) => bench.can_take_apart(),
             (ShopView::Bench, Plans | Studio) => !bench.groups.is_empty(),
+            (ShopView::Bench, Share) => !bench.groups.is_empty() && !self.sharing.putting_up(),
+            (_, PutUp | StopSharing) => self.sharing.naming().is_some(),
             (ShopView::Studio, Render) => {
                 self.studio.shoot().is_some()
                     && (!self.studio.rendering() || self.studio.can_finish_now())
@@ -848,6 +868,7 @@ impl Shop<'_> {
         match action {
             Action::GoTo(view) => view == self.view,
             Action::Use(fastener) => self.bench.fastener == fastener,
+            Action::Share => self.sharing.naming().is_some() || self.sharing.putting_up(),
             Action::SwitchGuide => self.table_saw.using_gauge(),
             Action::Rest => match self.view {
                 ShopView::TableSaw => self.table_saw.choosing_rest(),
@@ -1609,6 +1630,117 @@ fn toggle_panels(actions: Res<Actions>, mut showing: ResMut<Showing>) {
     if actions.just(Action::History) && !showing.inventory {
         showing.inventory = true;
     }
+}
+/// The card plans are named on before they go up on the marketplace: what they'll be called,
+/// in a box to type over, and buttons to put them up or not. It's there while they're named.
+#[derive(Component)]
+struct NamingCard;
+
+fn show_naming_card(
+    mut commands: Commands,
+    icons: Res<Icons>,
+    sharing: Res<Sharing>,
+    cards: Query<Entity, With<NamingCard>>,
+) {
+    if !sharing.is_changed() {
+        return;
+    }
+    for card in &cards {
+        commands.entity(card).despawn();
+    }
+    let Some(suggested) = sharing.naming() else {
+        return;
+    };
+    let card = commands
+        .spawn((
+            strip(Node {
+                top: px(80),
+                width: percent(100),
+                justify_content: JustifyContent::Center,
+                ..default()
+            }),
+            NamingCard,
+        ))
+        .id();
+    let panel = commands
+        .spawn((
+            panel(Node {
+                flex_direction: FlexDirection::Column,
+                row_gap: px(10),
+                padding: UiRect::all(px(16)),
+                ..default()
+            }),
+            GlobalZIndex(4),
+            ChildOf(card),
+        ))
+        .id();
+    commands.spawn((bold("Put the plans up", 18.0, INK), ChildOf(panel)));
+    commands.spawn((
+        text(
+            "Anyone with the link can see them, with every cut and joint that made it.",
+            14.0,
+            INK.with_alpha(0.7),
+        ),
+        ChildOf(panel),
+    ));
+    let mut title = EditableText {
+        max_characters: Some(upload::MOST_TITLE),
+        visible_width: Some(32.0),
+        allow_newlines: false,
+        ..EditableText::new(suggested)
+    };
+    // Picked out, ready to type over.
+    title.queue_edit(TextEdit::SelectAll);
+    commands.spawn((
+        Node {
+            padding: UiRect::axes(px(10), px(6)),
+            border: UiRect::all(px(2)),
+            border_radius: BorderRadius::all(px(8)),
+            ..default()
+        },
+        BackgroundColor(FACE),
+        BorderColor::all(EDGE),
+        TitleBox,
+        TextInput,
+        title,
+        TextLayout::no_wrap(),
+        TextFont {
+            font_size: FontSize::Px(18.0),
+            ..default()
+        },
+        TextColor(INK),
+        TextCursorStyle::default(),
+        (SelectAllOnFocus, AutoFocus),
+        ChildOf(panel),
+    ));
+    let buttons = commands
+        .spawn((
+            Node {
+                column_gap: px(8),
+                justify_content: JustifyContent::FlexEnd,
+                ..default()
+            },
+            ChildOf(panel),
+        ))
+        .id();
+    spawn_button(
+        &mut commands,
+        &icons,
+        buttons,
+        Action::StopSharing,
+        Icon::LetGo,
+        Look::Round,
+        TipAt::Below,
+    );
+    spawn_button(
+        &mut commands,
+        &icons,
+        buttons,
+        Action::PutUp,
+        Icon::Share,
+        Look::Go,
+        TipAt::Below,
+    );
 }
 
 /// Fills the dock and the settings cards with what's at the view the camera's at.
@@ -2871,6 +3003,7 @@ mod tests {
         static TREE: std::sync::LazyLock<Tree> = std::sync::LazyLock::new(Tree::default);
         static EDITOR: std::sync::LazyLock<Editor> = std::sync::LazyLock::new(Editor::default);
         static STUDIO: std::sync::LazyLock<Studio> = std::sync::LazyLock::new(Studio::default);
+        static SHARING: std::sync::LazyLock<Sharing> = std::sync::LazyLock::new(Sharing::default);
         static SAW_VIEW: std::sync::LazyLock<SawView> = std::sync::LazyLock::new(SawView::default);
         static BENCH_VIEW: std::sync::LazyLock<BenchView> =
             std::sync::LazyLock::new(BenchView::default);
@@ -2889,6 +3022,7 @@ mod tests {
             editor: &EDITOR,
             notice: None,
             studio: &STUDIO,
+            sharing: &SHARING,
             saw_view: &SAW_VIEW,
             bench_view: &BENCH_VIEW,
         }
