@@ -240,6 +240,7 @@ fn ripping_a_mitered_board_leaves_strips_mitered_the_same() {
         height: inches(1),
         miter_gauge: None,
         gauge_angle: woodsim::Angle::ZERO,
+        tilt: woodsim::Angle::ZERO,
     };
     let cut = saw.rip(&frame, Orientation::default()).cut_apart();
     assert_eq!(cut.piece.board.width(), fraction(3, 2));

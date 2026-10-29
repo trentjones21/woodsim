@@ -831,6 +831,7 @@ mod tests {
             height: Length::from_inches(1),
             miter_gauge: None,
             gauge_angle: woodsim::Angle::ZERO,
+            tilt: woodsim::Angle::ZERO,
         };
         match saw.feed(
             &plank(),
@@ -916,6 +917,7 @@ mod tests {
             height: Length::from_inch_fraction(1, 4),
             miter_gauge: None,
             gauge_angle: woodsim::Angle::ZERO,
+            tilt: woodsim::Angle::ZERO,
         };
         let Ok(Pass::Kerfed(board)) = saw.rip(&plank(), Orientation::default().turned_left())
         else {
@@ -938,6 +940,7 @@ mod tests {
             height: Length::from_inches(1),
             miter_gauge: None,
             gauge_angle: woodsim::Angle::ZERO,
+            tilt: woodsim::Angle::ZERO,
         };
         let six = -Length::from_inches(6);
         let Ok(Pass::Kerfed(ripped)) = saw(Length::from_inches(2)).feed(
@@ -1055,6 +1058,7 @@ mod tests {
             height: Length::from_inches(3),
             miter_gauge: None,
             gauge_angle: woodsim::Angle::ZERO,
+            tilt: woodsim::Angle::ZERO,
         };
         let Ok(Pass::Kerfed(board)) = saw.rip(&plank(), Orientation::default().tipped()) else {
             panic!("expected a slot in the edge");

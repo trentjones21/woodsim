@@ -501,6 +501,14 @@ impl Solid<'_> {
             .any(|corner| corner.short_of(direction, at))
     }
 
+    /// Whether some of it is beyond `side`, away from the wood it bounds, exactly.
+    pub(crate) fn beyond(&self, side: Edge) -> bool {
+        let plane = Plane::side(side);
+        self.corners()
+            .into_iter()
+            .any(|corner| plane.beyond(corner) > 0)
+    }
+
     /// Whether `(l, w, t)` is strictly inside it.
     pub(crate) fn contains(&self, l: Length, w: Length, t: Length) -> bool {
         Length::ZERO < t

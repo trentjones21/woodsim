@@ -87,7 +87,6 @@ impl Direction {
     /// A face facing this way and tilted `tilt` from square to the board's face, leaning back
     /// from this way going up: as `out` and `lean` for an `Edge` or a `Kerf`, whole numbers
     /// with no common factor, within about 1/16,000,000 of a radian of the angle.
-    #[cfg_attr(not(test), expect(dead_code, reason = "no saw tilts its blade yet"))]
     pub(crate) fn tilted(self, tilt: Angle) -> (Direction, i64) {
         if tilt == Angle::ZERO {
             return (self, 0);

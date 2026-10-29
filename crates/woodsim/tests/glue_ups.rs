@@ -30,6 +30,7 @@ fn table_saw(fence: Length, gauge: Option<Length>, height: Length) -> TableSaw {
         height,
         miter_gauge: gauge,
         gauge_angle: woodsim::Angle::ZERO,
+        tilt: woodsim::Angle::ZERO,
     }
 }
 

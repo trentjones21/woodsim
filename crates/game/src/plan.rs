@@ -1418,6 +1418,7 @@ mod tests {
             height: Length::from_inches(1),
             miter_gauge: None,
             gauge_angle: woodsim::Angle::ZERO,
+            tilt: woodsim::Angle::ZERO,
         };
         let Ok(Pass::Cut(rip)) = table_saw.rip(&stock, Orientation::default()) else {
             panic!("expected the 1x4 ripped");
@@ -1507,6 +1508,7 @@ mod tests {
             height: Length::from_inches(1),
             miter_gauge: None,
             gauge_angle: woodsim::Angle::ZERO,
+            tilt: woodsim::Angle::ZERO,
         };
         let mut rest = Board::new(
             Length::from_inches(24),

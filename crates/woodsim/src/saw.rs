@@ -1,7 +1,7 @@
 use std::fmt;
 
 use crate::{
-    Angle, Assembly, Axis, Board, Direction, Kerf, Length, Orientation, Piece, Rotation,
+    Angle, Assembly, Axis, Board, Direction, Edge, Kerf, Length, Orientation, Piece, Rotation,
     glue_up::{GlueUpPass, Laid, Path},
     history::{Lie, Operation, Side, Tool},
     kerf::Across,
@@ -105,10 +105,18 @@ pub struct TableSaw {
     /// its long point. Positive swings the blade's front, where the board meets it first,
     /// toward the stop.
     pub gauge_angle: Angle,
+    /// How far the blade is tilted from square to the table, leaning away from the fence going
+    /// up, up to `MAX_TILT`. It tilts about where it meets the table, so the fence and the
+    /// gauge's stop still measure to there: the piece is the setting wide where it lay on the
+    /// table, and wider or narrower on top. `height` is still how high its teeth reach.
+    pub tilt: Angle,
 }
 
 /// As far as a miter gauge's head turns, either way.
 pub const MAX_GAUGE: Angle = Angle::from_degrees(60);
+
+/// As far as the blade tilts.
+pub const MAX_TILT: Angle = Angle::from_degrees(45);
 
 impl TableSaw {
     /// Feeds `board`, lying as `lie` says, past the blade while the blade's center travels from
@@ -129,11 +137,19 @@ impl TableSaw {
             start <= end,
             "the blade's travel runs backward: {start} to {end}"
         );
+        assert!(
+            Angle::ZERO <= self.tilt && self.tilt <= MAX_TILT,
+            "the blade tilts from square to {MAX_TILT}, not {}",
+            self.tilt
+        );
         let tool = Tool::TableSaw {
             saw: *self,
             lie: Lie::Board(lie),
             travel: (start, end),
         };
+        if self.tilt != Angle::ZERO {
+            return self.feed_tilted(board, lie, (start, end), tool);
+        }
         if let Some(stop) = self.miter_gauge
             && self.gauge_angle != Angle::ZERO
         {
@@ -279,6 +295,130 @@ impl TableSaw {
         Ok(Pass::Cut(sort_out(pieces, measured, toward_fence, waste)))
     }
 
+    /// Feeds a board past the blade tilted, as `feed` does, against the rip fence or the miter
+    /// gauge at any angle: the blade leans about its path along the table, so the slot's faces
+    /// lean in the board, and where the setting puts them is where they meet the table.
+    fn feed_tilted(
+        &self,
+        board: &Board,
+        lie: Orientation,
+        (start, end): (Length, Length),
+        tool: Tool,
+    ) -> Result<Pass, CutError> {
+        if lie.on_edge() {
+            return Err(CutError::NotModeled(
+                "standing on edge, a board can only be cut with the blade square so far",
+            ));
+        }
+        let (across, across_backward) = lie.across();
+        let (along, _) = lie.along();
+        let (up, up_backward) = lie.up();
+        let thickness = up.of(board);
+        if self.height <= thickness {
+            return Err(CutError::NotModeled(
+                "a tilted blade has to reach above the board so far",
+            ));
+        }
+        let (span, depth) = (across.of(board), along.of(board));
+        // Toward the fence and along the blade's path, in the board's face: turned with the
+        // gauge, if it's guiding the board.
+        let angle = match self.miter_gauge {
+            Some(_) => self.gauge_angle,
+            None => Angle::ZERO,
+        };
+        let (cos, sin) = angle.unit();
+        let toward_fence = lie.direction_onto_board(cos, -sin);
+        let travel = lie.direction_onto_board(sin, cos);
+        let (out, lean) = toward_fence.tilted(self.tilt);
+        // Flipped over, the board's `t` runs down the table's up.
+        let lean = if up_backward { -lean } else { lean };
+        let table = if up_backward { thickness } else { Length::ZERO };
+        let normal = ((out.scale_squared() + i128::from(lean).pow(2)) as f64).sqrt();
+        let at_table = |(l, w): (Length, Length)| {
+            Length::from_nm((out.dot(l, w) + i128::from(lean) * table.as_nm() as i128) as i64)
+        };
+        let kerf_width = Length::from_nm((self.blade.kerf.as_nm() as f64 * normal).round() as i64);
+        // Square to its faces and along the table, the blade's tilted faces move the setting's
+        // change times both cosines.
+        let cosines = angle.radians().cos() * out.scale() / normal;
+        let (near, far, waste) = match self.miter_gauge {
+            // The stop-side face crosses the gauge's face, at the board's trailing side, `stop`
+            // from the stop, and leans toward the stop going up.
+            Some(stop) => {
+                if stop <= Length::ZERO {
+                    return Err(CutError::NonPositiveSetting(stop));
+                }
+                let near = at_table(lie.point_onto_board(board, stop, depth));
+                let toward = Edge::leaning(out, lean, near.as_nm() as i128);
+                reaches_beyond(board, toward, stop, cosines)?;
+                let along_face =
+                    Length::from_nm((self.blade.kerf.as_nm() as f64 / cosines).round() as i64);
+                let waste = ((stop + along_face).min(span) - stop).max(Length::ZERO);
+                (near, near + kerf_width, waste)
+            }
+            // The fence-side face is `fence` from the fence, and leans away from it going up.
+            None => {
+                let (_, fence_side) = self.slot(span)?;
+                let far = at_table(lie.point_onto_board(board, fence_side, Length::ZERO));
+                let across_table =
+                    Length::from_nm((self.blade.kerf.as_nm() as f64 / cosines).round() as i64);
+                let waste = (fence_side.min(span) - (fence_side - across_table).max(Length::ZERO))
+                    .max(Length::ZERO);
+                (far - kerf_width, far, waste)
+            }
+        };
+        // The blade's travel, from the board's leading corner.
+        let lead = [
+            (Length::ZERO, Length::ZERO),
+            (board.length(), Length::ZERO),
+            (Length::ZERO, board.width()),
+            (board.length(), board.width()),
+        ]
+        .into_iter()
+        .map(|(l, w)| travel.dot(l, w))
+        .min()
+        .expect("four corners");
+        let lead = Length::from_nm(lead as i64);
+        // Its teeth reach `height` up, at the top of a circle tilted from upright.
+        let radius = self.blade.radius();
+        let rise = Length::from_nm((radius.as_nm() as f64 * out.scale() / normal).round() as i64);
+        let center = self.height - rise;
+        let center = if up_backward {
+            thickness - center
+        } else {
+            center
+        };
+        let kerf = Kerf::tilted(
+            out,
+            lean,
+            (near, far),
+            travel,
+            (lead + scaled(start, travel), lead + scaled(end, travel)),
+            radius,
+            center,
+        );
+        if !board.touched_by(&kerf) {
+            return Ok(Pass::Missed);
+        }
+        let (kerfed, pieces) = board.sawn(kerf, &Operation::new(tool));
+        if let [whole] = pieces.as_slice()
+            && whole.board == kerfed
+        {
+            return Ok(Pass::Kerfed(kerfed));
+        }
+        let toward_fence = |piece: &Piece| on_table(piece, across, span, across_backward).1;
+        // Each piece is wholly on one side of the slot, so any corner of it says which: the
+        // fence's side is where its faces are further along their normal.
+        let middle = near.as_nm() as i128 + far.as_nm() as i128;
+        let measured = |piece: &Piece| {
+            let [l, w, t] = piece.board.corners()[0];
+            let at = out.dot(piece.l + l, piece.w + w)
+                + i128::from(lean) * (piece.t + t).as_nm() as i128;
+            (2 * at > middle) == self.miter_gauge.is_none()
+        };
+        Ok(Pass::Cut(sort_out(pieces, measured, toward_fence, waste)))
+    }
+
     /// Pushes `board`, lying as `lie` says, all the way past the blade. It's cut apart if the
     /// blade is at least as high as the board is thick, and grooved if it's lower.
     pub fn rip(&self, board: &Board, lie: Orientation) -> Result<Pass, CutError> {
@@ -354,6 +494,11 @@ impl TableSaw {
         if self.miter_gauge.is_some() && self.gauge_angle != Angle::ZERO {
             return Err(CutError::NotModeled(
                 "a glue-up against the miter gauge can only be cut square so far",
+            ));
+        }
+        if self.tilt != Angle::ZERO {
+            return Err(CutError::NotModeled(
+                "a glue-up can only be cut with the blade square so far",
             ));
         }
         let laid = Laid::new(glue_up, lie)?;
@@ -704,6 +849,31 @@ impl MiterSaw {
 }
 
 /// `length` times the scale of `direction`, as positions along it are measured.
+/// Errs if none of `board` is beyond `face`, a tilted blade's face, the way it faces: the
+/// setting's too long. The error says the setting that would just reach it: moving the
+/// setting moves the face square to itself by `cosines` as much.
+fn reaches_beyond(
+    board: &Board,
+    face: Edge,
+    setting: Length,
+    cosines: f64,
+) -> Result<(), CutError> {
+    if board.reaches_beyond(face) {
+        return Ok(());
+    }
+    let normal = ((face.out.scale_squared() + i128::from(face.lean).pow(2)) as f64).sqrt();
+    let furthest = board
+        .corners()
+        .into_iter()
+        .map(|[l, w, t]| face.out.dot(l, w) as f64 + face.lean as f64 * t.as_nm() as f64)
+        .fold(f64::MIN, f64::max);
+    let short = (face.at as f64 - furthest) / normal / cosines;
+    Err(CutError::MissesBoard {
+        setting,
+        available: setting - Length::from_nm(short.round() as i64),
+    })
+}
+
 /// Errs if the blade would pass wholly beyond the boards: the setting's too long. Each board
 /// comes with the blade's stop-side face, at a position along a direction pointing back toward
 /// the stop, in its own coordinates. A slanted blade can still cross a mitered end even with

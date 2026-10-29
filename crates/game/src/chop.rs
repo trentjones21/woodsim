@@ -825,6 +825,7 @@ mod tests {
             height: Length::from_inches(1),
             miter_gauge: None,
             gauge_angle: woodsim::Angle::ZERO,
+            tilt: woodsim::Angle::ZERO,
         };
         let board = Board::new(
             Length::from_inches(24),

@@ -35,6 +35,7 @@ fn table_saw(fence: Length, height: Length) -> TableSaw {
         height,
         miter_gauge: None,
         gauge_angle: woodsim::Angle::ZERO,
+        tilt: woodsim::Angle::ZERO,
     }
 }
 
@@ -90,6 +91,7 @@ fn miter_gauge(stop: Length) -> TableSaw {
     TableSaw {
         miter_gauge: Some(stop),
         gauge_angle: woodsim::Angle::ZERO,
+        tilt: woodsim::Angle::ZERO,
         ..table_saw(inches(6), inches(1))
     }
 }

@@ -32,6 +32,7 @@ fn gauge(stop: Length, hundredths: i32) -> TableSaw {
         height: inches(1),
         miter_gauge: Some(stop),
         gauge_angle: Angle::from_hundredths(hundredths),
+        tilt: Angle::ZERO,
     }
 }
 

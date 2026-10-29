@@ -83,7 +83,6 @@ impl Kerf {
 
     /// A slot cut by a blade tilted from square to the face, whose faces lean `lean` (see
     /// `Kerf`): `across` is square to `along`, and with `lean` has no common factor.
-    #[cfg_attr(not(test), expect(dead_code, reason = "no saw tilts its blade yet"))]
     pub(crate) fn tilted(
         across: Direction,
         lean: i64,

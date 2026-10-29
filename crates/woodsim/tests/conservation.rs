@@ -37,7 +37,7 @@ proptest! {
     #[test]
     fn rip_conserves_wood(width in 1..MAX_NM, fence in 1..MAX_NM, kerf in 1..INCH_NM) {
         let board = Board::new(Length::from_inches(96), Length::from_nm(width), Length::from_inch_fraction(3, 4));
-        let saw = TableSaw { blade: blade(kerf), fence: Length::from_nm(fence), height: Length::from_inches(1), miter_gauge: None, gauge_angle: woodsim::Angle::ZERO };
+        let saw = TableSaw { blade: blade(kerf), fence: Length::from_nm(fence), height: Length::from_inches(1), miter_gauge: None, gauge_angle: woodsim::Angle::ZERO, tilt: woodsim::Angle::ZERO };
 
         match saw.rip(&board, Orientation::default()) {
             Ok(Pass::Cut(cut)) => {
@@ -66,6 +66,7 @@ proptest! {
             height: Length::from_inches(1),
             miter_gauge: Some(Length::from_nm(stop)),
             gauge_angle: woodsim::Angle::ZERO,
+            tilt: woodsim::Angle::ZERO,
         };
 
         match saw.rip(&board, Orientation::default().turned_left()) {
@@ -116,7 +117,7 @@ proptest! {
         travel in 0..40 * INCH_NM,
     ) {
         let board = Board::new(Length::from_inches(24), Length::from_nm(width), Length::from_inch_fraction(3, 4));
-        let saw = TableSaw { blade: blade(INCH_NM / 8), fence: Length::from_nm(fence), height: Length::from_nm(height), miter_gauge: None, gauge_angle: woodsim::Angle::ZERO };
+        let saw = TableSaw { blade: blade(INCH_NM / 8), fence: Length::from_nm(fence), height: Length::from_nm(height), miter_gauge: None, gauge_angle: woodsim::Angle::ZERO, tilt: woodsim::Angle::ZERO };
         let start = Length::from_nm(start);
 
         match saw.feed(&board, Orientation::default(), start, start + Length::from_nm(travel)) {
@@ -150,7 +151,7 @@ proptest! {
         further in 0..10 * INCH_NM,
     ) {
         let board = Board::new(Length::from_inches(24), Length::from_inch_fraction(29, 4), Length::from_inch_fraction(3, 4));
-        let saw = TableSaw { blade: blade(INCH_NM / 8), fence: Length::from_inches(6), height: Length::from_nm(height), miter_gauge: None, gauge_angle: woodsim::Angle::ZERO };
+        let saw = TableSaw { blade: blade(INCH_NM / 8), fence: Length::from_inches(6), height: Length::from_nm(height), miter_gauge: None, gauge_angle: woodsim::Angle::ZERO, tilt: woodsim::Angle::ZERO };
         let start = -Length::from_inches(8);
         let end = Length::from_nm(end).max(start);
 
@@ -168,7 +169,7 @@ proptest! {
         at in INCH_NM..23 * INCH_NM,
     ) {
         let board = Board::new(Length::from_inches(24), Length::from_inch_fraction(29, 4), Length::from_inch_fraction(3, 4));
-        let saw = TableSaw { blade: blade(INCH_NM / 8), fence: Length::from_nm(fence), height: Length::from_nm(height), miter_gauge: None, gauge_angle: woodsim::Angle::ZERO };
+        let saw = TableSaw { blade: blade(INCH_NM / 8), fence: Length::from_nm(fence), height: Length::from_nm(height), miter_gauge: None, gauge_angle: woodsim::Angle::ZERO, tilt: woodsim::Angle::ZERO };
         let slotted = match saw.feed(&board, Orientation::default(), -Length::from_inches(6), Length::from_nm(end)) {
             Ok(Pass::Kerfed(slotted)) => slotted,
             _ => return Ok(()),

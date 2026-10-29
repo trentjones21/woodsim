@@ -431,8 +431,13 @@ fn settings(tool: Tool) -> String {
                 Lie::Board(lie) if lie.on_edge() => ", the board on edge",
                 _ => "",
             };
+            let tilt = if saw.tilt == woodsim::Angle::ZERO {
+                String::new()
+            } else {
+                format!(" and tilted {}", saw.tilt)
+            };
             format!(
-                "Table saw, {guide}, blade {} high{edge}",
+                "Table saw, {guide}, blade {} high{tilt}{edge}",
                 measured(saw.height)
             )
         }
@@ -962,7 +967,8 @@ fn nibbles(first: Tool, then: Tool) -> bool {
             },
         ) => {
             lie_a == lie_b
-                && (a.blade, a.height, a.gauge_angle) == (b.blade, b.height, b.gauge_angle)
+                && (a.blade, a.height, a.gauge_angle, a.tilt)
+                    == (b.blade, b.height, b.gauge_angle, b.tilt)
                 && match (a.miter_gauge, b.miter_gauge) {
                     (None, None) => b.fence <= a.fence,
                     (Some(stop_a), Some(stop_b)) => stop_b <= stop_a,
@@ -989,6 +995,7 @@ fn verb(tool: Tool) -> &'static str {
                 woodsim::TableSaw {
                     miter_gauge: Some(_),
                     gauge_angle: woodsim::Angle::ZERO,
+                    tilt: woodsim::Angle::ZERO,
                     ..
                 },
             ..

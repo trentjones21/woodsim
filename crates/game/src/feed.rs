@@ -79,6 +79,7 @@ impl Default for TableSawStation {
                 height: Length::from_inches(1),
                 miter_gauge: None,
                 gauge_angle: woodsim::Angle::ZERO,
+                tilt: woodsim::Angle::ZERO,
             },
             board: Workpiece::Board(new_stock()),
             lie: Orientation::default(),

@@ -29,4 +29,4 @@ pub use history::{Lie, Operation, Origin, Part, Side, Source, Tool};
 pub use kerf::{Across, Kerf};
 pub use length::Length;
 pub use orientation::{Axis, Orientation};
-pub use saw::{Blade, Cut, CutError, MAX_GAUGE, MiterSaw, Pass, TableSaw};
+pub use saw::{Blade, Cut, CutError, MAX_GAUGE, MAX_TILT, MiterSaw, Pass, TableSaw};

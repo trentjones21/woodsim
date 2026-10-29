@@ -37,6 +37,7 @@ fn table_saw(fence: Length, height: Length) -> TableSaw {
         height,
         miter_gauge: None,
         gauge_angle: woodsim::Angle::ZERO,
+        tilt: woodsim::Angle::ZERO,
     }
 }
 
@@ -279,17 +280,24 @@ fn joints_are_numbered_in_the_order_they_go_together() {
     assert!(bigger.joints().last().unwrap().number > numbers[1]);
 }
 
-/// A saw pass, in 64ths of an inch: a rip against the fence with the blade at some height, or
-/// a chop on the miter saw at some angle, through or stopping above the table.
+/// A saw pass, in 64ths of an inch: a rip against the fence with the blade at some height,
+/// square or tilted some hundredths of a degree, or a chop on the miter saw at some angle,
+/// through or stopping above the table.
 #[derive(Clone, Debug)]
 enum Pass64 {
-    Rip { fence: i64, height: i64 },
+    Rip { fence: i64, height: i64, tilt: i32 },
     Chop { length: i64, miter: i32, scar: bool },
 }
 
 fn pass() -> impl Strategy<Value = Pass64> {
     prop_oneof![
-        (1..200i64, 8..100i64).prop_map(|(fence, height)| Pass64::Rip { fence, height }),
+        (1..200i64, 8..100i64, prop_oneof![Just(0), 1..=4500i32]).prop_map(
+            |(fence, height, tilt)| Pass64::Rip {
+                fence,
+                height,
+                tilt
+            }
+        ),
         (16..1500i64, -4500..=4500i32, any::<bool>()).prop_map(|(length, miter, scar)| {
             Pass64::Chop {
                 length,
@@ -304,8 +312,15 @@ fn pass() -> impl Strategy<Value = Pass64> {
 fn apply(pass: &Pass64, board: &Board) -> Vec<Board> {
     let sixty_fourths = |n: i64| Length::from_inch_fraction(n, 64);
     let result = match *pass {
-        Pass64::Rip { fence, height } => table_saw(sixty_fourths(fence), sixty_fourths(height))
-            .rip(board, Orientation::default()),
+        Pass64::Rip {
+            fence,
+            height,
+            tilt,
+        } => TableSaw {
+            tilt: Angle::from_hundredths(tilt),
+            ..table_saw(sixty_fourths(fence), sixty_fourths(height))
+        }
+        .rip(board, Orientation::default()),
         Pass64::Chop {
             length,
             miter,

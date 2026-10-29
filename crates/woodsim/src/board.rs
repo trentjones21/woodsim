@@ -160,6 +160,13 @@ impl Board {
             .any(|region| region.solid(self.thickness).reaches_below(direction, at))
     }
 
+    /// Whether any of the board's wood is beyond `side`, away from the wood it bounds, exactly.
+    pub(crate) fn reaches_beyond(&self, side: Edge) -> bool {
+        self.face
+            .iter()
+            .any(|region| region.solid(self.thickness).beyond(side))
+    }
+
     /// The corners of the board's wood, `[l, w, t]` to the nearest nanometer: its face's on the
     /// bottom and the top, and wherever leaning sides meet between.
     pub fn corners(&self) -> Vec<[Length; 3]> {
