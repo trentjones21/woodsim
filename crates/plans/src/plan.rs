@@ -884,6 +884,11 @@ impl Solid {
         &self.corners
     }
 
+    #[cfg(test)]
+    pub fn label(&self) -> Option<&str> {
+        self.label.as_deref()
+    }
+
     /// Whether `other` is in front of this one as seen from `toward`, if a plane through one
     /// of their faces has them on either side of it.
     fn behind(&self, other: &Solid, toward: Vec3) -> Option<bool> {
@@ -2174,6 +2179,67 @@ mod tests {
             page.contains("the board resting on its beveled edge, its bottom face to the fence"),
             "{page}"
         );
+    }
+
+    #[test]
+    fn a_glue_up_cut_at_an_angle_is_pictured_and_says_what_it_rested_on() {
+        // A 1x6 with an edge beveled 30°, a 1x2 glued flat onto the bevel, the glue-up resting
+        // on the 1x2's edge and crosscut 10" long.
+        let saw = woodsim::TableSaw {
+            blade: woodsim::Blade {
+                diameter: Length::from_inches(10),
+                kerf: woodsim::Blade::FULL_KERF,
+            },
+            fence: Length::from_inches(4),
+            height: Length::from_inches(2),
+            miter_gauge: None,
+            gauge_angle: Angle::ZERO,
+            tilt: Angle::from_degrees(30),
+        };
+        let board = |width: Length| {
+            Board::new(
+                Length::from_inches(24),
+                width,
+                Length::from_inch_fraction(3, 4),
+            )
+        };
+        let Ok(Pass::Cut(cut)) = saw.rip(
+            &board(Length::from_inch_fraction(11, 2)),
+            Orientation::default(),
+        ) else {
+            panic!("expected a beveled rip");
+        };
+        let beveled = cut.piece.board;
+        let bevel = Surface::Side(beveled.bevels()[0].0);
+        let mut glue_up = Assembly::of(beveled);
+        assert!(glue_up.attach(
+            (0, bevel),
+            &Assembly::of(board(Length::from_inch_fraction(3, 2))),
+            (0, Surface::Bottom),
+            Mating::default(),
+            Fastener::Glue,
+        ));
+        let edge = side(&glue_up.members()[1].board, |edge| edge.out.w > 0);
+        let lie = glue_up
+            .resting((1, edge), (0, Surface::Top))
+            .expect("it rests on the 1x2's edge");
+        let Ok(woodsim::GlueUpPass::Cut(cut)) = MiterSaw::twelve_inch().crosscut_glue_up(
+            &glue_up,
+            lie.rotation(),
+            Length::from_inches(10),
+        ) else {
+            panic!("expected the glue-up crosscut");
+        };
+        let page = Plan::of(cut.piece).page();
+        assert!(
+            page.contains(
+                "Miter saw, square, stop at 10\", the glue-up resting on one board's edge, \
+                 another's edge to the fence"
+            ),
+            "{page}"
+        );
+        // A picture of each cut: the bevel ripped, and the glue-up crosscut.
+        assert_eq!(page.matches("class=\"setup\"").count(), 2, "{page}");
     }
 
     #[test]

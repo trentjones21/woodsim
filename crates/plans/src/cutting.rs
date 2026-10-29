@@ -392,7 +392,7 @@ impl Cutting {
 
     /// A picture of a cut on its saw, with what it keeps picked out (only the measured piece,
     /// if `measured`), and the parts it made labeled if `labeled`; nothing for a cut through a
-    /// glue-up.
+    /// glue-up that didn't keep what it went through.
     fn picture_of(
         &self,
         cut: usize,
@@ -401,14 +401,15 @@ impl Cutting {
         labeled: bool,
         measured: bool,
     ) -> String {
-        let picked = |out: &Origin, led_to: &[usize]| {
+        let picked = |out: &Origin| {
             if measured && out.side() != Some(Side::Measured) {
                 return None;
             }
-            let label = finished_as(out, led_to, members)
-                .first()
+            let label = members
+                .iter()
+                .position(|member| member.board.origin().same(out))
                 .filter(|_| labeled)
-                .map(|&member| labels[member].clone());
+                .map(|member| labels[member].clone());
             Some(label)
         };
         setup::picture(&self.cuts[cut], &picked).unwrap_or_default()
@@ -499,14 +500,13 @@ impl Cutting {
 
 /// The saw and how it's set for a pass, and how the wood lies on it, the way you'd set it up.
 fn settings(step: &CutStep) -> String {
-    settings_of(&step.operation, step.inputs.first())
+    settings_of(&step.operation)
 }
 
-/// The saw and how it's set for `operation`, and how the wood lies on it: `cut`, the board it
-/// cut, if it went through one board on its own.
-pub fn settings_of(operation: &Operation, cut: Option<&Origin>) -> String {
+/// The saw and how it's set for `operation`, and how the wood lies on it.
+pub fn settings_of(operation: &Operation) -> String {
     let tool = operation.tool;
-    let lying = lying(tool, cut);
+    let lying = lying(operation);
     match tool {
         Tool::TableSaw { saw, .. } => {
             let guide = match saw.miter_gauge {
@@ -572,41 +572,43 @@ pub fn settings_of(operation: &Operation, cut: Option<&Origin>) -> String {
 
 /// How the wood lay on the saw, if not flat the way it came: ", the board on edge", or, rested
 /// on a surface at an angle, ", the board resting on its beveled edge, its bottom face to the
-/// fence".
-fn lying(tool: Tool, cut: Option<&Origin>) -> String {
-    let (lie, glue_up) = match tool {
-        Tool::TableSaw { lie, .. }
-        | Tool::MiterSaw { lie, .. }
-        | Tool::Jointer { lie, .. }
-        | Tool::Planer { lie, .. } => match lie {
-            Lie::Board(lie) if lie.is_square() && lie.on_edge() => {
-                return ", the board on edge".to_string();
+/// fence", or ", the glue-up resting on one board's beveled edge, another's end to the fence",
+/// its boards not yet the parts they'll be, so not called by their labels.
+fn lying(operation: &Operation) -> String {
+    let (lie, glue_up) = match operation.tool.lie() {
+        Lie::Board(lie) if lie.is_square() && lie.on_edge() => {
+            return ", the board on edge".to_string();
+        }
+        Lie::Board(lie) if lie.is_square() && lie.on_end() => {
+            return ", the board on end".to_string();
+        }
+        Lie::Board(lie) if lie.is_square() => return String::new(),
+        Lie::Board(lie) => (lie, false),
+        Lie::GlueUp(rotation) => {
+            let lie = Orientation::from_rotation(rotation);
+            if lie.is_square() {
+                return String::new();
             }
-            Lie::Board(lie) if lie.is_square() && lie.on_end() => {
-                return ", the board on end".to_string();
-            }
-            Lie::Board(lie) if lie.is_square() => return String::new(),
-            Lie::Board(lie) => (lie, false),
-            Lie::GlueUp(rotation) => {
-                let lie = Orientation::from_rotation(rotation);
-                if lie.is_square() {
-                    return String::new();
-                }
-                (lie, true)
-            }
-        },
+            (lie, true)
+        }
     };
     // What it rested on, from the wood it cut.
-    let wood = match glue_up {
-        false => cut.map(|board| Assembly::of(board.replay())),
-        true => None,
-    };
-    match wood.as_ref().and_then(|wood| wood.rests_on(lie)) {
-        Some(((_, down), (_, fence))) => format!(
+    let wood = operation.wood.as_ref();
+    match wood.and_then(|wood| Some((wood.members().len(), wood.rests_on(lie)?))) {
+        Some((1, ((_, down), (_, fence)))) => format!(
             ", the board resting on its {}, its {} to the fence",
             name(down),
             name(fence)
         ),
+        Some((_, ((on, down), (against, fence)))) => {
+            let whose = if on == against { "its" } else { "another's" };
+            let one = if on == against { "a" } else { "one" };
+            format!(
+                ", the glue-up resting on {one} board's {}, {whose} {} to the fence",
+                name(down),
+                name(fence)
+            )
+        }
         None if glue_up => ", the glue-up resting at an angle".to_string(),
         None => ", the board resting at an angle".to_string(),
     }
@@ -1383,6 +1385,88 @@ mod tests {
         // On end against the fence, its faces are parallel to the blade.
         assert_eq!(pass(flat.stood()), "Resaw");
         assert_eq!(pass(flat.stood().turned_left()), "Rip");
+    }
+
+    #[test]
+    fn a_glue_up_at_an_angle_says_which_boards_it_rests_on_and_faces_the_fence_with() {
+        // A 1x4 with an edge beveled 30°, glued by its bevel onto a 1x6's top face, so it
+        // stands off it at an angle; on end, the 1x6's end down and the 1x4's face to the fence.
+        let tilted = woodsim::TableSaw {
+            blade: woodsim::Blade {
+                diameter: Length::from_inches(10),
+                kerf: woodsim::Blade::FULL_KERF,
+            },
+            fence: Length::from_inch_fraction(5, 2),
+            height: Length::from_inches(2),
+            miter_gauge: None,
+            gauge_angle: woodsim::Angle::ZERO,
+            tilt: woodsim::Angle::from_degrees(30),
+        };
+        let board = |width: Length| {
+            Board::new(
+                Length::from_inches(24),
+                width,
+                Length::from_inch_fraction(3, 4),
+            )
+        };
+        let Ok(woodsim::Pass::Cut(cut)) = tilted.rip(
+            &board(Length::from_inch_fraction(7, 2)),
+            Orientation::default(),
+        ) else {
+            panic!("expected a beveled rip");
+        };
+        let beveled = cut.piece.board;
+        let bevel = woodsim::Surface::Side(beveled.bevels()[0].0);
+        let mut glue_up = Assembly::of(board(Length::from_inch_fraction(11, 2)));
+        assert!(glue_up.attach(
+            (0, woodsim::Surface::Top),
+            &Assembly::of(beveled),
+            (0, bevel),
+            woodsim::Mating::default(),
+            woodsim::Fastener::Glue,
+        ));
+        let end = woodsim::surfaces(&glue_up.members()[0].board)
+            .into_iter()
+            .find(|surface| matches!(surface, woodsim::Surface::Side(edge) if edge.out.l < 0))
+            .expect("an end");
+        let chopped = |down, against, wood: Option<Assembly>| {
+            let lie = glue_up.resting(down, against).expect("it rests there");
+            assert!(!lie.is_square());
+            Operation {
+                number: 1,
+                tool: Tool::MiterSaw {
+                    saw: woodsim::MiterSaw::twelve_inch(),
+                    lie: Lie::GlueUp(lie.rotation()),
+                    length: Length::from_inches(10),
+                    bottom: Length::ZERO,
+                },
+                wood,
+            }
+        };
+        let on_end = |wood| chopped((0, end), (1, woodsim::Surface::Top), wood);
+        assert_eq!(
+            settings_of(&on_end(Some(glue_up.clone()))),
+            "Miter saw, square, stop at 10\", the glue-up resting on one board's end, \
+             another's top face to the fence"
+        );
+        // Resting on the 1x4's top face, its edge to the fence, the 1x6 leaning off it.
+        let edge = woodsim::surfaces(&glue_up.members()[1].board)
+            .into_iter()
+            .find(|surface| {
+                matches!(surface, woodsim::Surface::Side(edge) if edge.out.w > 0 && !edge.leans())
+            })
+            .expect("its square edge");
+        let on_its_face = chopped((1, woodsim::Surface::Top), (1, edge), Some(glue_up.clone()));
+        assert_eq!(
+            settings_of(&on_its_face),
+            "Miter saw, square, stop at 10\", the glue-up resting on a board's top face, its \
+             edge to the fence"
+        );
+        // A pass that didn't keep what it went through can't say.
+        assert_eq!(
+            settings_of(&on_end(None)),
+            "Miter saw, square, stop at 10\", the glue-up resting at an angle"
+        );
     }
 
     #[test]

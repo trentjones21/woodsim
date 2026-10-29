@@ -1,13 +1,15 @@
-//! Pictures of the cuts in plans: the wood on the saw as it lay for a cut, the saw set as it
-//! was, and the blade where it cut, with what the cut kept picked out and the setting
-//! dimensioned, so a step reads at a glance. Each is drawn in the saw's own frame (along the
-//! table, across it toward the fence, and up, from the near corner of the box the wood fills,
-//! as woodsim measures a cut), with the fence at the back, the way `plan::draw` draws an
-//! assembly on the bench. The blade is the one that cut the slot, from the slot itself.
+//! Pictures of the cuts in plans: the wood on the saw as it lay for a cut, a board or every
+//! board of a glue-up, the saw set as it was, and the blade where it cut, with what the cut
+//! kept picked out and the setting dimensioned, so a step reads at a glance. Each is drawn in
+//! the saw's own frame (along the table, across it toward the fence, and up, from the near
+//! corner of the box the wood fills, as woodsim measures a cut), with the fence at the back,
+//! the way `plan::draw` draws an assembly on the bench. What the cut left is the pass made
+//! again on the wood it kept (`Operation::left`), and the blade is the one that cut the slot,
+//! from the slot itself.
 
 use std::{f64::consts::TAU, sync::Arc};
 
-use woodsim::{Kerf, Length, Lie, Member, Origin, Part, Rotation, Source, Tool, Vector};
+use woodsim::{Board, Kerf, Length, Member, Origin, Rotation, Source, Tool, Vector};
 
 use crate::{
     cutting::CutStep,
@@ -52,12 +54,14 @@ impl Half {
     }
 }
 
-/// Which of the pieces a cut left that went on to pick out in its picture, given each and the
-/// members it led to: picked out (`Some`), with its label if it has one.
-pub type Picked<'a> = &'a dyn Fn(&Origin, &[usize]) -> Option<Option<String>>;
+/// Whether a board a cut left that went on is picked out in its picture: picked out (`Some`),
+/// with its label if it has one. Asked of a board the blade missed, in a part of what the cut
+/// left that's picked out, only its label counts.
+pub type Picked<'a> = &'a dyn Fn(&Origin) -> Option<Option<String>>;
 
 /// A picture of `step` on its saw, with what it left picked out as `picked` says, or `None`
-/// for a pass through a glue-up, whose boards' places in it aren't kept with them.
+/// for a pass through a glue-up read from a recipe written before passes kept what they went
+/// through.
 pub fn picture(step: &CutStep, picked: Picked) -> Option<String> {
     let (solids, overlay) = scene(step, picked)?;
     Some(draw(&solids, &overlay, "setup", SIZE))
@@ -65,69 +69,39 @@ pub fn picture(step: &CutStep, picked: Picked) -> Option<String> {
 
 /// What a picture of `step` draws: the saw, the blade, and the wood, and what goes over them.
 fn scene(step: &CutStep, picked: Picked) -> Option<(Vec<Solid>, Overlay)> {
-    let tool = step.operation.tool;
-    let (Tool::TableSaw {
-        lie: Lie::Board(lie),
-        ..
-    }
-    | Tool::MiterSaw {
-        lie: Lie::Board(lie),
-        ..
-    }
-    | Tool::Jointer {
-        lie: Lie::Board(lie),
-        ..
-    }
-    | Tool::Planer {
-        lie: Lie::Board(lie),
-        ..
-    }) = tool
-    else {
-        return None;
-    };
-    // The pass as it ended up, and everything it left of the board on the saw.
-    let out = step.outputs.iter().map(|(out, _)| out).find(|out| {
-        matches!(out.source(), Source::Sawn { operation, .. }
-                if Arc::ptr_eq(operation, &step.operation))
-    })?;
-    let Source::Sawn { from, kerf, .. } = out.source() else {
-        return None;
-    };
-    let (board, pieces) = out.cut_from()?;
-    let mut kept: Vec<Option<Option<String>>> = vec![None; pieces.len()];
-    for (out, led_to) in &step.outputs {
-        if let Source::Sawn {
-            from: cut, part, ..
-        } = out.source()
-            && cut.same(from)
-        {
-            let index = match part {
-                Part::Whole => 0,
-                Part::Piece(n) => *n,
-            };
-            if let Some(slot) = kept.get_mut(index) {
-                *slot = picked(out, led_to);
-            }
-        }
-    }
+    let operation = &step.operation;
+    let tool = operation.tool;
+    // What was on the saw, a board on its own as a glue-up of one, and everything the pass as
+    // it ended up left of it, each board where it was in it.
+    let wood = operation.wood.as_ref()?;
+    let left = operation.left()?.ok()?;
+    let parts = left.parts();
 
-    // The board on the saw: turned as it lay, from the near corner of the box it fills; on the
+    // The wood on the saw: turned as it lay, from the near corner of the box it fills; on the
     // jointer, leaning with its fence.
     let rotation = match tool {
-        Tool::Jointer { jointer, .. } => jointer.leaned(lie.rotation()),
-        _ => lie.rotation(),
+        Tool::Jointer { jointer, .. } => jointer.leaned(tool.lie().rotation()),
+        _ => tool.lie().rotation(),
     };
     let nm = |length: Length| length.as_nm() as f64;
-    let turned: Vec<Vec3> = board
-        .corners()
-        .into_iter()
-        .map(|p| rotation.apply(p.map(nm)))
+    let turned: Vec<Vec3> = wood
+        .members()
+        .iter()
+        .flat_map(|member| {
+            member
+                .board
+                .corners()
+                .into_iter()
+                .map(move |[l, w, t]| rotation.apply(member.point(l, w, t).map(nm)))
+        })
         .collect();
     let least = |k: usize| turned.iter().map(|p| p[k]).fold(f64::MAX, f64::min);
     let most = |k: usize| turned.iter().map(|p| p[k]).fold(f64::MIN, f64::max);
     let low = [0, 1, 2].map(|k| least(k).round());
     let [depth, span, tall] = [0, 1, 2].map(|k| (most(k) - low[k]).round());
+    // A point in the wood, on the saw.
     let on_saw = |p: Vec3| add(rotation.apply(p), scaled(low, -1.0));
+    let corners: Vec<Vec3> = turned.iter().map(|&p| add(p, scaled(low, -1.0))).collect();
     // The box the wood fills, as the halves it's the inside of: its top first, so the blade
     // above the wood is one piece.
     let walls = [
@@ -139,8 +113,26 @@ fn scene(step: &CutStep, picked: Picked) -> Option<(Vec<Solid>, Overlay)> {
         Half::new([0.0, 0.0, -1.0], 0.0),
     ];
 
-    let disc = Disc::of(kerf);
-    let normal = rotation.apply(disc.normal);
+    // The blade, from the slot it cut in the first board it cut, on that board as it was on the
+    // saw: the piece of it this is had its corner `at` on it.
+    let (member, kerf, at) = parts
+        .iter()
+        .flat_map(|part| part.members())
+        .find_map(|member| match member.board.origin().source() {
+            Source::Sawn {
+                operation: by,
+                kerf,
+                at,
+                ..
+            } if Arc::ptr_eq(by, operation) => Some((member, kerf, at)),
+            _ => None,
+        })?;
+    let corner = add(
+        member.rotation.apply(scaled(at.map(nm), -1.0)),
+        member.at.map(nm),
+    );
+    let disc = Disc::of(kerf).placed(member.rotation.then(rotation), on_saw(corner));
+    let normal = disc.normal;
     // The jointer's fence, square to the way it leans, and where its face is: through the
     // wood's furthest reach that way.
     let fence = match tool {
@@ -158,11 +150,11 @@ fn scene(step: &CutStep, picked: Picked) -> Option<(Vec<Solid>, Overlay)> {
     let u = match tool {
         // Its cutterhead under the middle of the wood, half of it across, or over it.
         Tool::Jointer { .. } | Tool::Planer { .. } => {
-            let at = |u: f64| on_saw(disc.center(u))[0];
+            let at = |u: f64| disc.center(u)[0];
             let (start, per) = (at(0.0), at(disc.scale) - at(0.0));
             (depth / 2.0 - start) / per * disc.scale
         }
-        _ => disc.drawn_at(kerf, &board.corners(), &|p| on_saw(p)[2]),
+        _ => disc.drawn_at(kerf, &corners),
     };
     // The blade stops at the table and at the guides; the miter saw's at its middle, where its
     // guard would cover it, so its lower half shows. The jointer's cutterhead turns below its
@@ -180,12 +172,12 @@ fn scene(step: &CutStep, picked: Picked) -> Option<(Vec<Solid>, Overlay)> {
         Tool::MiterSaw { .. } => {
             keep.push(Half::new([0.0, 1.0, 0.0], span));
             keep.push(Half::new([1.0, 0.0, 0.0], depth));
-            let middle = on_saw(disc.center(u))[2];
+            let middle = disc.center(u)[2];
             keep.push(Half::new([0.0, 0.0, 1.0], middle.max(tall + INCH)));
         }
         Tool::Jointer { .. } | Tool::Planer { .. } => {}
     }
-    let (near, far) = disc.faces(u, &on_saw);
+    let (near, far) = disc.faces(u);
     let sides = [dot(normal, near[0]), dot(normal, far[0])];
     let mut slab: Faces = vec![near.clone(), far.clone()];
     for k in 0..BLADE_SIDES {
@@ -357,7 +349,7 @@ fn scene(step: &CutStep, picked: Picked) -> Option<(Vec<Solid>, Overlay)> {
         // Either side of the cutterhead, the outfeed table, where the wood's going, as high as
         // the knives reach, the infeed table where it rests, lower.
         Tool::Jointer { jointer, .. } => {
-            let head = on_saw(disc.center(u))[0];
+            let head = disc.center(u)[0];
             let gap = nm(jointer.radius()) + 0.25 * INCH;
             let cut = nm(jointer.depth);
             vec![
@@ -393,19 +385,37 @@ fn scene(step: &CutStep, picked: Picked) -> Option<(Vec<Solid>, Overlay)> {
             Some(outline),
         ));
     }
-    let laid = rotation.then(turn);
-    for (piece, kept) in pieces.iter().zip(kept) {
-        let at = view(on_saw([piece.l, piece.w, piece.t].map(nm)));
-        let member = Member {
-            board: piece.board.clone(),
-            rotation: laid,
-            at: at.map(|x| Length::from_nm(x.round() as i64)),
-        };
-        let (paint, label) = match kept {
-            Some(label) => (Paint::Picked, label),
-            None => (Paint::Wood, None),
-        };
-        solids.push(Solid::of(&member, paint, label));
+    // What went on of what the pass left, by the parts it left: a part a board of which went on
+    // is picked out whole, since its boards are glued together.
+    let went_on = |board: &Board| {
+        step.outputs
+            .iter()
+            .map(|(out, _)| out)
+            .find(|out| same_cut(out, board.origin()))
+    };
+    for part in parts {
+        let kept: Vec<Option<Option<String>>> = part
+            .members()
+            .iter()
+            .map(|member| went_on(&member.board).and_then(picked))
+            .collect();
+        let chosen = kept.iter().any(Option::is_some);
+        for (member, kept) in part.members().iter().zip(kept) {
+            let label = match kept {
+                Some(label) => label,
+                // The blade missed it, so it's still what it was.
+                None if chosen => picked(member.board.origin()).flatten(),
+                None => None,
+            };
+            let at = view(on_saw(member.at.map(nm)));
+            let member = Member {
+                board: member.board.clone(),
+                rotation: member.rotation.then(rotation).then(turn),
+                at: at.map(|x| Length::from_nm(x.round() as i64)),
+            };
+            let paint = if chosen { Paint::Picked } else { Paint::Wood };
+            solids.push(Solid::of(&member, paint, label));
+        }
     }
     let overlay = Overlay {
         dimensions: dimensions
@@ -460,6 +470,17 @@ impl Disc {
         }
     }
 
+    /// The same blade, with the board it cut turned by `turn` and its corner moved to `corner`.
+    fn placed(self, turn: Rotation, corner: Vec3) -> Disc {
+        Disc {
+            normal: turn.apply(self.normal),
+            along: turn.apply(self.along),
+            up: turn.apply(self.up),
+            base: add(turn.apply(self.base), corner),
+            ..self
+        }
+    }
+
     /// Its center at `u` along its travel, in nanometers times `scale`, as `kerf.start` and
     /// `kerf.end` are.
     fn center(&self, u: f64) -> Vec3 {
@@ -476,15 +497,16 @@ impl Disc {
         )
     }
 
-    /// Where along its travel to draw it: where the cut stopped, or, for a pass all the way
-    /// through, as the blade comes out the wood's trailing end, all of it above the table back
-    /// in the wood if the wood's long enough, so nothing hides what's in front of it; `corners`
-    /// are the wood's and `height` how high a point is above the table.
-    fn drawn_at(&self, kerf: &Kerf, corners: &[[Length; 3]], height: &dyn Fn(Vec3) -> f64) -> f64 {
+    /// Where along its travel to draw it, on the saw: where the cut stopped, or, for a pass all
+    /// the way through, as the blade comes out the wood's trailing end, all of it above the
+    /// table back in the wood if the wood's long enough, so nothing hides what's in front of
+    /// it; `corners` are the wood's.
+    fn drawn_at(&self, kerf: &Kerf, corners: &[Vec3]) -> f64 {
         let (start, end) = (kerf.start.as_nm() as f64, kerf.end.as_nm() as f64);
+        let height = |p: Vec3| p[2];
         let along: Vec<f64> = corners
             .iter()
-            .map(|p| dot(self.along, p.map(|x| x.as_nm() as f64)) * self.scale)
+            .map(|&p| dot(self.along, add(p, scaled(self.base, -1.0))) * self.scale)
             .collect();
         let lead = along.iter().copied().fold(f64::MAX, f64::min);
         let trail = along.iter().copied().fold(f64::MIN, f64::max);
@@ -509,17 +531,36 @@ impl Disc {
             .clamp(start, end)
     }
 
-    /// Its two faces with its center at `u`, as `place` puts each point.
-    fn faces(&self, u: f64, place: &dyn Fn(Vec3) -> Vec3) -> (Vec<Vec3>, Vec<Vec3>) {
+    /// Its two faces with its center at `u`.
+    fn faces(&self, u: f64) -> (Vec<Vec3>, Vec<Vec3>) {
         let face = |offset: f64| {
             (0..BLADE_SIDES)
                 .map(|k| {
                     let angle = TAU * k as f64 / BLADE_SIDES as f64;
-                    place(add(self.point(u, angle), scaled(self.normal, offset)))
+                    add(self.point(u, angle), scaled(self.normal, offset))
                 })
                 .collect()
         };
         (face(-self.half), face(self.half))
+    }
+}
+
+/// Whether `a` and `b` are the same piece of the same cut of the same board: what a pass made
+/// again leaves, and what it left.
+fn same_cut(a: &Origin, b: &Origin) -> bool {
+    match (a.source(), b.source()) {
+        (
+            Source::Sawn {
+                from, kerf, part, ..
+            },
+            Source::Sawn {
+                from: f,
+                kerf: k,
+                part: p,
+                ..
+            },
+        ) => from.same(f) && kerf == k && part == p,
+        _ => false,
     }
 }
 
@@ -620,7 +661,10 @@ fn outside(faces: Faces, walls: &[Half]) -> (Vec<Faces>, Option<Faces>) {
 
 #[cfg(test)]
 mod tests {
-    use woodsim::{Angle, Assembly, Blade, Board, MiterSaw, Orientation, Pass, TableSaw};
+    use woodsim::{
+        Angle, Assembly, Blade, Fastener, GlueUpCut, GlueUpPass, Mating, MiterSaw, Operation,
+        Orientation, Pass, Surface, TableSaw, surfaces,
+    };
 
     use super::*;
     use crate::cutting::Cutting;
@@ -652,7 +696,7 @@ mod tests {
     fn scene_of(board: Board) -> (Vec<Solid>, Overlay) {
         let cutting = Cutting::of(&Assembly::of(board));
         let step = cutting.cuts.last().expect("a cut");
-        scene(step, &|_, _| Some(None)).expect("a picture")
+        scene(step, &|_| Some(None)).expect("a picture")
     }
 
     /// The box around the solids painted `paint`.
@@ -746,6 +790,151 @@ mod tests {
                 assert!(p[2] < 0.25 * INCH + ON, "{p:?}");
             }
         }
+    }
+
+    /// `boards` glued edge to edge into a panel, face up, each on the far edge of the last.
+    fn panel(boards: &[Board]) -> Assembly {
+        let edge = |board: &Board, far: bool| {
+            surfaces(board)
+                .into_iter()
+                .find(|surface| {
+                    matches!(surface, Surface::Side(edge)
+                        if edge.out.l == 0 && (edge.out.w > 0) == far)
+                })
+                .expect("an edge")
+        };
+        let mut panel = Assembly::of(boards[0].clone());
+        for (k, board) in boards.iter().enumerate().skip(1) {
+            let onto = (k - 1, edge(&panel.members()[k - 1].board, true));
+            let other = Assembly::of(board.clone());
+            let surface = (0, edge(board, false));
+            let mating = (0..4)
+                .map(|turn| Mating {
+                    turn,
+                    slide: [Length::ZERO; 2],
+                })
+                .find(|&mating| {
+                    let motion = panel.mating(onto, &other, surface, mating).unwrap();
+                    motion.rotation.apply([0.0, 0.0, 1.0])[2] > 0.999
+                })
+                .expect("a way that keeps it face up");
+            assert!(panel.attach(onto, &other, surface, mating, Fastener::Glue));
+        }
+        panel
+    }
+
+    /// `glue_up` crosscut square at the miter saw, `inches` from the stop.
+    fn crosscut(glue_up: &Assembly, inches: i64) -> GlueUpCut {
+        match MiterSaw::twelve_inch().crosscut_glue_up(
+            glue_up,
+            Rotation::NONE,
+            Length::from_inches(inches),
+        ) {
+            Ok(GlueUpPass::Cut(cut)) => cut,
+            other => panic!("expected the glue-up cut apart, got {other:?}"),
+        }
+    }
+
+    /// The picture of the last cut that made `glue_up`, with all it kept picked out and each
+    /// of its boards labeled by where it is in it.
+    fn scene_of_glue_up(glue_up: &Assembly) -> (Vec<Solid>, Overlay) {
+        let cutting = Cutting::of(glue_up);
+        let step = cutting.cuts.last().expect("a cut");
+        let picked = |out: &Origin| {
+            let member = glue_up
+                .members()
+                .iter()
+                .position(|member| member.board.origin().same(out));
+            Some(member.map(|member| format!("A{}", member + 1)))
+        };
+        scene(step, &picked).expect("a picture")
+    }
+
+    #[test]
+    fn a_glue_up_crosscut_lies_on_the_saw_with_its_piece_against_the_stop() {
+        let one_by_three = Board::new(
+            Length::from_inches(24),
+            Length::from_inch_fraction(5, 2),
+            Length::from_inch_fraction(3, 4),
+        );
+        let cut = crosscut(&panel(&[one_by_three.clone(), one_by_three]), 12);
+        let (solids, overlay) = scene_of_glue_up(&cut.piece);
+        // Both boards of the piece picked out, against the stop at the far end of the panel
+        // along the fence, each labeled; and both boards of the rest of it past the kerf.
+        let drawn = |paint: Paint| solids.iter().filter(move |solid| solid.paint() == paint);
+        assert_eq!(drawn(Paint::Picked).count(), 2);
+        let mut labels: Vec<_> = drawn(Paint::Picked).map(|solid| solid.label()).collect();
+        labels.sort();
+        assert_eq!(labels, [Some("A1"), Some("A2")]);
+        assert_eq!(drawn(Paint::Wood).count(), 2);
+        let (low, high) = bounds(&solids, Paint::Picked);
+        assert!(
+            near(low[0], 12.0) && near(high[0], 24.0),
+            "{low:?} {high:?}"
+        );
+        assert!(near(low[1], 0.0) && near(high[1], 5.0), "{low:?} {high:?}");
+        let (low, high) = bounds(&solids, Paint::Wood);
+        assert!(
+            near(low[0], 0.0) && near(high[0], 11.875),
+            "{low:?} {high:?}"
+        );
+        assert!(near(low[1], 0.0) && near(high[1], 5.0), "{low:?} {high:?}");
+        assert!(solids.iter().any(|solid| solid.paint() == Paint::Blade));
+        blade_clear_of_wood(&solids, [24.0 * INCH, 5.0 * INCH, 0.75 * INCH]);
+        assert_eq!(overlay.dimensions.len(), 1);
+        assert_eq!(overlay.dimensions[0].text, "12\"");
+    }
+
+    #[test]
+    fn a_board_the_blade_missed_goes_on_with_what_its_glued_to() {
+        // A 24" 1x3 with a 12" one glued along it at the end against the stop, and the long
+        // one cut 16" from the stop: the piece goes on, the short one with it.
+        let board = |inches: i64| {
+            Board::new(
+                Length::from_inches(inches),
+                Length::from_inch_fraction(5, 2),
+                Length::from_inch_fraction(3, 4),
+            )
+        };
+        let glue_up = panel(&[board(24), board(12)]);
+        let short = &glue_up.members()[1];
+        let zero = Length::ZERO;
+        let far = short.point(short.board.length(), short.board.width(), zero);
+        assert_eq!(
+            (short.point(zero, zero, zero)[0], far[0]),
+            (Length::from_inches(12), Length::from_inches(24))
+        );
+        let cut = crosscut(&glue_up, 16);
+        assert_eq!(cut.piece.members().len(), 2);
+        let (solids, _) = scene_of_glue_up(&cut.piece);
+        let picked: Vec<&Solid> = solids
+            .iter()
+            .filter(|solid| solid.paint() == Paint::Picked)
+            .collect();
+        assert_eq!(picked.len(), 2);
+        assert!(picked.iter().all(|solid| solid.label().is_some()));
+        let (low, high) = bounds(&solids, Paint::Picked);
+        assert!(near(low[0], 8.0) && near(high[0], 24.0), "{low:?} {high:?}");
+        assert!(near(low[1], 0.0) && near(high[1], 5.0), "{low:?} {high:?}");
+        // The rest of the long one, past the kerf.
+        let (low, high) = bounds(&solids, Paint::Wood);
+        assert!(
+            near(low[0], 0.0) && near(high[0], 7.875),
+            "{low:?} {high:?}"
+        );
+        assert!(near(low[1], 0.0) && near(high[1], 2.5), "{low:?} {high:?}");
+    }
+
+    #[test]
+    fn a_pass_that_kept_no_wood_has_no_picture() {
+        let cut = crosscut(&panel(&[stock(), stock()]), 12);
+        let mut cutting = Cutting::of(&cut.piece);
+        let step = cutting.cuts.last_mut().expect("a cut");
+        step.operation = Arc::new(Operation {
+            wood: None,
+            ..(*step.operation).clone()
+        });
+        assert!(scene(step, &|_| Some(None)).is_none());
     }
 
     #[test]

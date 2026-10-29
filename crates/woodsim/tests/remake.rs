@@ -2,7 +2,8 @@
 //! it, and the frame they were glued into back together; a side cut longer, and a frame that no
 //! longer closes; a change that stops a cut from cutting refused; and joints taken apart. A pass
 //! through a glue-up is made again the same way, on the glue-up made again: a panel crosscut
-//! longer, or ripped wider before it was glued up; read back from a recipe, or duplicated.
+//! longer, or ripped wider before it was glued up; read back from a recipe, or duplicated. And
+//! what a pass left, made again as that very pass, for plans to draw.
 
 mod common;
 
@@ -437,6 +438,31 @@ fn a_pass_through_a_glue_up_made_again_as_it_was_changes_nothing() {
         assert_eq!(now.side(), was.side());
         assert_eq!(now.at_on_stock(), was.at_on_stock());
     }
+}
+
+#[test]
+fn what_a_pass_through_a_glue_up_left_comes_out_again_cut_by_that_pass() {
+    let cut = crosscut(&panel(), inches(10));
+    let pass = last(&cut.piece.members()[0].board);
+    let left = pass.left().expect("it kept what it went through").unwrap();
+    assert_eq!(left, GlueUpPass::Cut(cut.clone()));
+    let was = [&cut.piece, cut.offcut.as_ref().expect("the rest")];
+    for (now, was) in left.parts().into_iter().zip(was) {
+        for (now, was) in now.members().iter().zip(was.members()) {
+            assert_eq!(now.at, was.at);
+            // The same piece of the same board, cut by the very same pass.
+            assert!(Arc::ptr_eq(&last(&now.board), &pass));
+            let (now, was) = (now.board.origin(), was.board.origin());
+            assert_eq!(format!("{now:?}"), format!("{was:?}"));
+            assert_eq!(now.at_on_stock(), was.at_on_stock());
+        }
+    }
+    // A pass that didn't keep what it went through can't.
+    let forgot = Arc::new(Operation {
+        wood: None,
+        ..(*pass).clone()
+    });
+    assert!(forgot.left().is_none());
 }
 
 #[test]

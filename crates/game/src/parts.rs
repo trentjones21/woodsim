@@ -643,7 +643,7 @@ pub fn through_glue_up(tool: Tool) -> bool {
 fn passes(entry: Entry, board: &woodsim::Board, changes: bool) -> Vec<Line> {
     history(board.origin())
         .into_iter()
-        .map(|(operation, from, side)| {
+        .map(|(operation, _, side)| {
             let kept = match side {
                 Side::Offcut => ", keeping the offcut",
                 Side::Loose => ", a strip it set loose",
@@ -663,10 +663,7 @@ fn passes(entry: Entry, board: &woodsim::Board, changes: bool) -> Vec<Line> {
                     Tool::Planer { .. } => Kind::Planer,
                 },
                 name: cutting::verb(operation.tool).to_string(),
-                notes: format!(
-                    "{}{kept}{through}",
-                    cutting::settings_of(&operation, Some(&from))
-                ),
+                notes: format!("{}{kept}{through}", cutting::settings_of(&operation)),
                 changes: changes && operation.wood.is_some(),
             }))
         })

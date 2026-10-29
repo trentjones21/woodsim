@@ -667,11 +667,15 @@ impl Assembly {
         Some(self.members.get(member)?.patch(surface)?.normal)
     }
 
-    /// What it rests on, lying on a saw as `lie` says, and what faces the fence: the surface
-    /// facing straight down that's lowest, and the one facing most nearly toward the fence.
+    /// What it rests on, lying on a saw as `lie` says, and what's to the fence: the surface
+    /// facing straight down that's lowest, and, of the surfaces reaching as far toward the
+    /// fence as any does, the one facing most nearly toward it, flat against it or touching it
+    /// along its edge, as `resting` lays it. Of a glue-up's, that's one that meets the fence,
+    /// not one facing it from behind other wood.
     pub fn rests_on(&self, lie: Orientation) -> Option<((usize, Surface), (usize, Surface))> {
         let rotation = lie.rotation();
-        let all: Vec<((usize, Surface), [f64; 3], f64)> = self
+        // Each surface, the way it faces, how low it reaches, and how far toward the fence.
+        let all: Vec<_> = self
             .members
             .iter()
             .enumerate()
@@ -680,21 +684,29 @@ impl Assembly {
                     .into_iter()
                     .filter_map(move |surface| {
                         let patch = member.patch(surface)?;
-                        let low = patch
-                            .corners
-                            .iter()
-                            .map(|&p| rotation.apply(p)[2])
-                            .fold(f64::MAX, f64::min);
-                        Some(((index, surface), rotation.apply(patch.normal), low))
+                        let turned = patch.corners.iter().map(|&p| rotation.apply(p));
+                        let low = turned.clone().map(|p| p[2]).fold(f64::MAX, f64::min);
+                        let reach = turned.map(|p| p[1]).fold(f64::MIN, f64::max);
+                        Some(((index, surface), rotation.apply(patch.normal), low, reach))
                     })
             })
             .collect();
         let down = all
             .iter()
-            .filter(|(_, normal, _)| normal[2] < -1.0 + 1e-9)
+            .filter(|(_, normal, ..)| normal[2] < -1.0 + 1e-9)
             .min_by(|a, b| a.2.total_cmp(&b.2))?
             .0;
-        let fence = all.iter().max_by(|a, b| a.1[1].total_cmp(&b.1[1]))?.0;
+        // Within a micron, as `resting` measures it.
+        const MICRON: f64 = 1_000.0;
+        let furthest = all
+            .iter()
+            .map(|&(.., reach)| reach)
+            .fold(f64::MIN, f64::max);
+        let fence = all
+            .iter()
+            .filter(|&&(.., reach)| reach > furthest - MICRON)
+            .max_by(|a, b| a.1[1].total_cmp(&b.1[1]))?
+            .0;
         Some((down, fence))
     }
 

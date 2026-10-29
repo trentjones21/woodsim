@@ -12,8 +12,8 @@
 use std::{fmt, sync::Arc};
 
 use crate::{
-    Assembly, Board, GlueUpPass, Length, Tool,
-    glue_up::{Laid, Traced},
+    Assembly, Board, CutError, GlueUpPass, Length, Tool,
+    glue_up::{Laid, Sweep, Traced},
     history::{Operation, Origin, Side, Source},
 };
 
@@ -366,12 +366,36 @@ fn leaves(traced: &Traced) -> Vec<Vec<(usize, Option<u8>)>> {
     parts
 }
 
+impl Operation {
+    /// What the pass left of the wood it went through, made again just as it was: each board
+    /// of `wood` it cut, cut by this very pass, and each it missed as it was, in the parts the
+    /// pass left them in (`GlueUpPass::parts`), where they were in `wood`. `None` if what it
+    /// went through isn't kept.
+    pub fn left(self: &Arc<Operation>) -> Option<Result<GlueUpPass, CutError>> {
+        let wood = self.wood.as_ref()?;
+        Some(cut_as(self.tool, wood, Some(self)).map(|traced| traced.pass))
+    }
+}
+
 /// A pass of `tool` through `wood`, lying on the saw as the pass has it.
-fn cut(tool: Tool, wood: &Assembly) -> Result<Traced, crate::CutError> {
+fn cut(tool: Tool, wood: &Assembly) -> Result<Traced, CutError> {
+    cut_as(tool, wood, None)
+}
+
+/// The same, as the pass `operation`, if it's given, rather than one numbered now.
+fn cut_as(
+    tool: Tool,
+    wood: &Assembly,
+    operation: Option<&Arc<Operation>>,
+) -> Result<Traced, CutError> {
+    let traced = |laid: &Laid, sweep: &Sweep| match operation {
+        Some(operation) => laid.traced_as(sweep, Arc::clone(operation)),
+        None => laid.traced(sweep),
+    };
     match tool {
         Tool::TableSaw { saw, lie, travel } => {
             let laid = Laid::new(wood, lie.rotation());
-            laid.traced(&saw.sweep(&laid, lie, travel)?.0)
+            traced(&laid, &saw.sweep(&laid, lie, travel)?.0)
         }
         Tool::MiterSaw {
             saw,
@@ -380,7 +404,7 @@ fn cut(tool: Tool, wood: &Assembly) -> Result<Traced, crate::CutError> {
             bottom,
         } => {
             let laid = Laid::new(wood, lie.rotation());
-            laid.traced(&saw.sweep(&laid, tool, length, bottom)?.0)
+            traced(&laid, &saw.sweep(&laid, tool, length, bottom)?.0)
         }
         Tool::Jointer {
             jointer,
@@ -388,7 +412,7 @@ fn cut(tool: Tool, wood: &Assembly) -> Result<Traced, crate::CutError> {
             travel,
         } => {
             let laid = Laid::new(wood, jointer.leaned(lie.rotation()));
-            laid.traced(&jointer.sweep(&laid, lie, travel)?)
+            traced(&laid, &jointer.sweep(&laid, lie, travel)?)
         }
         Tool::Planer {
             planer,
@@ -396,7 +420,7 @@ fn cut(tool: Tool, wood: &Assembly) -> Result<Traced, crate::CutError> {
             travel,
         } => {
             let laid = Laid::new(wood, lie.rotation());
-            laid.traced(&planer.sweep(&laid, lie, travel)?)
+            traced(&laid, &planer.sweep(&laid, lie, travel)?)
         }
     }
 }

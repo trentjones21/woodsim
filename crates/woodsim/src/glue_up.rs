@@ -42,7 +42,7 @@ pub struct GlueUpCut {
 impl GlueUpPass {
     /// What it left: the glue-up with a slot in it, or the piece, the offcut, and anything
     /// loose, in that order.
-    pub(crate) fn parts(&self) -> Vec<&Assembly> {
+    pub fn parts(&self) -> Vec<&Assembly> {
         match self {
             GlueUpPass::Missed => Vec::new(),
             GlueUpPass::Kerfed(glue_up) => vec![glue_up],
@@ -233,7 +233,15 @@ impl<'a> Laid<'a> {
     /// The same, saying which board on the saw each board it left came from.
     pub(crate) fn traced(&self, sweep: &Sweep) -> Result<Traced, CutError> {
         // One pass, through every board it touches.
-        let operation = Operation::new(sweep.tool, self.glue_up.clone());
+        self.traced_as(sweep, Operation::new(sweep.tool, self.glue_up.clone()))
+    }
+
+    /// The same, each board it cut cut by `operation`: a pass made again just as it was.
+    pub(crate) fn traced_as(
+        &self,
+        sweep: &Sweep,
+        operation: Arc<Operation>,
+    ) -> Result<Traced, CutError> {
         let mut members = Vec::new();
         // Which of the glue-up's boards each new member came from.
         let mut from = Vec::new();
