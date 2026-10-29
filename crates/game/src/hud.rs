@@ -450,6 +450,7 @@ impl Shop<'_> {
             Scrap(_) => "Throw it away".to_string(),
             Save(_) => "Save it as a file, to use after a restart".to_string(),
             Load(_) => format!("Saved part: {}", self.use_here().to_lowercase()),
+            DeleteSaved(_) => "Delete its file".to_string(),
             Help => "Controls".to_string(),
             Inventory => "Inventory".to_string(),
         }
@@ -1514,15 +1515,20 @@ fn build_inventory(
             format!("{file}: {notes}")
         };
         let line = line(&mut commands, list, &size, &notes, 1);
-        spawn_button(
-            &mut commands,
-            &icons,
-            line,
-            Action::Load(index as u64),
-            use_icon,
-            Look::Small,
-            TipAt::Left,
-        );
+        for (action, icon) in [
+            (Action::Load(index as u64), use_icon),
+            (Action::DeleteSaved(index as u64), Icon::Scrap),
+        ] {
+            spawn_button(
+                &mut commands,
+                &icons,
+                line,
+                action,
+                icon,
+                Look::Small,
+                TipAt::Left,
+            );
+        }
     }
     heading(&mut commands, list, "New lumber");
     for (index, (name, thickness, width)) in LUMBER.iter().enumerate() {

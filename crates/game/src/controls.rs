@@ -67,9 +67,11 @@ pub enum Action {
     NewLumber(u64),
     MoveShelf(u64),
     Scrap(u64),
-    /// Save a piece from the inventory as a file, or use the `n`th part saved, as new lumber is.
+    /// Save a piece from the inventory as a file, use the `n`th part saved, as new lumber is,
+    /// or delete its file.
     Save(u64),
     Load(u64),
+    DeleteSaved(u64),
     /// The list of every control here, and the inventory.
     Help,
     Inventory,

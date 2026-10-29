@@ -3,7 +3,8 @@
 //! exact to the nanometer, with its whole history, so its plans come out as they would have. The
 //! parts in `saved/` are read when the game starts and again after each save (`Saved`), and
 //! listed in the inventory, where each is used (`Action::Load`) the way new lumber is: a copy of
-//! it goes where you are, and the file stays to use again.
+//! it goes where you are, and the file stays to use again until it's deleted
+//! (`Action::DeleteSaved`).
 
 use std::{
     fs, io,
@@ -32,7 +33,7 @@ pub struct SavedPlugin;
 impl Plugin for SavedPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(Saved::read(Path::new(FOLDER)))
-            .add_systems(Update, save_parts);
+            .add_systems(Update, (save_parts, delete_parts));
     }
 }
 
@@ -76,6 +77,15 @@ impl Saved {
     /// A copy of the `index`th saved part, to use.
     pub fn part(&self, index: usize) -> Option<Workpiece> {
         Some(self.parts.get(index)?.work.clone())
+    }
+
+    /// Deletes the `index`th saved part's file, and returns where it was.
+    pub fn delete(&mut self, index: usize) -> io::Result<PathBuf> {
+        let Some(part) = self.parts.get(index) else {
+            return Err(io::Error::new(io::ErrorKind::NotFound, "no such part"));
+        };
+        fs::remove_file(&part.path)?;
+        Ok(self.parts.remove(index).path)
     }
 }
 
@@ -144,6 +154,25 @@ fn save_parts(
     }
 }
 
+/// Deletes the saved parts asked for.
+fn delete_parts(
+    actions: Res<Actions>,
+    mut saved: ResMut<Saved>,
+    time: Res<Time>,
+    mut notice: ResMut<Notice>,
+) {
+    for action in actions.started() {
+        let Action::DeleteSaved(index) = action else {
+            continue;
+        };
+        let message = match saved.delete(index as usize) {
+            Ok(path) => format!("Deleted {}.", path.display()),
+            Err(why) => format!("Couldn't delete it: {why}."),
+        };
+        notice.0 = Some((message, time.elapsed_secs_f64() + NOTICE_SECONDS));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use woodsim::{Blade, Board, Length, Orientation, Pass, TableSaw};
@@ -198,6 +227,30 @@ mod tests {
         assert_eq!(
             read.origin().operations()[0].tool,
             board.origin().operations()[0].tool
+        );
+    }
+
+    #[test]
+    fn a_deleted_part_is_gone_after_a_restart_and_its_name_is_free_again() {
+        let folder = folder("delete");
+        let board = Workpiece::Board(Board::new(
+            Length::from_inches(24),
+            Length::from_inches(3),
+            Length::from_inch_fraction(3, 4),
+        ));
+        save(&board, &folder).unwrap();
+        save(&board, &folder).unwrap();
+        let mut saved = Saved::read(&folder);
+        let deleted = saved.delete(0).unwrap();
+        assert_eq!(deleted.file_name().unwrap(), "part-1.txt");
+        assert!(!deleted.exists());
+        assert_eq!(saved.parts.len(), 1);
+        assert!(saved.delete(1).is_err());
+        let read = Saved::read(&folder);
+        assert_eq!(read.parts, saved.parts);
+        assert_eq!(
+            save(&board, &folder).unwrap().file_name().unwrap(),
+            "part-1.txt"
         );
     }
 
