@@ -25,6 +25,7 @@ use crate::{
     controls::{Action, Actions, Arrow},
     feed::TableSawStation,
     hand::{Gesture, Hand, set_down},
+    hud::OnHud,
     join::BenchStation,
     meshes::{lumber_mesh, rounded_box},
     miter_saw,
@@ -468,6 +469,7 @@ fn switch_view(actions: Res<Actions>, mut view: ResMut<ShopView>) {
 fn move_overview(
     actions: Res<Actions>,
     scroll: Res<AccumulatedMouseScroll>,
+    on_hud: Res<OnHud>,
     mut pinches: MessageReader<PinchGesture>,
     time: Res<Time>,
     mut overview: ResMut<OverviewCamera>,
@@ -496,7 +498,9 @@ fn move_overview(
         overview.yaw -= FRAC_PI_2;
     }
 
+    // Scrolling over the HUD scrolls the inventory, not the view.
     let mut lines = match scroll.unit {
+        _ if on_hud.over() => 0.0,
         MouseScrollUnit::Line => scroll.delta.y,
         MouseScrollUnit::Pixel => scroll.delta.y / PIXELS_PER_LINE,
     };

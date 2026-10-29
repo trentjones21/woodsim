@@ -266,7 +266,9 @@ fn look_around(
         view.yaw -= motion.delta.x * TURN_PER_PIXEL;
         view.pitch = (view.pitch + motion.delta.y * TURN_PER_PIXEL).clamp(LEAST_PITCH, MOST_PITCH);
     }
+    // Scrolling over the HUD scrolls the inventory, not the view.
     let lines = match scroll.unit {
+        _ if on_hud.over() => 0.0,
         MouseScrollUnit::Line => scroll.delta.y,
         MouseScrollUnit::Pixel => scroll.delta.y / PIXELS_PER_LINE,
     };

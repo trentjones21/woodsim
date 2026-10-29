@@ -48,9 +48,21 @@ pub enum Action {
     TakeApart,
     PickUp,
     Plans,
-    /// The list of every control here, and the cut list.
+    /// At a saw: put away what's on it, or put the measured piece away and the offcut back to
+    /// cut again. At the bench, put away the picked part or glue-up.
+    Store,
+    CutAgain,
+    /// Put away what's in hand.
+    PutAway,
+    /// From the inventory: use a piece, or a new board of the `n`th size of lumber, at the
+    /// station you're at; move a piece to the other shelf; or throw it away.
+    Take(u64),
+    NewLumber(u64),
+    MoveShelf(u64),
+    Scrap(u64),
+    /// The list of every control here, and the inventory.
     Help,
-    CutList,
+    Inventory,
 }
 
 /// A way on the screen, as the arrow keys point.
@@ -98,7 +110,10 @@ pub fn bound(view: ShopView, key: KeyCode, shift: bool) -> Option<Action> {
         (_, Tab) => NextStation,
         (TableSaw | MiterSaw | Bench, Escape) => Back,
         (_, KeyH) => Action::Help,
-        (_, KeyL) => CutList,
+        (_, KeyI) => Inventory,
+        (_, KeyX) => PutAway,
+        (TableSaw | MiterSaw | Bench, KeyC) => Store,
+        (TableSaw | MiterSaw, KeyA) => CutAgain,
         (Overview, KeyW | ArrowUp) => Pan(Arrow::Up),
         (Overview, KeyS | ArrowDown) => Pan(Arrow::Down),
         (Overview, KeyA | ArrowLeft) => Pan(Arrow::Left),
@@ -134,7 +149,7 @@ pub fn bound(view: ShopView, key: KeyCode, shift: bool) -> Option<Action> {
 }
 
 /// Every key some action is bound to, in the order they're named on buttons.
-const KEYS: [KeyCode; 31] = [
+const KEYS: [KeyCode; 33] = [
     KeyCode::KeyQ,
     KeyCode::KeyE,
     KeyCode::KeyF,
@@ -144,7 +159,9 @@ const KEYS: [KeyCode; 31] = [
     KeyCode::KeyU,
     KeyCode::KeyP,
     KeyCode::KeyH,
-    KeyCode::KeyL,
+    KeyCode::KeyI,
+    KeyCode::KeyX,
+    KeyCode::KeyC,
     KeyCode::KeyW,
     KeyCode::KeyA,
     KeyCode::KeyS,
@@ -205,7 +222,9 @@ fn key_name(key: KeyCode) -> (&'static str, Option<&'static str>) {
         KeyCode::KeyU => ("U", Some("U")),
         KeyCode::KeyP => ("P", Some("P")),
         KeyCode::KeyH => ("H", Some("H")),
-        KeyCode::KeyL => ("L", Some("L")),
+        KeyCode::KeyI => ("I", Some("I")),
+        KeyCode::KeyX => ("X", Some("X")),
+        KeyCode::KeyC => ("C", Some("C")),
         KeyCode::KeyW => ("W", Some("W")),
         KeyCode::KeyA => ("A", Some("A")),
         KeyCode::KeyS => ("S", Some("S")),

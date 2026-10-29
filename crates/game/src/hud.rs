@@ -1,13 +1,15 @@
 //! Everything drawn over the shop. Along the top, a button back to the shop and a tab for each
-//! station, and buttons for the cut list and the controls. At a station, its settings, each a
+//! station, and buttons for the inventory and the controls. At a station, its settings, each a
 //! card with buttons to step it, and along the bottom a dock of buttons for what can be done
-//! there, over a line on what's going on. What's in hand shows at the top. Buttons start the
-//! same `Action`s their keys do, show their key, say what they do when the pointer rests on
-//! them, and dim when they'd do nothing.
+//! there, over a line on what's going on. What's in hand shows at the top. Down the right, the
+//! inventory: parts, offcuts, and new lumber, each with buttons to use it where you are. Buttons
+//! start the same `Action`s their keys do, show their key, say what they do when the pointer
+//! rests on them, and dim when they'd do nothing.
 
 use bevy::{
     diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin},
     ecs::system::SystemParam,
+    input::mouse::{MouseScrollUnit, MouseWheel},
     picking::{
         PickingSystems,
         hover::{HoverMap, Hovered},
@@ -28,6 +30,7 @@ use crate::{
     feed::TableSawStation,
     hand::{self, Hand},
     icons::{Icon, Icons},
+    inventory::{self, Inventory, LUMBER, Shelf},
     join::BenchStation,
     shop::{HoveredStation, ShopView, describe_miter},
 };
@@ -60,6 +63,11 @@ impl OnHud {
     pub fn pressed(&self) -> bool {
         self.pressed
     }
+
+    /// Whether the mouse is over the HUD now, so scrolling there doesn't zoom the view.
+    pub fn over(&self) -> bool {
+        self.over
+    }
 }
 
 pub struct HudPlugin;
@@ -87,7 +95,16 @@ impl Plugin for HudPlugin {
             )
             .add_systems(
                 Update,
-                (toggle_panels, build_for_view, update_controls, update_text).chain(),
+                (
+                    toggle_panels,
+                    build_for_view,
+                    build_inventory,
+                    scroll_inventory,
+                    update_controls,
+                    update_text,
+                    show_tip,
+                )
+                    .chain(),
             )
             // Often enough to follow, slow enough to read.
             .add_systems(
@@ -101,7 +118,7 @@ impl Plugin for HudPlugin {
 #[derive(Resource)]
 struct Showing {
     help: bool,
-    cut_list: bool,
+    inventory: bool,
     built_for: Option<ShopView>,
 }
 
@@ -109,7 +126,7 @@ impl Default for Showing {
     fn default() -> Showing {
         Showing {
             help: false,
-            cut_list: true,
+            inventory: true,
             built_for: None,
         }
     }
@@ -120,6 +137,7 @@ impl Default for Showing {
 struct Control {
     action: Action,
     look: Look,
+    tip: TipAt,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -138,7 +156,8 @@ enum Look {
 #[derive(Component)]
 struct ControlIcon;
 
-/// What a button does, shown while the pointer rests on it.
+/// What the button under the pointer does. There's one, over everything, so a button in the
+/// inventory's scrolling list can show it outside the list.
 #[derive(Component)]
 struct Tip;
 
@@ -154,9 +173,9 @@ struct Cards;
 enum Readout {
     Status,
     Hand,
-    CutList,
     Fps,
     Help,
+    Inventory,
     Setting(Setting),
 }
 
@@ -212,10 +231,12 @@ fn dock(view: ShopView) -> Vec<Vec<Tool>> {
             vec![tool(SwitchGuide, Icon::SwitchGuide)],
             [turning, vec![on_edge]].concat(),
             vec![tool(Push, Icon::Push), tool(BringBack, Icon::BringBack)],
+            vec![tool(CutAgain, Icon::Again), tool(Store, Icon::Store)],
         ],
         ShopView::MiterSaw => vec![
             [turning, vec![on_edge]].concat(),
             vec![tool(Lower, Icon::Lower)],
+            vec![tool(CutAgain, Icon::Again), tool(Store, Icon::Store)],
         ],
         ShopView::Bench => vec![
             turning,
@@ -236,6 +257,7 @@ fn dock(view: ShopView) -> Vec<Vec<Tool>> {
             ],
             vec![
                 tool(PickUp, Icon::PickUp),
+                tool(Store, Icon::Store),
                 tool(TakeApart, Icon::TakeApart),
                 tool(Plans, Icon::Plans),
             ],
@@ -283,6 +305,7 @@ struct Game<'w> {
     bench: Res<'w, BenchStation>,
     hand: Res<'w, Hand>,
     showing: Res<'w, Showing>,
+    inventory: Res<'w, Inventory>,
 }
 
 impl Game<'_> {
@@ -294,6 +317,7 @@ impl Game<'_> {
             bench: &self.bench,
             hand: &self.hand,
             showing: &self.showing,
+            inventory: &self.inventory,
         }
     }
 
@@ -304,6 +328,7 @@ impl Game<'_> {
             || self.bench.is_changed()
             || self.hand.is_changed()
             || self.showing.is_changed()
+            || self.inventory.is_changed()
     }
 }
 
@@ -315,6 +340,7 @@ struct Shop<'a> {
     bench: &'a BenchStation,
     hand: &'a Hand,
     showing: &'a Showing,
+    inventory: &'a Inventory,
 }
 
 impl Shop<'_> {
@@ -368,8 +394,37 @@ impl Shop<'_> {
             TakeApart => "Take the last joint apart".to_string(),
             PickUp => "Pick it up".to_string(),
             Plans => "Plans to print".to_string(),
+            Store if self.view == ShopView::Bench => "Put it away".to_string(),
+            Store => "Put it all away".to_string(),
+            CutAgain if self.view == ShopView::TableSaw => {
+                "Put the strip away and rip the rest again".to_string()
+            }
+            CutAgain => "Put the piece away and cut another from the offcut".to_string(),
+            PutAway => "Put it away".to_string(),
+            Take(_) => self.use_here().to_string(),
+            NewLumber(index) => {
+                let name = LUMBER
+                    .get(index as usize)
+                    .map_or("board", |lumber| lumber.0);
+                format!("New {name}: {}", self.use_here().to_lowercase())
+            }
+            MoveShelf(id) => match self.inventory.get(id).map(|item| item.shelf) {
+                Some(Shelf::Offcuts) => "Move it to the parts".to_string(),
+                _ => "Move it to the offcuts".to_string(),
+            },
+            Scrap(_) => "Throw it away".to_string(),
             Help => "Controls".to_string(),
-            CutList => "Cut list".to_string(),
+            Inventory => "Inventory".to_string(),
+        }
+    }
+
+    /// What a piece of wood from the inventory does where you are.
+    fn use_here(&self) -> &'static str {
+        match self.view {
+            ShopView::TableSaw => "Put it on the table saw",
+            ShopView::MiterSaw => "Put it on the miter saw",
+            ShopView::Bench => "Set it on the bench",
+            ShopView::Overview => "Pick it up",
         }
     }
 
@@ -378,6 +433,13 @@ impl Shop<'_> {
         use Action::*;
         let (table, miter, bench) = (self.table_saw, self.miter_saw, self.bench);
         match (self.view, action) {
+            (view, Take(_) | NewLumber(_)) => inventory::can_use_at(view, table, miter),
+            (_, PutAway) => self.hand.0.is_some(),
+            (ShopView::TableSaw, Store) => table.can_put_away(),
+            (ShopView::TableSaw, CutAgain) => table.can_cut_again(),
+            (ShopView::MiterSaw, Store) => miter.can_put_away(),
+            (ShopView::MiterSaw, CutAgain) => miter.can_cut_again(),
+            (ShopView::Bench, Store) => bench.picked.is_some(),
             (ShopView::TableSaw, TurnLeft | TurnRight | Flip) => table.can_turn(),
             (ShopView::TableSaw, StandOnEdge) => table.can_tip(),
             (ShopView::TableSaw, Push) => table.can_push(),
@@ -405,7 +467,7 @@ impl Shop<'_> {
             Action::Use(fastener) => self.bench.fastener == fastener,
             Action::SwitchGuide => self.table_saw.using_gauge(),
             Action::Help => self.showing.help,
-            Action::CutList => self.showing.cut_list,
+            Action::Inventory => self.showing.inventory,
             _ => false,
         }
     }
@@ -452,10 +514,10 @@ impl Shop<'_> {
                 (Some(ShopView::TableSaw), true) => "Click to set it down on the table saw.",
                 (Some(ShopView::MiterSaw), true) => "Click to set it down on the miter saw.",
                 (Some(ShopView::Bench), true) => "Click to set it down at the workbench.",
-                (_, true) => "Click a station, the pile, or the scrap bin to set it down.",
+                (_, true) => "Click a station or the scrap bin to set it down, or put it away.",
                 _ => {
-                    "Click a station to work at it, or a board to pick it up. New boards \
-                      are on the lumber rack."
+                    "Click a station to work at it. New lumber, your parts, and your offcuts \
+                     are in the inventory."
                 }
             }
             .to_string(),
@@ -471,9 +533,8 @@ fn mouse_help(view: ShopView) -> &'static [&'static str] {
     match view {
         ShopView::Overview => &[
             "Click a station: work at it",
-            "Click a board: pick it up; new ones are on the lumber rack",
-            "Holding one: click a station or the pile to set it down, or the scrap bin to \
-             throw it away",
+            "Click a board: pick it up; new ones are on the lumber rack, too",
+            "Holding one: click a station to set it down, or the scrap bin to throw it away",
             "Drag the floor: look around   Scroll: zoom",
         ],
         ShopView::TableSaw => &[
@@ -484,8 +545,8 @@ fn mouse_help(view: ShopView) -> &'static [&'static str] {
         ],
         ShopView::MiterSaw => &[
             "Drag the stop block to move it",
-            "Click a board, or a part on the pile: pick it up",
-            "Holding one: click the saw to set it against the stop, or the pile to set it aside",
+            "Click a board: pick it up",
+            "Holding one: click the saw to set it against the stop",
         ],
         ShopView::Bench => &[
             "Click a surface of a part, then the surface it goes against",
@@ -524,9 +585,10 @@ fn help(shop: &Shop) -> String {
         .filter(|action| !matches!(action, Action::Slide(..)))
         .collect();
     actions.extend([
+        Action::PutAway,
         Action::NextStation,
         Action::Back,
-        Action::CutList,
+        Action::Inventory,
         Action::Help,
     ]);
     for action in actions {
@@ -606,8 +668,8 @@ fn strip(node: Node) -> impl Bundle {
 }
 
 fn spawn_hud(mut commands: Commands, icons: Res<Icons>) {
-    // Along the top: the way back to the shop and to each station on the left; what's in
-    // hand in the middle; the frame rate, the cut list, and the controls on the right.
+    // Along the top: the way back to the shop and to each station on the left; the frame
+    // rate, the inventory, and the controls on the right.
     let top_left = commands
         .spawn(strip(Node {
             top: px(14),
@@ -640,22 +702,6 @@ fn spawn_hud(mut commands: Commands, icons: Res<Icons>) {
             TipAt::BelowLeft,
         );
     }
-    commands
-        .spawn(strip(Node {
-            top: px(14),
-            width: percent(100),
-            justify_content: JustifyContent::Center,
-            ..default()
-        }))
-        .with_child((
-            panel(Node {
-                display: Display::None,
-                max_width: vw(30),
-                ..default()
-            }),
-            PanelOf(Readout::Hand),
-            children![(bold("", 17.0, ACCENT), Readout::Hand)],
-        ));
     let top_right = commands
         .spawn(strip(Node {
             top: px(14),
@@ -675,7 +721,10 @@ fn spawn_hud(mut commands: Commands, icons: Res<Icons>) {
         ChildOf(top_right),
         children![(text("", 13.0, INK.with_alpha(0.7)), Readout::Fps)],
     ));
-    for (action, icon) in [(Action::CutList, Icon::CutList), (Action::Help, Icon::Help)] {
+    for (action, icon) in [
+        (Action::Inventory, Icon::Inventory),
+        (Action::Help, Icon::Help),
+    ] {
         spawn_button(
             &mut commands,
             &icons,
@@ -686,17 +735,50 @@ fn spawn_hud(mut commands: Commands, icons: Res<Icons>) {
             TipAt::BelowRight,
         );
     }
-    // The cut list hangs below its button, and the controls in the middle of the screen.
+    // The inventory hangs below its button, its list scrolling if it's long, and the controls
+    // go in the middle of the screen.
     commands.spawn((
         panel(Node {
             position_type: PositionType::Absolute,
             top: px(80),
             right: px(14),
-            max_width: vw(34),
+            width: px(INVENTORY_WIDTH),
+            max_height: vh(66),
+            flex_direction: FlexDirection::Column,
+            padding: UiRect::axes(px(6), px(8)),
             ..default()
         }),
-        PanelOf(Readout::CutList),
-        children![(text("", 16.0, INK), Readout::CutList)],
+        PanelOf(Readout::Inventory),
+        children![(
+            Node {
+                flex_direction: FlexDirection::Column,
+                overflow: Overflow::scroll_y(),
+                padding: UiRect::horizontal(px(8)),
+                ..default()
+            },
+            ScrollPosition::default(),
+            InventoryList,
+        )],
+    ));
+    // The one tooltip, over everything.
+    commands.spawn((
+        Node {
+            position_type: PositionType::Absolute,
+            padding: UiRect::axes(px(10), px(6)),
+            border_radius: BorderRadius::all(px(8)),
+            display: Display::None,
+            ..default()
+        },
+        UiTransform::default(),
+        BackgroundColor(INK.with_alpha(0.94)),
+        GlobalZIndex(20),
+        Tip,
+        Pickable::IGNORE,
+        children![(
+            text("", 14.0, Color::WHITE),
+            TextLayout::no_wrap(),
+            Pickable::IGNORE
+        )],
     ));
     commands
         .spawn(strip(Node {
@@ -728,7 +810,8 @@ fn spawn_hud(mut commands: Commands, icons: Res<Icons>) {
         }),
         Cards,
     ));
-    // Along the bottom, the line on what's going on over the dock.
+    // Along the bottom, what's in hand over the line on what's going on, over the dock.
+    let mut hand = Entity::PLACEHOLDER;
     commands
         .spawn(strip(Node {
             bottom: px(14),
@@ -739,6 +822,23 @@ fn spawn_hud(mut commands: Commands, icons: Res<Icons>) {
             ..default()
         }))
         .with_children(|bottom| {
+            hand = bottom
+                .spawn((
+                    panel(Node {
+                        display: Display::None,
+                        max_width: vw(40),
+                        align_items: AlignItems::Center,
+                        column_gap: px(10),
+                        padding: UiRect {
+                            right: px(8),
+                            ..UiRect::axes(px(14), px(6))
+                        },
+                        ..default()
+                    }),
+                    PanelOf(Readout::Hand),
+                    children![(bold("", 17.0, ACCENT), Readout::Hand)],
+                ))
+                .id();
             bottom.spawn((
                 panel(Node {
                     max_width: vw(56),
@@ -758,6 +858,15 @@ fn spawn_hud(mut commands: Commands, icons: Res<Icons>) {
                 Dock,
             ));
         });
+    spawn_button(
+        &mut commands,
+        &icons,
+        hand,
+        Action::PutAway,
+        Icon::Store,
+        Look::Small,
+        TipAt::Above,
+    );
 }
 
 /// Puts a button for `action` in `parent`.
@@ -780,7 +889,7 @@ fn spawn_button(
         .spawn((
             Button,
             Hovered::default(),
-            Control { action, look },
+            Control { action, look, tip },
             Node {
                 width: if tab { Val::Auto } else { px(size) },
                 height: px(size),
@@ -841,41 +950,6 @@ fn spawn_button(
         ChildOf(button),
         children![(bold("", 11.0, Color::WHITE), Pickable::IGNORE)],
     ));
-    // Above or below the button, centered on it, or lined up with its side where it's near
-    // the edge of the screen.
-    let (top, bottom) = match tip {
-        TipAt::Above => (Val::Auto, px(size + 10.0)),
-        _ => (px(size + 10.0), Val::Auto),
-    };
-    let (left, right, shift) = match tip {
-        TipAt::BelowLeft => (px(0), Val::Auto, 0.0),
-        TipAt::BelowRight => (Val::Auto, px(0), 0.0),
-        TipAt::Above | TipAt::Below => (percent(50), Val::Auto, -50.0),
-    };
-    commands.spawn((
-        Node {
-            position_type: PositionType::Absolute,
-            padding: UiRect::axes(px(10), px(6)),
-            border_radius: BorderRadius::all(px(8)),
-            display: Display::None,
-            top,
-            bottom,
-            left,
-            right,
-            ..default()
-        },
-        UiTransform::from_translation(Val2::percent(shift, 0.0)),
-        BackgroundColor(INK.with_alpha(0.94)),
-        GlobalZIndex(10),
-        Tip,
-        Pickable::IGNORE,
-        ChildOf(button),
-        children![(
-            text("", 14.0, Color::WHITE),
-            TextLayout::no_wrap(),
-            Pickable::IGNORE
-        )],
-    ));
     button
 }
 
@@ -883,13 +957,15 @@ fn spawn_button(
 #[derive(Component)]
 struct Badge;
 
-/// Where a button's tooltip shows: above it or below, centered on it or lined up with one side.
+/// Where a button's tooltip shows: above it or below, centered on it or lined up with one side
+/// where it's near the edge of the screen; or to its left, for the inventory down the right.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum TipAt {
     Above,
     Below,
     BelowLeft,
     BelowRight,
+    Left,
 }
 
 /// A click on a button starts its action; Shift with an arrow that slides a part slides it a
@@ -943,13 +1019,13 @@ fn notice_hud(
     }
 }
 
-/// Opens and closes the controls and the cut list.
+/// Opens and closes the controls and the inventory.
 fn toggle_panels(actions: Res<Actions>, mut showing: ResMut<Showing>) {
     if actions.just(Action::Help) {
         showing.help = !showing.help;
     }
-    if actions.just(Action::CutList) {
-        showing.cut_list = !showing.cut_list;
+    if actions.just(Action::Inventory) {
+        showing.inventory = !showing.inventory;
     }
 }
 
@@ -1097,8 +1173,8 @@ type ButtonParts = (
 /// A tab's name, and its color.
 type LabelParts = (&'static mut Text, &'static mut TextColor);
 type LabelFilter = (With<ControlIcon>, Without<Readout>);
-/// A button's tooltip or its key's badge.
-type NoteFilter = (Or<(With<Tip>, With<Badge>)>, Without<Control>);
+/// A button's key's badge.
+type BadgeFilter = (With<Badge>, Without<Control>);
 
 /// Keeps every button looking like what it does now: lit, dimmed, hidden, pressed, hovered,
 /// with its key and what it does.
@@ -1108,7 +1184,7 @@ fn update_controls(
     mut buttons: Query<ButtonParts>,
     mut icons: Query<&mut ImageNode, With<ControlIcon>>,
     mut labels: Query<LabelParts, LabelFilter>,
-    mut notes: Query<(&mut Node, &Children, Has<Tip>), NoteFilter>,
+    mut badges: Query<(&mut Node, &Children), BadgeFilter>,
     mut words: Query<&mut Text, (Without<ControlIcon>, Without<Readout>)>,
 ) {
     let shop = game.shop();
@@ -1169,35 +1245,271 @@ fn update_controls(
                     color.0 = ink;
                 }
             }
-            // The tooltip while the pointer's on it, and the key's badge for round buttons
-            // whose key has a short name.
-            if let Ok((mut note, words_of, tip)) = notes.get_mut(child) {
-                let (shown, said) = if tip {
-                    let said = match &key {
-                        Some((key, _)) => format!("{} ({key})", shop.describe(action)),
-                        None => shop.describe(action),
-                    };
-                    (hovered.get() && control.look != Look::Tab, Some(said))
+            // The key's badge, for round buttons whose key has a short name.
+            if let Ok((mut badge, words_of)) = badges.get_mut(child) {
+                let short = key
+                    .as_ref()
+                    .and_then(|(_, badge)| *badge)
+                    .filter(|_| matches!(control.look, Look::Round | Look::Go));
+                let display = if short.is_some() {
+                    Display::Flex
                 } else {
-                    let short = key
-                        .as_ref()
-                        .and_then(|(_, badge)| *badge)
-                        .filter(|_| matches!(control.look, Look::Round | Look::Go));
-                    (short.is_some(), short.map(str::to_string))
+                    Display::None
                 };
-                let display = if shown { Display::Flex } else { Display::None };
-                if note.display != display {
-                    note.display = display;
+                if badge.display != display {
+                    badge.display = display;
                 }
-                if let (Some(said), Some(&line)) = (said, words_of.first())
+                if let (Some(short), Some(&line)) = (short, words_of.first())
                     && let Ok(mut line) = words.get_mut(line)
-                    && line.0 != said
+                    && line.0 != short
                 {
-                    line.0 = said;
+                    line.0 = short.to_string();
                 }
             }
         }
     }
+}
+
+/// Shows what the button under the pointer does, and its key, beside it.
+fn show_tip(
+    game: Game,
+    buttons: Query<(&Control, &Hovered, &UiGlobalTransform, &ComputedNode)>,
+    tip: Single<(&mut Node, &mut UiTransform, &Children), With<Tip>>,
+    mut words: Query<&mut Text>,
+) {
+    let (mut node, mut transform, children) = tip.into_inner();
+    let hovered = buttons
+        .iter()
+        .find(|(control, hovered, ..)| hovered.get() && control.look != Look::Tab);
+    let Some((control, _, at, size)) = hovered else {
+        if node.display != Display::None {
+            node.display = Display::None;
+        }
+        return;
+    };
+    let shop = game.shop();
+    let said = match key_for(shop.view, control.action) {
+        Some((key, _)) => format!("{} ({key})", shop.describe(control.action)),
+        None => shop.describe(control.action),
+    };
+    if let Some(&line) = children.first()
+        && let Ok(mut line) = words.get_mut(line)
+        && line.0 != said
+    {
+        line.0 = said;
+    }
+    // The button's edges, in logical pixels.
+    let scale = size.inverse_scale_factor;
+    let middle = at.affine().translation * scale;
+    let half = size.size * scale / 2.0;
+    const GAP: f32 = 10.0;
+    let (x, y, shift) = match control.tip {
+        TipAt::Above => (middle.x, middle.y - half.y - GAP, (-50.0, -100.0)),
+        TipAt::Below => (middle.x, middle.y + half.y + GAP, (-50.0, 0.0)),
+        TipAt::BelowLeft => (middle.x - half.x, middle.y + half.y + GAP, (0.0, 0.0)),
+        TipAt::BelowRight => (middle.x + half.x, middle.y + half.y + GAP, (-100.0, 0.0)),
+        TipAt::Left => (middle.x - half.x - GAP, middle.y, (-100.0, -50.0)),
+    };
+    let placed = Node {
+        position_type: PositionType::Absolute,
+        left: px(x),
+        top: px(y),
+        display: Display::Flex,
+        ..node.clone()
+    };
+    if *node != placed {
+        *node = placed;
+    }
+    let shifted = UiTransform::from_translation(Val2::percent(shift.0, shift.1));
+    if *transform != shifted {
+        *transform = shifted;
+    }
+}
+
+/// The scrolling list in the inventory panel.
+#[derive(Component)]
+struct InventoryList;
+
+/// How wide the inventory panel is.
+const INVENTORY_WIDTH: f32 = 400.0;
+
+/// Fills the inventory's list afresh whenever what's in it, or where you are, changes: the
+/// parts, the offcuts, and new lumber, each line with buttons to use it here, move it to the
+/// other shelf, or throw it away.
+fn build_inventory(
+    mut commands: Commands,
+    view: Res<ShopView>,
+    inventory: Res<Inventory>,
+    icons: Res<Icons>,
+    list: Single<Entity, With<InventoryList>>,
+) {
+    if !(inventory.is_changed() || view.is_changed()) {
+        return;
+    }
+    let list = *list;
+    commands.entity(list).despawn_related::<Children>();
+    let use_icon = match *view {
+        ShopView::Overview => Icon::PickUp,
+        _ => Icon::Place,
+    };
+    for shelf in [Shelf::Parts, Shelf::Offcuts] {
+        let (name, empty, move_icon) = match shelf {
+            Shelf::Parts => (
+                "Parts",
+                "Pieces you cut to size, glue-ups, and boards you put away go here.",
+                Icon::Step(Arrow::Down, false),
+            ),
+            Shelf::Offcuts => (
+                "Offcuts",
+                "What's left over from a cut goes here.",
+                Icon::Step(Arrow::Up, false),
+            ),
+        };
+        let count = inventory.count(shelf);
+        heading(&mut commands, list, &format!("{name} · {count}"));
+        let rows = inventory.rows(shelf);
+        if rows.is_empty() {
+            commands.spawn((
+                text(empty, 14.0, INK.with_alpha(0.55)),
+                Node {
+                    margin: UiRect::bottom(px(6)),
+                    ..default()
+                },
+                ChildOf(list),
+            ));
+        }
+        for row in rows {
+            let (size, notes) = inventory::describe(row.work);
+            let line = line(&mut commands, list, &size, &notes, row.count);
+            for (action, icon) in [
+                (Action::Take(row.id), use_icon),
+                (Action::MoveShelf(row.id), move_icon),
+                (Action::Scrap(row.id), Icon::Scrap),
+            ] {
+                spawn_button(
+                    &mut commands,
+                    &icons,
+                    line,
+                    action,
+                    icon,
+                    Look::Small,
+                    TipAt::Left,
+                );
+            }
+        }
+    }
+    heading(&mut commands, list, "New lumber");
+    for (index, (name, thickness, width)) in LUMBER.iter().enumerate() {
+        let size = format!("{thickness} x {width} x 24\"");
+        let line = line(&mut commands, list, name, &size, 1);
+        spawn_button(
+            &mut commands,
+            &icons,
+            line,
+            Action::NewLumber(index as u64),
+            use_icon,
+            Look::Small,
+            TipAt::Left,
+        );
+    }
+}
+
+/// A heading in the inventory's list.
+fn heading(commands: &mut Commands, list: Entity, name: &str) {
+    commands.spawn((
+        bold(name, 15.0, INK.with_alpha(0.65)),
+        Node {
+            margin: UiRect {
+                top: px(10),
+                bottom: px(4),
+                ..default()
+            },
+            ..default()
+        },
+        ChildOf(list),
+    ));
+}
+
+/// A line of the inventory: what it is, in bold, what else there is to say about it, and how
+/// many there are, with room after for its buttons. Returns the line, to put them in.
+fn line(commands: &mut Commands, list: Entity, name: &str, notes: &str, count: usize) -> Entity {
+    let line = commands
+        .spawn((
+            Node {
+                align_items: AlignItems::Center,
+                column_gap: px(6),
+                padding: UiRect::vertical(px(5)),
+                border: UiRect::top(px(1)),
+                ..default()
+            },
+            BorderColor::all(EDGE.with_alpha(0.12)),
+            ChildOf(list),
+        ))
+        .id();
+    let words = commands
+        .spawn((
+            Node {
+                flex_direction: FlexDirection::Column,
+                flex_grow: 1.0,
+                flex_shrink: 1.0,
+                ..default()
+            },
+            ChildOf(line),
+            children![(bold(name, 15.0, INK), Pickable::IGNORE)],
+        ))
+        .id();
+    if !notes.is_empty() {
+        commands.spawn((
+            text(notes, 13.0, INK.with_alpha(0.6)),
+            Pickable::IGNORE,
+            ChildOf(words),
+        ));
+    }
+    if count > 1 {
+        commands.spawn((
+            Node {
+                padding: UiRect::axes(px(7), px(1)),
+                border_radius: BorderRadius::all(px(9)),
+                ..default()
+            },
+            BackgroundColor(ACCENT),
+            ChildOf(line),
+            children![(
+                bold(format!("×{count}"), 13.0, Color::WHITE),
+                Pickable::IGNORE
+            )],
+        ));
+    }
+    line
+}
+
+/// Scrolls the inventory's list under the mouse wheel.
+fn scroll_inventory(
+    mut wheels: MessageReader<MouseWheel>,
+    hovers: Res<HoverMap>,
+    parents: Query<&ChildOf>,
+    list: Single<(Entity, &mut ScrollPosition, &ComputedNode), With<InventoryList>>,
+) {
+    let lines: f32 = wheels
+        .read()
+        .map(|wheel| match wheel.unit {
+            MouseScrollUnit::Line => wheel.y * 28.0,
+            MouseScrollUnit::Pixel => wheel.y,
+        })
+        .sum();
+    if lines == 0.0 {
+        return;
+    }
+    let (list, mut position, node) = list.into_inner();
+    let over = hovers.get(&PointerId::Mouse).is_some_and(|hits| {
+        hits.keys()
+            .any(|&hit| hit == list || parents.iter_ancestors(hit).any(|ancestor| ancestor == list))
+    });
+    if !over {
+        return;
+    }
+    let most = ((node.content_size().y - node.size().y) * node.inverse_scale_factor).max(0.0);
+    position.0.y = (position.0.y - lines).clamp(0.0, most);
 }
 
 /// Keeps the readouts up to date: the line on what's going on, what's in hand, the cut list,
@@ -1218,7 +1530,7 @@ fn update_text(
         let said = match readout {
             Readout::Status => shop.status(hovered.station),
             Readout::Hand => hand::describe(hand),
-            Readout::CutList => game.miter_saw.cut_list(),
+            Readout::Inventory => continue,
             Readout::Help => help(&shop),
             Readout::Setting(setting) => shop.setting(*setting).1,
             Readout::Fps => continue,
@@ -1236,7 +1548,7 @@ fn update_text(
     for (panel, mut node) in &mut panels {
         let shown = match panel.0 {
             Readout::Hand => hand.0.is_some(),
-            Readout::CutList => showing.cut_list,
+            Readout::Inventory => showing.inventory,
             Readout::Help => showing.help,
             _ => true,
         };
@@ -1278,6 +1590,8 @@ mod tests {
         hand: &'a Hand,
         showing: &'a Showing,
     ) -> Shop<'a> {
+        static INVENTORY: std::sync::LazyLock<Inventory> =
+            std::sync::LazyLock::new(Inventory::default);
         Shop {
             view,
             table_saw,
@@ -1285,6 +1599,7 @@ mod tests {
             bench,
             hand,
             showing,
+            inventory: &INVENTORY,
         }
     }
 

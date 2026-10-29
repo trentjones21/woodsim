@@ -14,6 +14,7 @@ use woodsim::{Axis, Blade, Board, CutError, Length, Orientation, TableSaw};
 
 use crate::{
     hand::Workpiece,
+    inventory::Shelf,
     shop::{Part, SawBoards, describe_kerf},
     work::{self, Passed},
 };
@@ -50,6 +51,9 @@ pub struct TableSawStation {
     taken: Vec<Part>,
     /// Where the miter gauge's stop is set, kept while the rip fence is in use.
     gauge_stop: Length,
+    /// Wood the saw has set aside, for the inventory: what a new board displaced, and what's
+    /// been put away.
+    set_aside: Vec<(Shelf, Workpiece)>,
 }
 
 struct Feeding {
@@ -80,7 +84,17 @@ impl Default for TableSawStation {
             pass: None,
             taken: Vec::new(),
             gauge_stop: Length::from_inches(12),
+            set_aside: Vec::new(),
         }
+    }
+}
+
+/// Which shelf a part of the saw's board goes on: the measured piece and a board that wasn't cut
+/// to the parts, the offcut to the offcuts.
+pub fn shelf(part: Part) -> Shelf {
+    match part {
+        Part::Offcut => Shelf::Offcuts,
+        Part::Whole | Part::Piece => Shelf::Parts,
     }
 }
 
@@ -323,25 +337,76 @@ impl TableSawStation {
         !self.at_blade()
     }
 
-    /// Puts `board` against the fence, unturned and ready to rip, and hands back whatever was on
+    /// Puts `board` against the fence, unturned and ready to rip, setting aside whatever was on
     /// the saw that wasn't carried off: the board, slots and all, or the pieces it was cut into.
-    pub fn load(&mut self, board: Workpiece) -> Vec<Workpiece> {
-        let mut leftovers = self.take_loose();
-        leftovers.extend(match self.result() {
+    pub fn load(&mut self, board: Workpiece) {
+        let loose = self.take_loose();
+        self.set_aside
+            .extend(loose.into_iter().map(|strip| (Shelf::Offcuts, strip)));
+        let left: Vec<(Shelf, Workpiece)> = match self.result() {
             Some(Ok(Passed::Cut(cut))) => [Part::Piece, Part::Offcut]
                 .into_iter()
                 .filter(|part| !self.taken.contains(part))
-                .filter_map(|part| cut.take(part, self.lie))
+                .filter_map(|part| Some((shelf(part), cut.take(part, self.lie)?)))
                 .collect(),
             _ if self.taken.contains(&Part::Whole) => Vec::new(),
-            _ => vec![work::hand_off(self.current_board(), self.lie)],
-        });
+            _ => vec![(Shelf::Parts, work::hand_off(self.current_board(), self.lie))],
+        };
+        self.set_aside.extend(left);
         self.board = board;
         self.lie = Orientation::default();
         self.advance = START;
         self.pass = None;
         self.taken.clear();
-        leftovers
+    }
+
+    /// Puts away everything on the saw that's clear of the blade: the measured piece to the
+    /// parts, the offcut to the offcuts, a board that wasn't cut to the parts.
+    pub fn put_away(&mut self) {
+        for part in [Part::Whole, Part::Piece, Part::Offcut] {
+            if let Some(work) = self.take(part) {
+                self.set_aside.push((shelf(part), work));
+            }
+        }
+    }
+
+    /// Whether there's anything clear of the blade to put away.
+    pub fn can_put_away(&self) -> bool {
+        [Part::Whole, Part::Piece, Part::Offcut]
+            .into_iter()
+            .any(|part| self.can_take(part))
+    }
+
+    /// Puts the piece the last cut measured away and sets the offcut back against the fence, to
+    /// cut another the same way: rip strip after strip, say.
+    pub fn cut_again(&mut self) {
+        if !self.can_cut_again() {
+            return;
+        }
+        if let Some(piece) = self.take(Part::Piece) {
+            self.set_aside.push((Shelf::Parts, piece));
+        }
+        if let Some(offcut) = self.take(Part::Offcut) {
+            self.load(offcut);
+        }
+    }
+
+    /// Whether the last cut left an offcut, clear of the blade, to cut again.
+    pub fn can_cut_again(&self) -> bool {
+        self.can_take(Part::Offcut)
+    }
+
+    /// Whether there's wood set aside, or strips a cut set loose, for the inventory.
+    pub fn has_set_aside(&self) -> bool {
+        !self.set_aside.is_empty() || self.has_loose()
+    }
+
+    /// Hands what's been set aside to the inventory, with strips a cut set loose as offcuts.
+    pub fn take_set_aside(&mut self) -> Vec<(Shelf, Workpiece)> {
+        let loose = self.take_loose();
+        let mut set_aside = std::mem::take(&mut self.set_aside);
+        set_aside.extend(loose.into_iter().map(|strip| (Shelf::Offcuts, strip)));
+        set_aside
     }
 
     /// Whether any of the board is over the blade, where the fence and blade can't move.
@@ -460,7 +525,7 @@ impl TableSawStation {
             Some(Err(error)) => format!("No cut: {error}."),
             Some(Ok(Passed::Cut(cut))) if !cut.has_loose() => cut.describe(verb, self.lie),
             Some(Ok(Passed::Cut(cut))) => format!(
-                "{} Set aside on the pile by the miter saw.",
+                "{} Put away with the offcuts.",
                 cut.describe(verb, self.lie)
             ),
             Some(Ok(Passed::Kerfed(board))) => {
@@ -850,11 +915,7 @@ mod tests {
             "3/4\" x 1-1/8\" x 4-7/8\""
         );
         assert!(!station.has_loose());
-        assert!(
-            station
-                .status()
-                .ends_with("Set aside on the pile by the miter saw.")
-        );
+        assert!(station.status().ends_with("Put away with the offcuts."));
     }
 
     #[test]
@@ -862,8 +923,9 @@ mod tests {
         let mut station = TableSawStation::default();
         push_through(&mut station);
         station.take(Part::Piece);
-        // The offcut left on the saw comes back, for the pile.
-        assert_eq!(station.load(Workpiece::Board(new_stock())).len(), 1);
+        // The offcut left on the saw is set aside, for the inventory.
+        station.load(Workpiece::Board(new_stock()));
+        assert_eq!(station.take_set_aside().len(), 1);
 
         assert!(station.pass.is_none());
         assert!(!station.boards().whole.is_empty());
@@ -888,11 +950,14 @@ mod tests {
     }
 
     #[test]
-    fn loading_a_board_hands_back_the_board_that_was_waiting() {
+    fn loading_a_board_sets_aside_the_board_that_was_waiting() {
         let mut station = TableSawStation::default();
-        let leftovers = station.load(Workpiece::Board(crosscut_piece()));
+        station.load(Workpiece::Board(crosscut_piece()));
 
-        assert_eq!(leftovers, [Workpiece::Board(new_stock())]);
+        assert_eq!(
+            station.take_set_aside(),
+            [(Shelf::Parts, Workpiece::Board(new_stock()))]
+        );
         assert_eq!(station.board, Workpiece::Board(crosscut_piece()));
         assert_eq!(
             station.status(),
@@ -901,29 +966,75 @@ mod tests {
     }
 
     #[test]
-    fn loading_a_board_hands_back_a_board_left_in_the_blade_with_its_slot() {
+    fn loading_a_board_sets_aside_a_board_left_in_the_blade_with_its_slot() {
         let mut station = TableSawStation::default();
         push_to(&mut station, 10);
-        let leftovers = station.load(Workpiece::Board(crosscut_piece()));
+        station.load(Workpiece::Board(crosscut_piece()));
+        let leftovers = station.take_set_aside();
 
         assert_eq!(leftovers.len(), 1);
-        assert_eq!(leftovers[0].board().unwrap().kerfs().len(), 1);
+        assert_eq!(leftovers[0].1.board().unwrap().kerfs().len(), 1);
     }
 
     #[test]
-    fn loading_a_board_hands_back_the_pieces_not_carried_off() {
+    fn loading_a_board_sets_aside_the_pieces_not_carried_off() {
         let mut station = TableSawStation::default();
         push_through(&mut station);
         station.take(Part::Piece);
-        let leftovers = station.load(Workpiece::Board(crosscut_piece()));
+        station.load(Workpiece::Board(crosscut_piece()));
 
-        let widths: Vec<Length> = leftovers
+        let left: Vec<(Shelf, Length)> = station
+            .take_set_aside()
             .iter()
-            .map(|part| part.board().unwrap().width())
+            .map(|(shelf, part)| (*shelf, part.board().unwrap().width()))
             .collect();
-        assert_eq!(widths, [Length::from_inch_fraction(9, 8)]);
+        assert_eq!(left, [(Shelf::Offcuts, Length::from_inch_fraction(9, 8))]);
         assert!(station.pass.is_none());
         assert!(station.taken.is_empty());
+    }
+
+    #[test]
+    fn put_away_shelves_the_piece_and_the_offcut_and_clears_the_saw() {
+        let mut station = TableSawStation::default();
+        assert!(station.can_put_away());
+        push_through(&mut station);
+        station.put_away();
+        let shelves: Vec<(Shelf, Length)> = station
+            .take_set_aside()
+            .iter()
+            .map(|(shelf, part)| (*shelf, part.board().unwrap().width()))
+            .collect();
+        assert_eq!(
+            shelves,
+            [
+                (Shelf::Parts, Length::from_inches(6)),
+                (Shelf::Offcuts, Length::from_inch_fraction(9, 8)),
+            ]
+        );
+        assert!(!station.can_put_away());
+        assert!(station.boards().whole.is_empty());
+    }
+
+    #[test]
+    fn cutting_again_rips_strip_after_strip() {
+        let mut station = TableSawStation::default();
+        station.saw.fence = Length::from_inches(2);
+        assert!(!station.can_cut_again());
+        push_through(&mut station);
+        assert!(station.can_cut_again());
+        station.cut_again();
+        // The 2" strip is put away; what's left waits against the fence for the next pass.
+        let set_aside = station.take_set_aside();
+        assert_eq!(set_aside.len(), 1);
+        assert_eq!(set_aside[0].0, Shelf::Parts);
+        assert_eq!(
+            set_aside[0].1.board().unwrap().width(),
+            Length::from_inches(2)
+        );
+        let left =
+            Length::from_inch_fraction(29, 4) - Length::from_inches(2) - station.saw.blade.kerf;
+        assert_eq!(station.current_board().board().unwrap().width(), left);
+        assert!(station.can_turn());
     }
 
     #[test]

@@ -7,6 +7,7 @@ mod feed;
 mod hand;
 mod hud;
 mod icons;
+mod inventory;
 mod join;
 mod meshes;
 mod miter_saw;
@@ -37,6 +38,7 @@ use bench::BenchPlugin;
 use controls::ControlsPlugin;
 use hand::HandPlugin;
 use hud::HudPlugin;
+use inventory::InventoryPlugin;
 use miter_saw::MiterSawPlugin;
 use scenery::ScenePlugin;
 use shop::ShopPlugin;
@@ -98,6 +100,7 @@ fn main() {
         BenchPlugin,
         HandPlugin,
         ControlsPlugin,
+        InventoryPlugin,
         HudPlugin,
     ));
 

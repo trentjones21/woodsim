@@ -6,12 +6,12 @@ use bevy::{picking::pointer::PointerButton, prelude::*};
 use woodsim::{Angle, Length, MiterSaw};
 
 use crate::{
-    chop::{MITER_STOPS, MiterSawStation, PILE_TRAY, board_turn},
+    chop::{MITER_STOPS, MiterSawStation, board_turn},
     controls::{Action, Actions, Step},
-    hand::{Gesture, Hand},
+    hand::Hand,
     meshes::{Grain, board_mesh, lumber_mesh, rounded_box},
     shop::{
-        Block, Part, Placed, SawPart, Shape, ShopAssets, ShopView, Stations, inches, place_parts,
+        Block, Part, SawPart, Shape, ShopAssets, ShopView, Stations, inches, place_parts,
         pointer_on_plane, rounded_block, set_material_on, snap_to_sixteenth, station_part,
     },
 };
@@ -76,7 +76,7 @@ impl Plugin for MiterSawPlugin {
                             .run_if(resource_equals(ShopView::MiterSaw)),
                         work_blade,
                     ),
-                    (draw_stop, draw_table, draw_head, draw_board, draw_pile),
+                    (draw_stop, draw_table, draw_head, draw_board),
                 )
                     .chain(),
             );
@@ -100,14 +100,6 @@ struct Head;
 
 #[derive(Component)]
 struct AtMiterSaw;
-
-/// A board on the pile behind the fence: drawn in its place in `MiterSawStation::pile`, and
-/// part of the part or glue-up at `item` in `MiterSawStation::parts`.
-#[derive(Component)]
-struct PilePart {
-    slot: usize,
-    item: usize,
-}
 
 fn spawn_miter_saw(
     mut commands: Commands,
@@ -395,26 +387,6 @@ fn spawn_miter_saw(
         .observe(set_material_on::<PointerOut>(stop_color))
         .observe(grab_stop)
         .observe(drag_stop);
-
-    // The tray the parts pile stacks on, behind the fence at the bench's left end.
-    let tray_color = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.36, 0.4, 0.5),
-        perceptual_roughness: 0.6,
-        ..default()
-    });
-    let tray_hover = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.48, 0.53, 0.66),
-        perceptual_roughness: 0.6,
-        ..default()
-    });
-    commands
-        .spawn((
-            rounded_block(&mut meshes, PILE_TRAY, ORIGIN),
-            MeshMaterial3d(tray_color.clone()),
-        ))
-        .observe(set_material_on::<PointerOver>(tray_hover))
-        .observe(set_material_on::<PointerOut>(tray_color))
-        .observe(tray_clicked);
 }
 
 /// Turns the board against the stop a quarter turn left or right, flips it over, or stands it
@@ -639,102 +611,5 @@ fn draw_board(
             .observe(highlight_takeable)
             .observe(set_material_on::<PointerOut>(shop.wood.clone()))
             .observe(saw_part_clicked);
-    }
-}
-
-/// Keeps one board on the pile for each part set aside.
-fn draw_pile(
-    mut commands: Commands,
-    station: Res<MiterSawStation>,
-    shop: Res<ShopAssets>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut pile: Query<(Entity, &mut PilePart, &Mesh3d, &mut Transform, &mut Shape)>,
-) {
-    if !station.is_changed() {
-        return;
-    }
-    let pile_parts = station.pile();
-    let place = |placed: &Placed| {
-        Transform::from_translation(ORIGIN + board_turn() * placed.corner)
-            .with_rotation(board_turn() * placed.rotation)
-    };
-    let mut drawn = 0;
-    for (entity, mut part, mesh, mut transform, mut shape) in &mut pile {
-        match pile_parts.get(part.slot) {
-            Some((item, placed)) => {
-                *transform = place(placed);
-                shape.update(placed, mesh, &mut meshes);
-                part.item = *item;
-                drawn += 1;
-            }
-            None => commands.entity(entity).despawn(),
-        }
-    }
-    for (slot, (item, placed)) in pile_parts.iter().enumerate().skip(drawn) {
-        commands
-            .spawn((
-                Mesh3d(meshes.add(lumber_mesh(&placed.board, placed.grain))),
-                MeshMaterial3d(shop.wood.clone()),
-                place(placed),
-                PilePart { slot, item: *item },
-                Shape::built(placed),
-            ))
-            .observe(highlight_on_pile)
-            .observe(set_material_on::<PointerOut>(shop.wood.clone()))
-            .observe(pile_part_clicked);
-    }
-}
-
-/// Lights up a part on the pile under the pointer: a click picks it up, or sets the part in hand
-/// down on the pile.
-fn highlight_on_pile(
-    over: On<PointerOver>,
-    shop: Res<ShopAssets>,
-    mut materials: Query<&mut MeshMaterial3d<StandardMaterial>>,
-) {
-    if let Ok(mut material) = materials.get_mut(over.entity) {
-        material.0 = shop.wood_highlight.clone();
-    }
-}
-
-/// With empty hands, a click on a part on the pile picks it up; holding one, it sets that one
-/// down on the pile.
-fn pile_part_clicked(
-    click: On<PointerClick>,
-    pile: Query<&PilePart>,
-    gesture: Res<Gesture>,
-    shop: Res<ShopAssets>,
-    mut materials: Query<&mut MeshMaterial3d<StandardMaterial>>,
-    mut hand: ResMut<Hand>,
-    mut miter_saw: ResMut<MiterSawStation>,
-) {
-    if click.button != PointerButton::Primary || gesture.dragged() {
-        return;
-    }
-    let Ok(part) = pile.get(click.entity) else {
-        return;
-    };
-    match hand.0.take() {
-        Some(work) => miter_saw.parts.push(work),
-        None => hand.0 = miter_saw.remove_from_pile(part.item),
-    }
-    // The box clicked will show a different part once the pile shifts, so drop its highlight.
-    if let Ok(mut material) = materials.get_mut(click.entity) {
-        material.0 = shop.wood.clone();
-    }
-}
-
-/// Holding a part, a click on the pile's tray sets it down on the pile.
-fn tray_clicked(
-    click: On<PointerClick>,
-    gesture: Res<Gesture>,
-    mut hand: ResMut<Hand>,
-    mut miter_saw: ResMut<MiterSawStation>,
-) {
-    if click.button == PointerButton::Primary
-        && !gesture.dragged()
-        && let Some(work) = hand.0.take()
-    {
-        miter_saw.parts.push(work);
     }
 }

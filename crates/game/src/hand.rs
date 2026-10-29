@@ -1,7 +1,7 @@
 //! Carrying wood around the shop. Click a piece of wood to pick it up, wherever it is: on a saw,
-//! on the pile, or a new board off the lumber rack; at the workbench, where clicks pick
-//! surfaces to put together, Space picks up a part or a glue-up. Then click where it goes to set
-//! it down: a saw, the workbench, the pile, or the scrap bin to throw it away.
+//! or a new board off the lumber rack; at the workbench, where clicks pick surfaces to put
+//! together, Space picks up a part or a glue-up. Then click where it goes to set it down: a saw,
+//! the workbench, or the scrap bin to throw it away; or put it away in the inventory.
 
 use bevy::prelude::*;
 use woodsim::{Assembly, Board, Length};
@@ -81,7 +81,7 @@ pub fn from_rack(width: Length, thickness: Length) -> Board {
 }
 
 /// Sets the wood in hand down at `station`: on a saw, ready to cut, with anything already on it
-/// going on the pile; on the workbench, loose, as near `near` (a point in the shop) as there's
+/// set aside for the inventory; on the workbench, loose, as near `near` (a point in the shop) as there's
 /// room. Returns false, still holding it, if there's nothing in hand or it can't go there.
 pub fn set_down(
     station: ShopView,
@@ -96,8 +96,7 @@ pub fn set_down(
     };
     match station {
         ShopView::TableSaw => {
-            let leftovers = table_saw.load(work);
-            miter_saw.parts.extend(leftovers);
+            table_saw.load(work);
             true
         }
         ShopView::MiterSaw => {

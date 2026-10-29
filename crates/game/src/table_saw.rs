@@ -6,7 +6,6 @@ use bevy::{picking::pointer::PointerButton, prelude::*};
 use woodsim::Length;
 
 use crate::{
-    chop::MiterSawStation,
     controls::{Action, Actions, Step},
     feed::TableSawStation,
     hand::Hand,
@@ -79,7 +78,6 @@ impl Plugin for TableSawPlugin {
                         bring_back,
                     )
                         .run_if(resource_equals(ShopView::TableSaw)),
-                    set_loose_aside,
                     (draw_fence, draw_gauge, draw_blade, draw_board),
                 )
                     .chain(),
@@ -553,14 +551,6 @@ fn turn_board(actions: Res<Actions>, mut station: ResMut<TableSawStation>) {
             Action::StandOnEdge => station.tip(),
             _ => continue,
         };
-    }
-}
-
-/// Puts any strips a cut set loose on the parts pile by the miter saw.
-fn set_loose_aside(mut table_saw: ResMut<TableSawStation>, mut miter_saw: ResMut<MiterSawStation>) {
-    if table_saw.has_loose() {
-        let loose = table_saw.take_loose();
-        miter_saw.parts.extend(loose);
     }
 }
 

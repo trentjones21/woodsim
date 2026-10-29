@@ -50,11 +50,16 @@ pub enum Icon {
     Step(Arrow, bool),
     /// A solid arrowhead, for sliding a part across a joint or panning.
     Point(Arrow),
-    CutList,
+    Inventory,
+    /// Into the inventory, out of it to where you are, cut again, and throw away.
+    Store,
+    Place,
+    Again,
+    Scrap,
 }
 
 impl Icon {
-    const ALL: [Icon; 29] = [
+    const ALL: [Icon; 33] = [
         Icon::TurnLeft,
         Icon::TurnRight,
         Icon::Flip,
@@ -83,7 +88,11 @@ impl Icon {
         Icon::ZoomIn,
         Icon::ZoomOut,
         Icon::Help,
-        Icon::CutList,
+        Icon::Inventory,
+        Icon::Store,
+        Icon::Place,
+        Icon::Again,
+        Icon::Scrap,
     ];
 
     /// Every icon there is.
@@ -295,14 +304,47 @@ impl Icon {
                 vec![Fill(vec![p(0.3, 0.2), p(0.8, 0.5), p(0.3, 0.8)])],
                 arrow,
             ),
-            Icon::CutList => {
-                let mut shapes = Vec::new();
-                for y in [0.28, 0.5, 0.72] {
-                    shapes.push(Disc(p(0.2, y), 0.065));
-                    shapes.push(Line(vec![p(0.36, y), p(0.84, y)], 0.08));
-                }
+            Icon::Inventory => vec![
+                Rounded(p(0.1, 0.18), p(0.9, 0.36), 0.04),
+                Cut(
+                    Box::new(Rounded(p(0.16, 0.4), p(0.84, 0.88), 0.06)),
+                    Box::new(Rounded(p(0.38, 0.5), p(0.62, 0.59), 0.04)),
+                ),
+            ],
+            Icon::Store => {
+                let mut shapes = vec![Line(
+                    vec![p(0.16, 0.56), p(0.16, 0.86), p(0.84, 0.86), p(0.84, 0.56)],
+                    0.09,
+                )];
+                shapes.extend(arrow_line(p(0.5, 0.1), p(0.5, 0.72), 0.11));
                 shapes
             }
+            Icon::Place => {
+                let mut shapes = vec![Rounded(p(0.1, 0.16), p(0.22, 0.84), 0.04)];
+                shapes.extend(arrow_line(p(0.88, 0.5), p(0.3, 0.5), 0.12));
+                shapes
+            }
+            Icon::Again => {
+                let mut shapes = arrow_arc(p(0.5, 0.5), 0.3, -160.0, 140.0, 0.1);
+                shapes.extend(arrow_arc(p(0.5, 0.5), 0.3, 20.0, 140.0, 0.1));
+                shapes
+            }
+            Icon::Scrap => vec![
+                Line(vec![p(0.16, 0.25), p(0.84, 0.25)], 0.08),
+                Line(vec![p(0.4, 0.17), p(0.6, 0.17)], 0.08),
+                Cut(
+                    Box::new(Cut(
+                        Box::new(Fill(vec![
+                            p(0.24, 0.33),
+                            p(0.76, 0.33),
+                            p(0.7, 0.9),
+                            p(0.3, 0.9),
+                        ])),
+                        Box::new(Rounded(p(0.37, 0.43), p(0.44, 0.8), 0.03)),
+                    )),
+                    Box::new(Rounded(p(0.56, 0.43), p(0.63, 0.8), 0.03)),
+                ),
+            ],
         }
     }
 }
