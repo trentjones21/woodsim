@@ -1470,28 +1470,50 @@ mod tests {
         assert_eq!(
             say(0),
             "Table saw, rip fence at 3/4\", blade 1\" high: Rip a new 1x4, 3/4\" x 3-1/2\" x \
-             24\". Keep the 3/4\" x 3/4\" x 24\" for step 2."
+             24\". Keep the 3/4\" strip for step 2."
         );
-        assert!(
-            say(1).starts_with(
-                "Miter saw at 45° left, stop at 1\": Cut the 3/4\" x 3/4\" x 24\" from step 1. \
-                 Keep the 3/4\" x 3/4\""
-            ),
-            "{}",
-            say(1)
+        assert_eq!(
+            say(1),
+            "Miter saw at 45° left, stop at 1\": Trim the end off the 3/4\" strip from step 1. \
+             Keep the rest of the 3/4\" strip for step 3."
         );
-        assert!(say(1).ends_with("for step 3."), "{}", say(1));
-        assert!(
-            say(2).starts_with("Miter saw at 45° right, stop at 4\": Cut the "),
-            "{}",
-            say(2)
+        assert_eq!(
+            say(2),
+            "Miter saw at 45° right, stop at 4\": Cut A1 off the rest of the 3/4\" strip from \
+             step 2. Keep the rest of the 3/4\" strip for step 4."
         );
-        assert!(
-            say(2).contains("Keep A1 and the 3/4\" x 3/4\""),
-            "{}",
-            say(2)
+        assert_eq!(
+            say(8),
+            "Miter saw at 45° right, stop at 4\": Cut A4 off the rest of the 3/4\" strip from \
+             step 8."
         );
-        assert!(say(8).ends_with("Keep A4."), "{}", say(8));
+    }
+
+    #[test]
+    fn cuts_that_nibble_a_part_to_length_are_one_cut_to_the_length_it_ended_up() {
+        let saw = MiterSaw::twelve_inch();
+        let mut board = Board::new(
+            Length::from_inches(24),
+            Length::from_inch_fraction(7, 2),
+            Length::from_inch_fraction(3, 4),
+        );
+        for sixteenths in [162, 161, 160] {
+            let Ok(Pass::Cut(cut)) = saw.crosscut(
+                &board,
+                Orientation::default(),
+                Length::from_inch_fraction(sixteenths, 16),
+            ) else {
+                panic!("expected a cut");
+            };
+            board = cut.piece.board;
+        }
+        let plan = Plan::of(Assembly::of(board));
+        assert_eq!(plan.cutting.cuts.len(), 1);
+        assert_eq!(
+            plan.cutting
+                .describe(0, plan.assembly.members(), &plan.labels, &|cut| cut + 1),
+            "Miter saw, square, stop at 10\": Cut A off a new 1x4, 3/4\" x 3-1/2\" x 24\"."
+        );
     }
 
     #[test]

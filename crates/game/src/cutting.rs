@@ -106,6 +106,12 @@ impl Cutting {
             }
         }
         cuts.sort_by_key(|cut| cut.number);
+        let finished: Vec<&Origin> = assembly
+            .members()
+            .iter()
+            .map(|member| member.board.origin())
+            .collect();
+        merge_nibbles(&mut cuts, &finished);
         Cutting { stock, cuts }
     }
 
@@ -160,13 +166,17 @@ impl Cutting {
                 None => "the board".to_string(),
             },
         };
+        // A crosscut that only takes the end off, keeping the rest to cut again, trims it.
+        let trims = matches!(cut_step.outputs.as_slice(), [(out, led_to)]
+            if finished_as(out, led_to, members).is_empty()
+                && self.name(out).starts_with("the rest of ")
+                && is_crosscut(tool));
         let mut words = format!("{}: ", settings(tool));
         // What a member that came out of `out` finished as is called.
         let finished = |out: &Origin, led_to: &[usize]| -> Vec<String> {
-            led_to
-                .iter()
-                .filter(|&&member| members[member].board.origin().same(out))
-                .map(|&member| labels[member].clone())
+            finished_as(out, led_to, members)
+                .into_iter()
+                .map(|member| labels[member].clone())
                 .collect()
         };
         if let Some((board, kerf)) = &slotted {
@@ -183,21 +193,22 @@ impl Cutting {
             }
             return words;
         }
-        let _ = write!(words, "{} {what}.", verb(tool));
-        // What to keep: parts by name, and anything that goes on to another cut.
+        // The parts it cuts, by name, and what goes on to another cut, to keep.
+        let mut parts: Vec<String> = Vec::new();
         let mut kept: Vec<String> = Vec::new();
         for (out, led_to) in &cut_step.outputs {
-            let parts = finished(out, led_to);
-            if !parts.is_empty() {
-                kept.extend(parts);
+            let finished = finished(out, led_to);
+            if !finished.is_empty() {
+                parts.extend(finished);
             } else if let Some(next) = self.cutting(out) {
-                kept.push(format!(
-                    "the {} for step {}",
-                    describe_size(&out.replay()),
-                    step(next)
-                ));
+                kept.push(format!("{} for step {}", self.name(out), step(next)));
             }
         }
+        let _ = match (trims, parts.is_empty()) {
+            (true, _) => write!(words, "Trim the end off {what}."),
+            (false, false) => write!(words, "{} {} off {what}.", verb(tool), join(&parts)),
+            (false, true) => write!(words, "{} {what}.", verb(tool)),
+        };
         if !kept.is_empty() {
             let _ = write!(words, " Keep {}.", join(&kept));
         }
@@ -214,10 +225,65 @@ impl Cutting {
         {
             return format!("a new {}", lumber_name([length, width, thickness]));
         }
-        let size = describe_size(&input.replay());
         match self.made(input) {
-            Some(earlier) => format!("the {size} from step {}", step(earlier)),
-            None => format!("the {size}"),
+            Some(earlier) => format!("{} from step {}", self.name(input), step(earlier)),
+            None => self.name(input),
+        }
+    }
+
+    /// A short name for a board on its way into the project: the lumber it was, a strip a rip
+    /// left, a piece cut to length, or the rest of a board an earlier cut cut: "the 3/4" strip",
+    /// "the rest of the 1x4".
+    fn name(&self, origin: &Origin) -> String {
+        if let Source::Stock {
+            length,
+            width,
+            thickness,
+        } = *origin.source()
+        {
+            return match lumber_name([length, width, thickness]).split_once(", ") {
+                Some((name, _)) => format!("the {name}"),
+                None => "the board".to_string(),
+            };
+        }
+        let board = origin.replay();
+        let made = self.made(origin).map(|cut| &self.cuts[cut]);
+        let Some((cut, input)) = made.and_then(|cut| Some((cut, cut.inputs.first()?))) else {
+            return format!("the {}", describe_size(&board));
+        };
+        let before = input.replay();
+        // What's left of the board: more than half of it, the way the cut went.
+        let rest = || {
+            let name = self.name(input);
+            let base = name.strip_prefix("the rest of ").unwrap_or(&name);
+            format!("the rest of {base}")
+        };
+        match cut.operation.tool {
+            Tool::TableSaw {
+                lie: Lie::GlueUp(_),
+                ..
+            }
+            | Tool::MiterSaw {
+                lie: Lie::GlueUp(_),
+                ..
+            } => format!("the {}", describe_size(&board)),
+            Tool::TableSaw {
+                lie: Lie::Board(lie),
+                ..
+            } if lie.on_edge() => {
+                match board.thickness() + board.thickness() > before.thickness() {
+                    true => rest(),
+                    false => format!("the {} slice", measured(board.thickness())),
+                }
+            }
+            tool if is_crosscut(tool) => match board.length() + board.length() > before.length() {
+                true => rest(),
+                false => format!("the {} piece", measured(board.length())),
+            },
+            _ => match board.width() + board.width() > before.width() {
+                true => rest(),
+                false => format!("the {} strip", measured(board.width())),
+            },
         }
     }
 
@@ -287,8 +353,8 @@ fn settings(tool: Tool) -> String {
             bottom,
         } => {
             let angle = match describe_miter(saw.miter).as_str() {
-                "square" => "square".to_string(),
-                swung => format!("at {swung}"),
+                "square" => ", square".to_string(),
+                swung => format!(" at {swung}"),
             };
             let depth = if bottom > Length::ZERO {
                 format!(", depth stop {} above the table", measured(bottom))
@@ -300,10 +366,96 @@ fn settings(tool: Tool) -> String {
                 _ => "",
             };
             format!(
-                "Miter saw {angle}, stop at {}{depth}{edge}",
+                "Miter saw{angle}, stop at {}{depth}{edge}",
                 measured(length)
             )
         }
+    }
+}
+
+/// The members of `led_to` that finished as `out`, with no more cuts.
+fn finished_as(out: &Origin, led_to: &[usize], members: &[Member]) -> Vec<usize> {
+    led_to
+        .iter()
+        .copied()
+        .filter(|&member| members[member].board.origin().same(out))
+        .collect()
+}
+
+/// Whether a pass cuts across a board's length, rather than along it.
+fn is_crosscut(tool: Tool) -> bool {
+    match tool {
+        Tool::MiterSaw { .. } => true,
+        Tool::TableSaw {
+            lie: Lie::Board(lie),
+            ..
+        } => lie.along().0 == Axis::Width,
+        Tool::TableSaw { saw, .. } => saw.miter_gauge.is_some(),
+    }
+}
+
+/// Cuts that nibbled a board down a little at a time, each a sliver off the same end with the
+/// saw set the same way but a little shorter, are their last cut: what matters is where it
+/// ended up, not the slivers on the way.
+fn merge_nibbles(cuts: &mut Vec<CutStep>, finished: &[&Origin]) {
+    loop {
+        let merge = (0..cuts.len()).find_map(|first| {
+            let [(out, _)] = cuts[first].outputs.as_slice() else {
+                return None;
+            };
+            if finished.iter().any(|part| part.same(out)) {
+                return None;
+            }
+            let then = cuts
+                .iter()
+                .position(|cut| cut.inputs.iter().any(|input| input.same(out)))?;
+            nibbles(cuts[first].operation.tool, cuts[then].operation.tool).then_some((first, then))
+        });
+        let Some((first, then)) = merge else {
+            return;
+        };
+        let earlier = cuts.remove(first);
+        let then = &mut cuts[then - usize::from(first < then)];
+        then.inputs = earlier.inputs;
+        then.number = then.number.min(earlier.number);
+    }
+}
+
+/// Whether `then`, after `first`, takes a little more off the same end: the same saw set the
+/// same way, but to a length, or a width, no greater.
+fn nibbles(first: Tool, then: Tool) -> bool {
+    match (first, then) {
+        (
+            Tool::MiterSaw {
+                saw: a,
+                lie: lie_a,
+                length: length_a,
+                bottom: bottom_a,
+            },
+            Tool::MiterSaw {
+                saw: b,
+                lie: lie_b,
+                length: length_b,
+                bottom: bottom_b,
+            },
+        ) => a == b && lie_a == lie_b && bottom_a == bottom_b && length_b <= length_a,
+        (
+            Tool::TableSaw {
+                saw: a, lie: lie_a, ..
+            },
+            Tool::TableSaw {
+                saw: b, lie: lie_b, ..
+            },
+        ) => {
+            lie_a == lie_b
+                && (a.blade, a.height) == (b.blade, b.height)
+                && match (a.miter_gauge, b.miter_gauge) {
+                    (None, None) => b.fence <= a.fence,
+                    (Some(stop_a), Some(stop_b)) => stop_b <= stop_a,
+                    _ => false,
+                }
+        }
+        _ => false,
     }
 }
 
