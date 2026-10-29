@@ -789,7 +789,7 @@ fn describe_slots(board: &Board, kerf: &Kerf, count: usize) -> String {
         run.map_or(Length::ZERO, |run| run.length)
             .rounded_to(thirty_second)
     };
-    if let Across::Thickness = kerf.across {
+    if let Across::Thickness = kerf.across() {
         // A resaw slot, cut by a blade standing parallel to the faces, came in through an edge.
         let width = size.width.rounded_to(thirty_second);
         let depth = size.depth.rounded_to(thirty_second);

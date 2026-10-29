@@ -323,7 +323,7 @@ impl Region {
 }
 
 /// The convex hull of `points`, counterclockwise from the length toward the width, exactly.
-fn hull(mut points: Vec<(Length, Length)>) -> Vec<(Length, Length)> {
+pub(crate) fn hull(mut points: Vec<(Length, Length)>) -> Vec<(Length, Length)> {
     points.sort();
     points.dedup();
     if points.len() < 3 {
@@ -578,21 +578,6 @@ impl Solid<'_> {
             .edges()
             .iter()
             .all(|edge| edge.inside(l, w, Length::ZERO) && edge.inside(l, w, self.thickness))
-    }
-
-    /// The part of it from `t` = `bottom` to `top`, measured from `bottom` up, if there's any
-    /// wood there.
-    pub(crate) fn layer(&self, bottom: Length, top: Length) -> Option<Region> {
-        if !self.region.leans() {
-            return Some(self.region.clone());
-        }
-        let sides = self
-            .region
-            .edges()
-            .iter()
-            .map(|edge| edge.moved_by(Length::ZERO, Length::ZERO, bottom))
-            .collect();
-        region(sides, top - bottom)
     }
 
     /// The outline of one of its flat surfaces, if it has any of it: its corners in order

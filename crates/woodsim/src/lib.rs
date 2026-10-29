@@ -23,7 +23,7 @@ pub use assembly::{
     surfaces,
 };
 pub use board::{Board, Piece, Run, SlotSize};
-pub use face::{Direction, Edge, Region};
+pub use face::{Direction, Edge, Region, Vector};
 pub use glue_up::{GlueUpCut, GlueUpPass};
 pub use history::{Lie, Operation, Origin, Part, Side, Source, Tool};
 pub use kerf::{Across, Kerf};

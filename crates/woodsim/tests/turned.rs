@@ -126,7 +126,7 @@ fn turned_with_the_blade_low_it_cuts_a_dado_across_the_board() {
     let board = kerfed(table_saw(inches(12), fraction(1, 4)).rip(&one_by_eight(), lie));
 
     let dado = board.kerfs()[0];
-    assert_eq!(dado.across, Across::Face(Direction::LENGTH));
+    assert_eq!(dado.across(), Across::Face(Direction::LENGTH));
     assert_eq!(
         (dado.near, dado.far),
         (inches(12) - Blade::FULL_KERF, inches(12))

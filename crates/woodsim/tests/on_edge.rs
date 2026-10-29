@@ -88,7 +88,7 @@ fn a_blade_lower_than_the_board_is_wide_leaves_a_slot_in_its_edge() {
     let slotted = kerfed(table_saw(fraction(5, 16), inches(3)).rip(&board, on_edge()));
 
     let slot = slotted.kerfs()[0];
-    assert_eq!(slot.across, Across::Thickness);
+    assert_eq!(slot.across(), Across::Thickness);
     assert_eq!((slot.near, slot.far), (fraction(5, 16), fraction(7, 16)));
     let size = slotted.slot(&slot);
     assert_eq!(size.width, Blade::FULL_KERF);

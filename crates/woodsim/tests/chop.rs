@@ -40,7 +40,7 @@ fn stopping_short_leaves_a_scar_from_above() {
 
     let scar = board.kerfs()[0];
     assert!(!scar.from_below());
-    assert_eq!(scar.across, Across::Face(Direction::LENGTH));
+    assert_eq!(scar.across(), Across::Face(Direction::LENGTH));
     assert_eq!(scar.depth(board.thickness()), fraction(1, 4));
     // The blade's circle dips into the top only under its center, which is a few inches out
     // from the fence: the scar doesn't reach the board's front edge or the fence.

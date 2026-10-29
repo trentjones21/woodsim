@@ -104,21 +104,147 @@ impl Direction {
             lean / divisor,
         )
     }
+}
 
-    /// Written so its bigger component is positive (the length's, if they're the same size),
-    /// and whether that took turning it around.
-    pub(crate) fn canonical(self) -> (Direction, bool) {
-        let leading = if self.l.abs() >= self.w.abs() {
-            self.l
-        } else {
-            self.w
-        };
+/// A direction through a board, as whole numbers with no common factor: `l` along its length,
+/// `w` across its width, and `t` up its thickness. A blade's faces face some way through the
+/// board, and its center travels some way, whichever way the board lay on the saw.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Vector {
+    pub l: i64,
+    pub w: i64,
+    pub t: i64,
+}
+
+impl Vector {
+    pub const LENGTH: Vector = Vector { l: 1, w: 0, t: 0 };
+    pub const WIDTH: Vector = Vector { l: 0, w: 1, t: 0 };
+    pub const THICKNESS: Vector = Vector { l: 0, w: 0, t: 1 };
+
+    /// The direction `(l, w, t)` points. Panics if all three are zero.
+    pub fn new(l: i64, w: i64, t: i64) -> Vector {
+        let divisor = gcd(gcd(l.unsigned_abs(), w.unsigned_abs()), t.unsigned_abs());
+        assert!(divisor != 0, "a direction can't be zero");
+        let divisor = divisor as i64;
+        Vector {
+            l: l / divisor,
+            w: w / divisor,
+            t: t / divisor,
+        }
+    }
+
+    /// A direction in the board's face, square to its thickness.
+    pub fn flat(direction: Direction) -> Vector {
+        Vector {
+            l: direction.l,
+            w: direction.w,
+            t: 0,
+        }
+    }
+
+    /// A face facing `out` across the board's face and leaning `lean`, as an `Edge` has them.
+    pub fn leaning(out: Direction, lean: i64) -> Vector {
+        Vector {
+            l: out.l,
+            w: out.w,
+            t: lean,
+        }
+    }
+
+    pub fn reversed(self) -> Vector {
+        Vector {
+            l: -self.l,
+            w: -self.w,
+            t: -self.t,
+        }
+    }
+
+    /// Its part across the board's face, and its part up the thickness: what an `Edge` facing
+    /// this way has as `out` and `lean`.
+    pub fn split(self) -> (Direction, i64) {
+        (
+            Direction {
+                l: self.l,
+                w: self.w,
+            },
+            self.t,
+        )
+    }
+
+    /// The side facing this way at `at`, the wood behind it.
+    pub(crate) fn edge(self, at: i128) -> Edge {
+        let (out, lean) = self.split();
+        Edge::leaning(out, lean, at)
+    }
+
+    /// How far `(l, w, t)` is along this direction, times its scale.
+    pub(crate) fn dot(self, l: Length, w: Length, t: Length) -> i128 {
+        self.l as i128 * l.as_nm() as i128
+            + self.w as i128 * w.as_nm() as i128
+            + self.t as i128 * t.as_nm() as i128
+    }
+
+    pub(crate) fn dot_vector(self, other: Vector) -> i128 {
+        self.l as i128 * other.l as i128
+            + self.w as i128 * other.w as i128
+            + self.t as i128 * other.t as i128
+    }
+
+    /// The direction square to both, turning from this one toward `other`. Panics if they're
+    /// parallel.
+    pub(crate) fn cross(self, other: Vector) -> Vector {
+        let (a, b) = (
+            [self.l, self.w, self.t].map(i128::from),
+            [other.l, other.w, other.t].map(i128::from),
+        );
+        let c = [
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0],
+        ];
+        let divisor = c
+            .iter()
+            .fold(0u128, |g, &v| gcd128(g, v.unsigned_abs()))
+            .max(1) as i128;
+        assert!(
+            c.iter().any(|&v| v != 0),
+            "parallel directions have no square"
+        );
+        let [l, w, t] = c.map(|v| i64::try_from(v / divisor).expect("a direction too fine"));
+        Vector { l, w, t }
+    }
+
+    pub(crate) fn scale_squared(self) -> i128 {
+        self.dot_vector(self)
+    }
+
+    /// How long its whole-number components make it.
+    pub fn scale(self) -> f64 {
+        (self.scale_squared() as f64).sqrt()
+    }
+
+    /// Written so its biggest component is positive (the first of the length, width, and
+    /// thickness, if two are the same size), and whether that took turning it around.
+    pub(crate) fn canonical(self) -> (Vector, bool) {
+        let parts = [self.l, self.w, self.t];
+        let leading = parts
+            .iter()
+            .copied()
+            .reduce(|a, b| if b.abs() > a.abs() { b } else { a })
+            .expect("three parts");
         if leading < 0 {
             (self.reversed(), true)
         } else {
             (self, false)
         }
     }
+}
+
+fn gcd128(mut a: u128, mut b: u128) -> u128 {
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    a
 }
 
 fn gcd(mut a: u64, mut b: u64) -> u64 {
@@ -374,12 +500,6 @@ impl Region {
             .collect();
         edges.push(cut);
         Some(Region::canonical(edges))
-    }
-
-    /// The part of the region inside every one of `cuts`, if it has any area.
-    pub(crate) fn clip_all(&self, cuts: impl IntoIterator<Item = Edge>) -> Option<Region> {
-        cuts.into_iter()
-            .try_fold(self.clone(), |region, cut| region.clip(cut))
     }
 
     /// The same region, measured from a new corner at `(l, w, t)`.

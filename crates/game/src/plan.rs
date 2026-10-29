@@ -874,7 +874,7 @@ impl Sketch {
         }
         let mut slots = Vec::new();
         for kerf in board.kerfs() {
-            let Across::Face(across) = kerf.across else {
+            let Across::Face(across) = kerf.across() else {
                 continue;
             };
             let from_below = kerf.from_below();
@@ -913,7 +913,7 @@ impl Sketch {
         let resawn: Vec<String> = board
             .kerfs()
             .iter()
-            .filter(|kerf| kerf.across == Across::Thickness)
+            .filter(|kerf| kerf.across() == Across::Thickness)
             .map(|kerf| {
                 let slot = board.slot(kerf);
                 format!("{}x{}", measured(slot.width), measured(slot.depth))

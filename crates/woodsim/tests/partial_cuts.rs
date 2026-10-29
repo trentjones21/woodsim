@@ -256,3 +256,24 @@ fn a_slot_that_stops_short_of_the_cut_holds_the_offcut_together() {
     assert_eq!(offcut.board.kerfs().len(), 1);
     assert!(cut.loose.is_empty());
 }
+
+#[test]
+fn grooves_from_both_faces_whose_depths_together_go_through_split_the_board() {
+    let board = Board::new(inches(24), fraction(11, 2), fraction(3, 4));
+    // A 1/2"-deep groove 2" from the fence, then the same from the other face: turned over and
+    // end for end, the same edge rides the fence.
+    let saw = table_saw(inches(2), fraction(1, 2));
+    let (grooved, _) = kerfed(saw.rip(&board, Orientation::default()).unwrap());
+    let other_face = Orientation::default().flipped().turned_left().turned_left();
+    let cut = saw.rip(&grooved, other_face).cut_apart();
+    let mut widths = [cut.piece.board.width(), cut.offcut.unwrap().board.width()];
+    widths.sort();
+    assert_eq!(widths, [inches(2), fraction(27, 8)]);
+    // Either groove alone, half way, leaves the board whole.
+    let shallow = table_saw(inches(2), fraction(1, 4));
+    let (once, _) = kerfed(shallow.rip(&board, Orientation::default()).unwrap());
+    assert!(matches!(
+        shallow.rip(&once, other_face),
+        Ok(Pass::Kerfed(_))
+    ));
+}

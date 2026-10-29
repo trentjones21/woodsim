@@ -45,6 +45,21 @@ impl Wide {
             .fold(Wide::ZERO, |sum, (a, b)| sum + Wide::product(a, b))
     }
 
+    /// This times `k`, exactly.
+    pub(crate) fn times(self, k: i128) -> Wide {
+        let negative = (self.signum() < 0) != (k < 0);
+        let magnitude = if self.signum() < 0 { -self } else { self };
+        let k = k.unsigned_abs();
+        let (carry, lo) = multiply(magnitude.lo, k);
+        let (over, high) = multiply(magnitude.hi as u128, k);
+        let hi = high
+            .checked_add(carry)
+            .filter(|&hi| over == 0 && hi < 1 << 127)
+            .expect("a product past 2^255");
+        let magnitude = Wide { hi: hi as i128, lo };
+        if negative { -magnitude } else { magnitude }
+    }
+
     pub(crate) fn signum(self) -> i32 {
         if self.hi < 0 {
             -1
@@ -137,6 +152,16 @@ mod tests {
         assert!(Wide::from(-1) < Wide::ZERO);
         assert!(Wide::from(1) < huge);
         assert_eq!(Wide::dot([(3, 4), (-2, 6)]), Wide::ZERO);
+    }
+
+    #[test]
+    fn multiplying_a_wide_number_keeps_every_bit() {
+        let big = (1i128 << 100) + 12345;
+        let square = Wide::product(big, big);
+        assert_eq!(Wide::product(big, 7).times(big), square.times(7));
+        assert_eq!(square.times(-3), -square.times(3));
+        assert_eq!((-square).times(-1), square);
+        assert_eq!(Wide::from(-5).times(1 << 120), Wide::product(-5, 1 << 120));
     }
 
     #[test]

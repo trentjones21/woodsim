@@ -159,7 +159,7 @@ pub fn lumber_mesh(board: &Board, grain: Vec3) -> Mesh {
         cells = cells
             .into_iter()
             .flat_map(|(cell, k)| {
-                if !slot.cuts(centroid(&cell), thickness) {
+                if !slot.covers(centroid(&cell), thickness) {
                     return vec![(cell, k)];
                 }
                 stops.iter().fold(vec![(cell, k)], |cells, &at| {
@@ -295,7 +295,12 @@ impl Cell<'_> {
                 } else {
                     taken[k].0.min(top)
                 };
-                (low.min(high), high)
+                // Thinner than a ten-thousandth of a millimeter is a rounding error, not wood.
+                if high - low < 1e-7 {
+                    (high, high)
+                } else {
+                    (low, high)
+                }
             })
             .collect()
     }
@@ -530,22 +535,25 @@ struct Slot {
 }
 
 impl Slot {
+    /// A slot cut by a blade standing square to the face, traveling across it.
     fn of(kerf: &woodsim::Kerf) -> Option<Slot> {
-        let Across::Face(across) = kerf.across else {
+        let Across::Face(across) = kerf.across() else {
             return None;
         };
-        if kerf.lean != 0 {
+        if kerf.normal.t != 0 || kerf.along.t != 0 {
             return None;
         }
         let (across, across_meters) = unit(across);
-        let (along, along_meters) = unit(kerf.along);
+        let (along, along_meters) = unit(kerf.along_face());
+        // Up the blade's plane is straight up or down the thickness.
+        let center = Length::from_nm((i128::from(kerf.up().t) * kerf.center) as i64);
         Some(Slot {
             across,
             along,
             near: across_meters(kerf.near),
             far: across_meters(kerf.far),
             radius: kerf.radius.as_meters_f32(),
-            center: kerf.center.as_meters_f32(),
+            center: center.as_meters_f32(),
             start: along_meters(kerf.start),
             end: along_meters(kerf.end),
         })
@@ -565,15 +573,16 @@ const RESAW_STEPS: usize = 16;
 
 impl Resaw {
     fn of(kerf: &woodsim::Kerf) -> Option<Resaw> {
-        let Across::Thickness = kerf.across else {
+        let Across::Thickness = kerf.across() else {
             return None;
         };
-        let (along, along_meters) = unit(kerf.along);
-        let (square, _) = unit(kerf.along.square());
+        let (along, along_meters) = unit(kerf.along_face());
+        let (square, _) = unit(kerf.along_face().square());
+        // Up the blade's plane is `along.square()`.
         let (start, end, center) = (
             along_meters(kerf.start),
             along_meters(kerf.end),
-            along_meters(kerf.center),
+            along_meters(Length::from_nm(kerf.center as i64)),
         );
         let radius = kerf.radius.as_meters_f32();
         let half = std::f32::consts::PI;
@@ -593,72 +602,82 @@ impl Resaw {
     }
 }
 
-/// A slot sawn by a tilted blade, in meters, on the board's face as the mesh lays it out. Its
-/// faces lean, so at a point on the face it takes out a band of height between them, as far as
-/// the blade reached.
+/// A slot sawn by a blade tilted from square to the face, or from parallel to it, in meters, on
+/// the board's face as the mesh lays it out, `w` along x and `l` along y. Its faces lean, so at
+/// a point on the face it takes out a band of height between them, as far as the blade reached
+/// up and down its own plane there.
 struct Tilted {
-    /// The faces' normal across the face, `w` along x and `l` along y, its length, and its
-    /// lean, all in the kerf's whole-number units.
-    out: [f64; 2],
-    size: f64,
-    lean: f64,
-    /// Where the faces are, in nanometers times the normal's length.
+    /// The faces' normal across the face and up, `[w, l, t]`, in the kerf's whole numbers, and
+    /// where the faces are, in nanometers times its length.
+    normal: [f64; 3],
     near: f64,
     far: f64,
+    /// Up the blade's plane, and where the center's path is on it, the same way.
+    up: [f64; 3],
+    center: f64,
     along: Vec2,
     radius: f32,
-    center: f32,
     start: f32,
     end: f32,
-    /// How much of the blade's reach up its own plane is up the board's thickness.
-    cos: f32,
 }
 
 impl Tilted {
+    /// A slot whose faces lean, but not one parallel to the faces, whose blade traveled across
+    /// the face.
     fn of(kerf: &woodsim::Kerf) -> Option<Tilted> {
-        let Across::Face(across) = kerf.across else {
-            return None;
-        };
-        if kerf.lean == 0 {
+        let normal = kerf.normal;
+        if normal.t == 0 || (normal.l == 0 && normal.w == 0) || kerf.along.t != 0 {
             return None;
         }
-        let (along, along_meters) = unit(kerf.along);
-        let out = [across.w as f64, across.l as f64];
-        let size = out[0].hypot(out[1]);
-        let lean = kerf.lean as f64;
+        let (along, along_meters) = unit(kerf.along_face());
+        let up = kerf.up();
+        let in_mesh = |v: woodsim::Vector| [v.w as f64, v.l as f64, v.t as f64];
         Some(Tilted {
-            out,
-            size,
-            lean,
+            normal: in_mesh(normal),
             near: kerf.near.as_nm() as f64,
             far: kerf.far.as_nm() as f64,
+            up: in_mesh(up),
+            center: kerf.center as f64,
             along,
             radius: kerf.radius.as_meters_f32(),
-            center: kerf.center.as_meters_f32(),
             start: along_meters(kerf.start),
             end: along_meters(kerf.end),
-            cos: (size / size.hypot(lean)) as f32,
         })
     }
 
-    /// Where its face at `face` is above `point`, in meters.
-    fn face_height(&self, face: f64, point: Vec2) -> f32 {
-        let across = (self.out[0] * point.x as f64 + self.out[1] * point.y as f64) * 1e9;
-        ((face - across) / self.lean / 1e9) as f32
+    /// Across the face, in nanometers times `v`'s length, at `point`.
+    fn across(v: [f64; 3], point: Vec2) -> f64 {
+        (v[0] * point.x as f64 + v[1] * point.y as f64) * 1e9
     }
 
     /// The band of height it takes out at `point`, low to high: between its faces, as far up
     /// and down as the blade reached there.
     fn band(&self, point: Vec2) -> (f32, f32) {
-        let faces = [self.near, self.far].map(|face| self.face_height(face, point));
+        let faces = [self.near, self.far].map(|face| {
+            ((face - Tilted::across(self.normal, point)) / self.normal[2] / 1e9) as f32
+        });
         let (low, high) = (faces[0].min(faces[1]), faces[0].max(faces[1]));
         let along = self.along.dot(point);
         let past = (self.start - along).max(along - self.end).max(0.0);
         if past >= self.radius {
             return (high, high);
         }
-        let reach = (self.radius * self.radius - past * past).sqrt() * self.cos;
-        let (low, high) = (low.max(self.center - reach), high.min(self.center + reach));
+        // Up the plane from the center's path, the blade reached this far either way.
+        let reach = ((self.radius * self.radius - past * past).sqrt() as f64) * 1e9;
+        let size = self.up.iter().map(|v| v * v).sum::<f64>().sqrt();
+        let off = Tilted::across(self.up, point) - self.center;
+        let (reach_low, reach_high) = if self.up[2] == 0.0 {
+            if off.abs() < reach * size {
+                (f32::MIN, f32::MAX)
+            } else {
+                return (high, high);
+            }
+        } else {
+            let ends =
+                [-1.0, 1.0].map(|side| ((side * reach * size - off) / self.up[2] / 1e9) as f32);
+            (ends[0].min(ends[1]), ends[0].max(ends[1]))
+        };
+        let (low, high) = (low.max(reach_low), high.min(reach_high));
         (low.min(high), high)
     }
 
@@ -668,35 +687,79 @@ impl Tilted {
         low < high && high > 0.0 && low < thickness
     }
 
-    /// Where its faces meet the board's bottom face and its top, as lines `direction · p = at`
-    /// in meters.
-    fn faces(&self, thickness: f32) -> Vec<(Vec2, f32)> {
-        let direction = Vec2::new(
-            (self.out[0] / self.size) as f32,
-            (self.out[1] / self.size) as f32,
-        );
-        [self.near, self.far]
-            .into_iter()
-            .flat_map(|face| {
-                [0.0, thickness].map(|t| {
-                    (
-                        direction,
-                        ((face - self.lean * t as f64 * 1e9) / self.size / 1e9) as f32,
-                    )
-                })
-            })
-            .collect()
+    /// Whether its faces pass over `point` somewhere through a board `thickness` thick, however
+    /// far the blade reached along it.
+    fn covers(&self, point: Vec2, thickness: f32) -> bool {
+        let across = Tilted::across(self.normal, point);
+        let rise = self.normal[2] * thickness as f64 * 1e9;
+        let (low, high) = (self.near - rise.max(0.0), self.far - rise.min(0.0));
+        low < across && across < high
     }
 
-    /// Points along the slot where its outline needs a vertex, as for a slot square to the
-    /// face, with the blade's reach up its tilted plane.
+    /// How far up the blade's plane from its center's path the slot's faces are where they
+    /// meet the board's bottom face and its top, least and most, in meters: on each, a line
+    /// along the slot, the same height up the plane all along it.
+    fn crossing(&self, thickness: f32) -> (f32, f32) {
+        let n2 = self.normal.iter().map(|v| v * v).sum::<f64>();
+        let across = n2 - self.normal[2] * self.normal[2];
+        let size = self.up.iter().map(|v| v * v).sum::<f64>().sqrt();
+        let ups: Vec<f64> = [0.0, thickness as f64 * 1e9]
+            .into_iter()
+            .flat_map(|t| {
+                [self.near, self.far].map(|face| {
+                    let at = self.up[2] * (n2 * t - self.normal[2] * face) / across;
+                    (at - self.center) / size / 1e9
+                })
+            })
+            .collect();
+        let low = ups.iter().copied().fold(f64::MAX, f64::min) as f32;
+        let high = ups.iter().copied().fold(f64::MIN, f64::max) as f32;
+        (low, high)
+    }
+
+    /// Lines on the face where its band bends, as `direction · p = at` in meters: where its
+    /// faces meet the board's bottom face and its top, where the edge of the blade's straight
+    /// sweep does, and where that edge meets each face.
+    fn faces(&self, thickness: f32) -> Vec<(Vec2, f32)> {
+        let line = |v: [f64; 3], at: f64| {
+            let size = v[0].hypot(v[1]);
+            (size > 1e-12 * v[2].abs().max(1.0)).then(|| {
+                (
+                    Vec2::new((v[0] / size) as f32, (v[1] / size) as f32),
+                    (at / size / 1e9) as f32,
+                )
+            })
+        };
+        let size = self.up.iter().map(|v| v * v).sum::<f64>().sqrt();
+        let reach = self.radius as f64 * 1e9 * size;
+        let mut lines = Vec::new();
+        for t in [0.0, thickness as f64 * 1e9] {
+            for face in [self.near, self.far] {
+                lines.extend(line(self.normal, face - self.normal[2] * t));
+            }
+            for side in [-reach, reach] {
+                lines.extend(line(self.up, self.center + side - self.up[2] * t));
+            }
+        }
+        // Where the sweep's edge meets a face: `up · p = c ± r|up|` with `t` off the face.
+        let ratio = self.up[2] / self.normal[2];
+        let meeting = [0, 1, 2].map(|k| self.up[k] - ratio * self.normal[k]);
+        for face in [self.near, self.far] {
+            for side in [-reach, reach] {
+                lines.extend(line(meeting, self.center + side - ratio * face));
+            }
+        }
+        lines
+    }
+
+    /// Points along the slot where its outline needs a vertex: the ends of its straight run,
+    /// and points around its round ends, from where they cross the board's wood up the blade's
+    /// plane to where they leave it.
     fn outline(&self, thickness: f32) -> impl Iterator<Item = f32> + '_ {
-        let reach = self.radius * self.cos;
-        let low = (self.center - reach).max(0.0);
-        let high = (self.center + reach).min(thickness);
+        let (low, high) = self.crossing(thickness);
+        let (low, high) = (low.max(-self.radius), high.min(self.radius));
         let arc = (0..=ARC_STEPS).flat_map(move |step| {
-            let t = low + (high - low) * step as f32 / ARC_STEPS as f32;
-            let up = (t - self.center) / self.cos;
+            let up = low + (high - low) * step as f32 / ARC_STEPS as f32;
             let along = (self.radius * self.radius - up * up).max(0.0).sqrt();
             [self.start - along, self.end + along]
         });
@@ -847,6 +910,8 @@ impl MeshBuilder {
         // The gaps between the neighbor's spans, where ours shows, clamped into ours.
         let gaps = |k: usize| -> Vec<(f32, f32)> {
             let (bottom, top) = ours[k];
+            // Spans interpolated along an edge can cross by a rounding error.
+            let top = top.max(bottom);
             let Some(theirs) = theirs else {
                 return vec![(bottom, top)];
             };
