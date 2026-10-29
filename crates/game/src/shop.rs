@@ -17,7 +17,7 @@ use bevy::{
     prelude::*,
     render::view::{ColorGrading, ColorGradingGlobal},
 };
-use woodsim::{Angle, Board, Cut, Kerf, Length, Orientation, Piece, Run};
+use woodsim::{Angle, Board, Cut, Kerf, Length, Orientation, Piece, Run, Surface};
 
 use crate::{
     bench::{self, BenchView},
@@ -824,56 +824,82 @@ fn describe_slots(board: &Board, kerf: &Kerf, count: usize) -> String {
     } else {
         "all the way across"
     };
-    if size.into != woodsim::Axis::Thickness {
-        // Sawn into an edge or an end: by a blade parallel to the faces, a resaw slot.
-        let resaw = kerf.normal.t.abs() > kerf.normal.l.abs().max(kerf.normal.w.abs());
-        let (cut, slot) = if resaw {
-            ("resaw cut", "resaw kerf")
-        } else {
-            ("cut", "kerf")
-        };
-        let side = if size.into == woodsim::Axis::Width {
-            "edge"
-        } else {
-            "end"
-        };
-        return match (size.bottom, size.top) {
-            (Some(one), Some(other)) => format!(
-                "{a} stopped {cut}{s} {} long on one {side} and {} on the other",
-                run(Some(one)),
-                run(Some(other))
-            ),
-            (Some(opening), None) | (None, Some(opening)) if opening.end_to_end => {
-                format!("{a} {width}-wide, {depth}-deep {slot}{s} in an {side}, {full}")
-            }
-            (opening, other) => format!(
-                "{a} {width}-wide, {depth}-deep {slot}{s} in an {side}, {} long",
-                run(opening.or(other))
-            ),
-        };
-    }
-    if size.depth >= board.thickness() {
-        // A slot through the board's whole length would have cut it apart, so this one stops.
-        let (top, bottom) = (run(size.top), run(size.bottom));
-        return format!("{a} stopped cut{s} {top} long on top and {bottom} on the bottom");
-    }
-    let kind = match (lengthwise, size.at_edge) {
-        (true, false) => format!("groove{s}"),
-        (true, true) => format!("rabbet{s}"),
-        (false, false) => format!("dado{s}"),
-        (false, true) => format!("rabbet{s} across the end"),
+    // Where a slot opens, in words, and what sort of surface that is.
+    let plain = |surface: Surface| match surface {
+        Surface::Side(edge) if edge.lean == 0 && edge.out.l == 0 => Some("edge"),
+        Surface::Side(edge) if edge.lean == 0 && edge.out.w == 0 => Some("end"),
+        _ => None,
     };
-    let slant = kerf.slant();
-    let described = if slant == Angle::ZERO {
-        format!("{a} {width}-wide, {depth}-deep {kind}")
+    let on = |surface: Surface| match surface {
+        Surface::Top => "top".to_string(),
+        Surface::Bottom => "the bottom".to_string(),
+        surface => match plain(surface) {
+            Some(side) => format!("one {side}"),
+            None => format!("its {}", crate::join::name(surface)),
+        },
+    };
+    // By a blade parallel to the faces, a resaw slot.
+    let resaw = kerf.normal.t.abs() > kerf.normal.l.abs().max(kerf.normal.w.abs());
+    let (cut, slot) = if resaw {
+        ("resaw cut", "resaw kerf")
     } else {
-        format!("{a} {width}-wide, {depth}-deep {kind} at {},", slant)
+        ("cut", "kerf")
     };
-    // How far it runs on the face the blade came through.
-    let face = if size.from_low { size.bottom } else { size.top };
-    match face {
-        Some(opening) if opening.end_to_end => format!("{described} {full}"),
-        _ => format!("{described} {} long", run(face)),
+    if let (Some(one), Some(other)) = (size.on_entry, size.on_exit) {
+        // Out through another surface somewhere, it would have cut the board apart all along,
+        // so it stops.
+        let (one, other) = (run(Some(one)), run(Some(other)));
+        return match (size.entry, size.exit) {
+            (Surface::Top, Surface::Bottom) => {
+                format!("{a} stopped cut{s} {one} long on top and {other} on the bottom")
+            }
+            (Surface::Bottom, Surface::Top) => {
+                format!("{a} stopped cut{s} {other} long on top and {one} on the bottom")
+            }
+            (entry, exit) if plain(entry).is_some() && plain(entry) == plain(exit) => format!(
+                "{a} stopped {cut}{s} {one} long on {} and {other} on the other",
+                on(entry)
+            ),
+            (entry, exit) => format!(
+                "{a} stopped {cut}{s} {one} long on {} and {other} on {}",
+                on(entry),
+                on(exit)
+            ),
+        };
+    }
+    let Surface::Side(_) = size.entry else {
+        // Sawn into a face.
+        let kind = match (lengthwise, size.at_edge) {
+            (true, false) => format!("groove{s}"),
+            (true, true) => format!("rabbet{s}"),
+            (false, false) => format!("dado{s}"),
+            (false, true) => format!("rabbet{s} across the end"),
+        };
+        let slant = kerf.slant();
+        let described = if slant == Angle::ZERO {
+            format!("{a} {width}-wide, {depth}-deep {kind}")
+        } else {
+            format!("{a} {width}-wide, {depth}-deep {kind} at {},", slant)
+        };
+        // How far it runs on the face the blade came through.
+        return match size.on_entry {
+            Some(opening) if opening.end_to_end => format!("{described} {full}"),
+            opening => format!("{described} {} long", run(opening)),
+        };
+    };
+    // Sawn into an edge, an end, or whatever else the board rested on.
+    let into = match plain(size.entry) {
+        Some(side) => format!("an {side}"),
+        None => format!("its {}", crate::join::name(size.entry)),
+    };
+    match size.on_entry.or(size.on_exit) {
+        Some(opening) if opening.end_to_end => {
+            format!("{a} {width}-wide, {depth}-deep {slot}{s} in {into}, {full}")
+        }
+        opening => format!(
+            "{a} {width}-wide, {depth}-deep {slot}{s} in {into}, {} long",
+            run(opening)
+        ),
     }
 }
 

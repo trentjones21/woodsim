@@ -8,7 +8,7 @@ use common::CutApart;
 use proptest::prelude::*;
 use woodsim::{
     Across, Angle, Axis, Blade, Board, CutError, Length, MiterSaw, Orientation, Pass, Piece,
-    TableSaw,
+    Surface, TableSaw,
 };
 
 fn inches(n: i64) -> Length {
@@ -47,6 +47,11 @@ fn on_edge() -> Orientation {
 /// On its other edge, with the same face against the fence: turned end for end and flipped.
 fn on_other_edge() -> Orientation {
     on_edge().flipped().turned_left().turned_left()
+}
+
+/// Whether `surface` is the `w = 0` edge a board stands on, on edge.
+fn bottom_edge(surface: Surface) -> bool {
+    matches!(surface, Surface::Side(edge) if edge.out.w < 0 && edge.out.l == 0 && edge.lean == 0)
 }
 
 fn kerfed(pass: Result<Pass, CutError>) -> Board {
@@ -93,8 +98,8 @@ fn a_blade_lower_than_the_board_is_wide_leaves_a_slot_in_its_edge() {
     let size = slotted.slot(&slot);
     assert_eq!(size.width, Blade::FULL_KERF);
     assert_eq!(size.depth, inches(3));
-    assert!(size.bottom.unwrap().end_to_end);
-    assert!(size.top.is_none());
+    assert!(size.on_entry.unwrap().end_to_end);
+    assert!(size.on_exit.is_none());
     assert_eq!(slotted.to_string(), board.to_string());
 }
 
@@ -186,14 +191,13 @@ fn on_edge_and_turned_a_crosscut_stopped_partway_is_a_slot_in_the_bottom_edge() 
     ));
     let slot = slotted.kerfs()[0];
     let size = slotted.slot(&slot);
-    assert_eq!(size.into, Axis::Width);
-    assert!(size.from_low);
+    assert!(bottom_edge(size.entry));
     assert_eq!(size.width, Blade::FULL_KERF);
     assert_eq!(size.depth.rounded_to(fraction(1, 32)), fraction(11, 16));
-    let bottom = size.bottom.unwrap();
+    let bottom = size.on_entry.unwrap();
     assert!(!bottom.end_to_end);
     assert_eq!(bottom.length.rounded_to(fraction(1, 32)), fraction(11, 32));
-    assert!(size.top.is_none());
+    assert!(size.on_exit.is_none());
     // It opens on the leading face, from below the table as far up it as the teeth reached,
     // and not on the other.
     let thickness = slotted.thickness().as_nm() as f64;
@@ -229,12 +233,11 @@ fn a_tilted_blade_lower_than_the_board_is_wide_leaves_a_leaning_slot_in_its_edge
     assert_eq!(slot.tilt(), Angle::from_degrees(87));
     let size = slotted.slot(&slot);
     // Into the bottom edge as far up as the teeth reach, the full length.
-    assert_eq!(size.into, Axis::Width);
-    assert!(size.from_low);
+    assert!(bottom_edge(size.entry));
     assert_eq!(size.width, Blade::FULL_KERF);
     assert_eq!(size.depth.rounded_to(fraction(1, 64)), inches(3));
-    assert!(size.bottom.unwrap().end_to_end);
-    assert!(size.top.is_none());
+    assert!(size.on_entry.unwrap().end_to_end);
+    assert!(size.on_exit.is_none());
     assert_eq!(slotted.to_string(), board.to_string());
 }
 

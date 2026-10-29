@@ -190,7 +190,7 @@ fn a_miter_saw_cuts_into_a_board_wider_than_it_reaches_and_leaves_it_whole() {
     // Turned, the board is 24" across the saw; the blade goes through it for the 7-1/2" out
     // from the fence that it reaches.
     let slot = slotted.slot(&slotted.kerfs()[0]);
-    let bottom = slot.bottom.unwrap();
+    let bottom = slot.on_exit.unwrap();
     assert!(!bottom.end_to_end);
     assert_eq!(bottom.length.rounded_to(fraction(1, 32)), fraction(15, 2));
     assert_eq!(slotted.to_string(), one_by_eight().to_string());

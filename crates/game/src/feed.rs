@@ -1363,6 +1363,28 @@ mod tests {
     }
 
     #[test]
+    fn a_slot_cut_resting_on_a_bevel_is_described_from_the_bevel() {
+        let board = beveled();
+        let [(bevel, _)] = board.bevels()[..] else {
+            panic!("expected one bevel");
+        };
+        let mut station = TableSawStation::default();
+        station.load(Workpiece::Board(board));
+        assert!(station.choose_rest());
+        assert!(station.pick_rest(0, Surface::Side(bevel)));
+        assert!(station.pick_rest(0, Surface::Bottom));
+        station.set_fence(Length::from_inches(1));
+        station.set_height(HEIGHT_MAX);
+        station.move_to(Length::from_inches(8));
+        // In through the bevel it rests on, and out its top, not "0" long" in an edge.
+        assert_eq!(
+            station.status(),
+            "Cutting. So far, a stopped resaw cut 12-5/8\" long on its beveled edge and \
+             12-1/32\" on top."
+        );
+    }
+
+    #[test]
     fn it_wont_rest_where_other_wood_reaches_past_and_says_so() {
         let mut stacked = woodsim::Assembly::of(beveled());
         assert!(stacked.attach(

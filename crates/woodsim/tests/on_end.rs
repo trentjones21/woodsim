@@ -6,8 +6,8 @@ mod common;
 use common::CutApart;
 
 use woodsim::{
-    Angle, Assembly, Axis, Blade, Board, CutError, Fastener, Length, Mating, MiterSaw, Orientation,
-    Pass, Surface, TableSaw,
+    Angle, Assembly, Blade, Board, CutError, Fastener, Length, Mating, MiterSaw, Orientation, Pass,
+    Surface, TableSaw,
 };
 
 fn inches(n: i64) -> Length {
@@ -53,12 +53,15 @@ fn on_end_against_the_fence_the_blade_cuts_a_cheek_into_the_end() {
     let slot = slotted.kerfs()[0];
     assert_eq!((slot.near, slot.far), (fraction(1, 4), fraction(3, 8)));
     let size = slotted.slot(&slot);
-    assert_eq!(size.into, Axis::Length);
-    assert!(size.from_low);
+    // In through the end it stood on.
+    assert!(matches!(
+        size.entry,
+        Surface::Side(end) if end.out.l < 0 && end.out.w == 0 && end.lean == 0
+    ));
     assert_eq!(size.width, Blade::FULL_KERF);
     assert_eq!(size.depth, fraction(3, 2));
-    assert!(size.bottom.unwrap().end_to_end);
-    assert!(size.top.is_none());
+    assert!(size.on_entry.unwrap().end_to_end);
+    assert!(size.on_exit.is_none());
     // Wood beside the cheek, none in it, and the far end untouched.
     assert!(slotted.has_wood_in(inches(1), inches(1), fraction(1, 8)));
     assert!(!slotted.has_wood_in(inches(1), inches(1), fraction(5, 16)));

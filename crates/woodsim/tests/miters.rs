@@ -7,7 +7,7 @@ use common::CutApart;
 
 use proptest::prelude::*;
 use woodsim::{
-    Angle, Blade, Board, CutError, Length, MiterSaw, Orientation, Pass, Piece, TableSaw,
+    Angle, Blade, Board, CutError, Length, MiterSaw, Orientation, Pass, Piece, Surface, TableSaw,
 };
 
 fn inches(n: i64) -> Length {
@@ -181,7 +181,8 @@ fn turned_to_an_angle_the_blade_reaches_across_less() {
         other => panic!("expected a cut stopped short of the front edge, got {other:?}"),
     };
     let slot = slotted.slot(&slotted.kerfs()[0]);
-    assert!(!slot.bottom.unwrap().end_to_end);
+    assert_eq!(slot.entry, Surface::Top);
+    assert!(!slot.on_exit.unwrap().end_to_end);
     assert!(slotted.miters().is_empty());
     assert!(matches!(
         mitered(30).crosscut(&one_by_eight, Orientation::default(), inches(12)),
@@ -213,8 +214,9 @@ fn stopped_short_at_an_angle_it_scars_the_board_on_the_slant() {
     assert_eq!(scar.width(), Blade::FULL_KERF);
     let size = board.slot(&scar);
     assert_eq!(size.width, Blade::FULL_KERF);
-    assert!(size.bottom.is_none());
-    let top = size.top.unwrap();
+    assert_eq!(size.entry, Surface::Top);
+    assert!(size.on_exit.is_none());
+    let top = size.on_entry.unwrap();
     assert!(!top.end_to_end);
     // A 1/4"-deep scar from a 12" blade is about 3-7/16" long, centered about 3" out from the
     // fence along its slant, and the board's front edge is 4.95" out along it at 45°.

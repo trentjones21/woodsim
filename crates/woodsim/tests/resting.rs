@@ -6,8 +6,8 @@ mod common;
 use common::CutApart;
 
 use woodsim::{
-    Angle, Assembly, Blade, Board, Fastener, Length, Mating, Orientation, Surface, TableSaw,
-    Unsteady, surfaces,
+    Angle, Assembly, Blade, Board, Fastener, Length, Lie, Mating, Orientation, Pass, Recipe,
+    Surface, TableSaw, Tool, Unsteady, Wood, surfaces,
 };
 
 fn inches(n: i64) -> Length {
@@ -179,4 +179,56 @@ fn a_board_rests_on_its_bevel_and_rips_square_to_it() {
         "the piece has a face square to the bevel: {:?}",
         cut.piece.board.face()
     );
+}
+
+#[test]
+fn a_slot_in_a_board_resting_on_its_bevel_is_measured_from_the_bevel() {
+    // Copied from the game: a 1x3 with a 30° bevel, resting on it with its bottom face to the
+    // fence, partway through a rip with the blade all the way up.
+    let copied = "\
+        # Woodshop Simulator, copied: on the table saw.\n\
+        stock s0 609600000 63500000 19050000\n\
+        pass p0 1 table-saw 254000000 3175000 38100000 50800000 none 0 3000 board \
+            1099511627776 0 0 0 1099511627776 0 0 0 1099511627776 -127000000 736600000\n\
+        sawn s1 s0 p0 0 8388608 4843165 182316545036014 213070643200000 1 0 0 127000000 \
+            776113999901651 -127000000 736600000 piece 1 0 14401477 0 measured\n\
+        board s1\n\
+        saw table-saw 254000000 3175000 25400000 79375000 none 0 0 board 1099511627776 0 0 0 \
+            549755806488 952205005683 0 -952205005683 549755806488 -152400000 203200000\n";
+    let recipe = Recipe::read(copied).unwrap();
+    let Wood::Board(board) = recipe.wood else {
+        panic!("a board");
+    };
+    let Some(Tool::TableSaw {
+        saw,
+        lie: Lie::Board(lie),
+        travel,
+    }) = recipe.saw
+    else {
+        panic!("the table saw");
+    };
+    let Ok(Pass::Kerfed(slotted)) = saw.feed(&board, lie, travel.0, travel.1) else {
+        panic!("expected a slot partway through");
+    };
+    let size = slotted.slot(slotted.kerfs().last().unwrap());
+    // In through the bevel it rests on, not an edge square to the board's faces.
+    let [(bevel, _)] = board.bevels()[..] else {
+        panic!("one bevel");
+    };
+    assert_eq!(size.entry, Surface::Side(bevel));
+    // Along the bevel from the leading end to where the teeth reach at the table: the blade's
+    // center 8" along, 1-7/8" below the table, its teeth 4.635" ahead of it there.
+    let reach = 8.0 + (25.0f64 - 1.875 * 1.875).sqrt();
+    let run = size.on_entry.expect("it opens onto the bevel");
+    assert!(
+        (run.length.as_nm() as f64 / 25_400_000.0 - reach).abs() < 1e-3,
+        "{:?}",
+        run.length
+    );
+    assert!(!run.end_to_end);
+    // The blade, all the way up, goes through: out its top face, facing up and away from the
+    // fence its bottom face rests against, where the blade's reached less far along.
+    assert_eq!(size.exit, Surface::Top);
+    let out = size.on_exit.expect("it comes out the top face").length;
+    assert!(out > Length::from_inches(8) && out < run.length, "{out:?}");
 }

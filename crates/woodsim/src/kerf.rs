@@ -217,22 +217,6 @@ impl Kerf {
         self.normal.cross(self.along)
     }
 
-    /// Which of the board's axes the blade came into it along: the one up its plane runs most
-    /// nearly along. Its thickness for a slot sawn into a face, even with the blade tilted as
-    /// far as it goes; its width for one sawn into an edge, like a resaw slot or a board on
-    /// edge crosscut partway; its length for one sawn into an end.
-    pub fn into(&self) -> Axis {
-        let up = self.up();
-        let (l, w, t) = (up.l.abs(), up.w.abs(), up.t.abs());
-        if t >= w && t >= l {
-            Axis::Thickness
-        } else if w >= l {
-            Axis::Width
-        } else {
-            Axis::Length
-        }
-    }
-
     /// The point the blade reached furthest `toward` (any length), on the plane midway between
     /// the slot's faces, in nanometers `(l, w, t)`: an end of its center's path, out to the
     /// blade's edge.
@@ -267,7 +251,11 @@ impl Kerf {
     /// if the blade didn't reach it between its faces, or its faces run the same way as the
     /// plane. Worked out to within floating point of a nanometer, for measuring and drawing.
     pub fn meets(&self, axis: Axis, at: f64) -> Option<Opening> {
-        let plane = unit(axis);
+        self.meets_plane(unit(axis), at)
+    }
+
+    /// Where the slot meets the plane `plane · p = at` (`p` in nanometers), as `meets` has it.
+    pub fn meets_plane(&self, plane: [f64; 3], at: f64) -> Option<Opening> {
         let (near, direction) = self.line(plane, at, self.near.as_nm() as f64)?;
         let (far, _) = self.line(plane, at, self.far.as_nm() as f64)?;
         let (from_near, to_near) = self.reached(near, direction)?;
