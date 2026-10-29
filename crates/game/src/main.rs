@@ -16,6 +16,7 @@ mod meshes;
 mod miter_saw;
 mod plan;
 mod rest;
+mod saved;
 mod scenery;
 mod shop;
 mod table_saw;
@@ -47,6 +48,7 @@ use hud::HudPlugin;
 use inventory::InventoryPlugin;
 use miter_saw::MiterSawPlugin;
 use rest::RestPlugin;
+use saved::SavedPlugin;
 use scenery::ScenePlugin;
 use shop::ShopPlugin;
 use table_saw::TableSawPlugin;
@@ -112,6 +114,7 @@ fn main() {
         FlightsPlugin,
         RestPlugin,
         CopyPlugin,
+        SavedPlugin,
     ));
 
     if let Some(path) = screenshot {

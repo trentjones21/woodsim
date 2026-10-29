@@ -254,3 +254,30 @@ proptest! {
         prop_assert_eq!(read.write(), text);
     }
 }
+
+#[test]
+fn passes_after_reading_a_recipe_come_after_the_passes_in_it() {
+    let text = "\
+        stock s0 609600000 88900000 19050000\n\
+        pass p0 900000 table-saw 254000000 3175000 50800000 25400000 none 0 0 board \
+            1099511627776 0 0 0 1099511627776 0 0 0 1099511627776 -127000000 736600000\n\
+        sawn s1 s0 p0 0 1 0 63500000 66675000 1 0 0 127000000 -50800000 -127000000 \
+            736600000 piece 0 0 0 0 measured\n\
+        board s1\n";
+    let Wood::Board(board) = Recipe::read(text).unwrap().wood else {
+        panic!("a board");
+    };
+    let cut = table_saw(inches(1), 0)
+        .rip(&board, Orientation::default())
+        .cut_apart();
+    let numbers: Vec<u64> = cut
+        .piece
+        .board
+        .origin()
+        .operations()
+        .iter()
+        .map(|operation| operation.number)
+        .collect();
+    assert_eq!(numbers[0], 900000);
+    assert!(numbers[1] > 900000, "{numbers:?}");
+}

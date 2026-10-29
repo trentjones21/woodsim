@@ -15,6 +15,7 @@ use crate::{
     feed::TableSawStation,
     hand::{Hand, Workpiece, describe_glue_up, from_rack},
     join::BenchStation,
+    saved::Saved,
     shop::{ShopView, describe_board, describe_size},
 };
 
@@ -294,6 +295,7 @@ struct Stations<'w> {
 /// shelf or the scrap bin, or what's in hand, on the saw, or picked at the bench, put away.
 fn use_inventory(
     actions: Res<Actions>,
+    saved: Res<Saved>,
     mut inventory: ResMut<Inventory>,
     mut moved: MessageWriter<Moved>,
     mut at: Stations,
@@ -301,11 +303,12 @@ fn use_inventory(
     let view = *at.view;
     for action in actions.started() {
         match action {
-            Action::Take(id) | Action::NewLumber(id)
+            Action::Take(id) | Action::NewLumber(id) | Action::Load(id)
                 if can_use_at(view, &at.table_saw, &at.miter_saw) =>
             {
                 let work = match action {
                     Action::Take(id) => inventory.take(id),
+                    Action::Load(index) => saved.part(index as usize),
                     _ => lumber(id as usize),
                 };
                 let Some(work) = work else { continue };
@@ -392,6 +395,7 @@ mod tests {
         world.init_resource::<TableSawStation>();
         world.init_resource::<MiterSawStation>();
         world.init_resource::<BenchStation>();
+        world.init_resource::<Saved>();
         world
     }
 
@@ -457,6 +461,22 @@ mod tests {
         assert_eq!(inventory.get(id), None);
         assert_eq!(inventory.rows(Shelf::Parts)[0].work, &board(24));
         assert!(world.resource::<MiterSawStation>().can_turn());
+    }
+
+    #[test]
+    fn a_saved_part_goes_where_you_are_and_stays_saved() {
+        let mut world = shop(ShopView::Bench);
+        world.insert_resource(Saved {
+            parts: vec![crate::saved::SavedPart {
+                path: "saved/part-1.txt".into(),
+                work: board(10),
+            }],
+            unread: Vec::new(),
+        });
+        act(&mut world, Action::Load(0));
+        act(&mut world, Action::Load(0));
+        assert_eq!(world.resource::<BenchStation>().groups.len(), 2);
+        assert_eq!(world.resource::<Saved>().parts.len(), 1);
     }
 
     #[test]

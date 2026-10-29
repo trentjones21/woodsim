@@ -34,6 +34,7 @@ use crate::{
     icons::{Icon, Icons},
     inventory::{self, Inventory, LUMBER, Shelf},
     join::BenchStation,
+    saved::Saved,
     shop::{HoveredStation, ShopView, describe_miter},
 };
 
@@ -447,6 +448,8 @@ impl Shop<'_> {
                 _ => "Move it to the offcuts".to_string(),
             },
             Scrap(_) => "Throw it away".to_string(),
+            Save(_) => "Save it as a file, to use after a restart".to_string(),
+            Load(_) => format!("Saved part: {}", self.use_here().to_lowercase()),
             Help => "Controls".to_string(),
             Inventory => "Inventory".to_string(),
         }
@@ -467,7 +470,7 @@ impl Shop<'_> {
         use Action::*;
         let (table, miter, bench) = (self.table_saw, self.miter_saw, self.bench);
         match (self.view, action) {
-            (view, Take(_) | NewLumber(_)) => inventory::can_use_at(view, table, miter),
+            (view, Take(_) | NewLumber(_) | Load(_)) => inventory::can_use_at(view, table, miter),
             (_, PutAway) => self.hand.0.is_some(),
             (view, Copy) => to_copy(view, self.hand, table, miter, bench).is_some(),
             (ShopView::TableSaw, Store) => table.can_put_away(),
@@ -1419,10 +1422,11 @@ fn build_inventory(
     mut commands: Commands,
     view: Res<ShopView>,
     inventory: Res<Inventory>,
+    saved: Res<Saved>,
     icons: Res<Icons>,
     list: Single<Entity, With<InventoryList>>,
 ) {
-    if !(inventory.is_changed() || view.is_changed()) {
+    if !(inventory.is_changed() || saved.is_changed() || view.is_changed()) {
         return;
     }
     let list = *list;
@@ -1464,6 +1468,7 @@ fn build_inventory(
             for (action, icon) in [
                 (Action::Take(row.id), use_icon),
                 (Action::MoveShelf(row.id), move_icon),
+                (Action::Save(row.id), Icon::Save),
                 (Action::Scrap(row.id), Icon::Scrap),
             ] {
                 spawn_button(
@@ -1477,6 +1482,47 @@ fn build_inventory(
                 );
             }
         }
+    }
+    heading(
+        &mut commands,
+        list,
+        &format!("Saved · {}", saved.parts.len()),
+    );
+    if saved.parts.is_empty() {
+        commands.spawn((
+            text(
+                "Parts you save go here, and stay after a restart.",
+                14.0,
+                INK.with_alpha(0.55),
+            ),
+            Node {
+                margin: UiRect::bottom(px(6)),
+                ..default()
+            },
+            ChildOf(list),
+        ));
+    }
+    for (index, part) in saved.parts.iter().enumerate() {
+        let (size, notes) = inventory::describe(&part.work);
+        let file = part
+            .path
+            .file_stem()
+            .map_or(String::new(), |name| name.to_string_lossy().into_owned());
+        let notes = if notes.is_empty() {
+            file
+        } else {
+            format!("{file}: {notes}")
+        };
+        let line = line(&mut commands, list, &size, &notes, 1);
+        spawn_button(
+            &mut commands,
+            &icons,
+            line,
+            Action::Load(index as u64),
+            use_icon,
+            Look::Small,
+            TipAt::Left,
+        );
     }
     heading(&mut commands, list, "New lumber");
     for (index, (name, thickness, width)) in LUMBER.iter().enumerate() {

@@ -26,6 +26,12 @@ pub(crate) fn next_number() -> u64 {
     NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
+/// Notes that `number` has been used, by wood read back from a recipe, so everything after it
+/// comes later, even after the game starts again.
+pub(crate) fn number_used(number: u64) {
+    NEXT.fetch_max(number + 1, Ordering::Relaxed);
+}
+
 /// Where a board came from. Cloning a board keeps it, since it's the same wood; the pieces of
 /// one cut share the cut, and where the board they were cut from came from.
 #[derive(Clone)]

@@ -59,6 +59,8 @@ pub enum Icon {
     Inventory,
     /// Two sheets, one over the other: a copy.
     Copy,
+    /// A floppy disk: save it as a file.
+    Save,
     /// Into the inventory, out of it to where you are, cut again, and throw away.
     Store,
     Place,
@@ -67,13 +69,14 @@ pub enum Icon {
 }
 
 impl Icon {
-    const ALL: [Icon; 36] = [
+    const ALL: [Icon; 37] = [
         Icon::TurnLeft,
         Icon::TurnRight,
         Icon::Flip,
         Icon::StandUp,
         Icon::Rest,
         Icon::Copy,
+        Icon::Save,
         Icon::SwitchGuide,
         Icon::Push,
         Icon::BringBack,
@@ -140,6 +143,13 @@ impl Icon {
                 shapes.extend(arrow_arc(p(0.6, 0.84), 0.4, 182.0, 62.0, 0.09));
                 shapes
             }
+            Icon::Save => vec![Cut(
+                Box::new(Cut(
+                    Box::new(Rounded(p(0.14, 0.12), p(0.86, 0.88), 0.1)),
+                    Box::new(Rounded(p(0.32, 0.04), p(0.64, 0.34), 0.03)),
+                )),
+                Box::new(Rounded(p(0.28, 0.54), p(0.72, 0.8), 0.04)),
+            )],
             Icon::Copy => vec![
                 Line(
                     vec![

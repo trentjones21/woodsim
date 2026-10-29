@@ -15,3 +15,6 @@
 
 # Saved by the Copy button (Y)
 /pieces
+
+# Parts saved from the inventory, to load after a restart
+/saved

@@ -37,7 +37,7 @@ use std::{collections::HashMap, fmt::Write, sync::Arc};
 use crate::{
     Angle, Assembly, Blade, Board, Direction, Edge, Fastener, Joint, Kerf, Length, Member,
     MiterSaw, Orientation, Rotation, Surface, TableSaw, Vector,
-    history::{Lie, Operation, Origin, Part, Side, Source, Tool},
+    history::{Lie, Operation, Origin, Part, Side, Source, Tool, number_used},
 };
 
 /// Wood: one board, or boards put together.
@@ -92,7 +92,8 @@ impl Recipe {
         writer.lines
     }
 
-    /// The recipe `text` says, or what's wrong with it, by line.
+    /// The recipe `text` says, or what's wrong with it, by line. Saw passes and joints made
+    /// after reading it are numbered after any in it, so they sort after them.
     pub fn read(text: &str) -> Result<Recipe, String> {
         let mut reader = Reader::default();
         for (number, line) in text.lines().enumerate() {
@@ -451,6 +452,7 @@ impl Reader {
                     number: words.number()?,
                     tool: words.tool()?,
                 };
+                number_used(operation.number);
                 self.passes.insert(id, Arc::new(operation));
             }
             "sawn" => {
@@ -510,10 +512,12 @@ impl Reader {
                     "screws" => Fastener::Screws,
                     other => return Err(format!("`{other}` isn't a fastener")),
                 };
+                let number = words.number()?;
+                number_used(number);
                 self.joints.push(Joint {
                     between: [a, b],
                     fastener,
-                    number: words.number()?,
+                    number,
                 });
             }
             "saw" => self.saw = Some(words.tool()?),
