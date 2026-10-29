@@ -431,6 +431,20 @@ impl Assembly {
         mating: Mating,
         fastener: Fastener,
     ) -> bool {
+        self.attach_as(onto, other, surface, mating, fastener, None)
+    }
+
+    /// Attaches `other` as `attach` does, its joints numbered `number` if it's given, rather
+    /// than now.
+    fn attach_as(
+        &mut self,
+        onto: (usize, Surface),
+        other: &Assembly,
+        surface: (usize, Surface),
+        mating: Mating,
+        fastener: Fastener,
+        number: Option<u64>,
+    ) -> bool {
         let Some(motion) = self.mating(onto, other, surface, mating) else {
             return false;
         };
@@ -446,7 +460,7 @@ impl Assembly {
             }
         }));
         let chosen = [onto, (surface.0 + first, surface.1)];
-        let number = next_number();
+        let number = number.unwrap_or_else(next_number);
         self.joints.push(Joint {
             between: chosen,
             fastener,
@@ -464,6 +478,210 @@ impl Assembly {
             .collect();
         self.joints.extend(flush);
         true
+    }
+
+    /// The `Mating` that puts `other`'s `surface` against `onto` just where it is now: which
+    /// way around the joint, and how far across it, as `attach` would have put it there. `None`
+    /// if either surface isn't there, or they don't face each other a quarter turn's way.
+    pub fn mating_of(
+        &self,
+        onto: (usize, Surface),
+        other: &Assembly,
+        surface: (usize, Surface),
+    ) -> Option<Mating> {
+        let theirs = self.members.get(onto.0)?.patch(onto.1)?;
+        let turn = (0..4u8)
+            .map(|turn| {
+                let mating = Mating {
+                    turn,
+                    slide: [Length::ZERO; 2],
+                };
+                let motion = self.mating(onto, other, surface, mating)?;
+                Some((turn, motion))
+            })
+            .collect::<Option<Vec<_>>>()?
+            .into_iter()
+            .min_by(|a, b| a.1.rotation.degrees().total_cmp(&b.1.rotation.degrees()))
+            .filter(|(_, motion)| motion.rotation.degrees() < 0.1)?;
+        let (turn, motion) = turn;
+        // Slid by nothing, it moves this far; slid back by as much, it doesn't move.
+        let shift = motion.shift.map(|length| length.as_nm() as f64);
+        Some(Mating {
+            turn,
+            slide: [theirs.u, theirs.v].map(|along| nm(-dot(shift, along))),
+        })
+    }
+
+    /// The same glue-up put together again from `boards`, one for each member, as boards cut
+    /// another way come out: every joint goes together again in the order it was made, its
+    /// surfaces found again on the new boards (`same_surface`), turned the same way around it
+    /// and slid the same way across it from where the surfaces' least sides line up, and
+    /// fastened again wherever else parts still meet flush, as `attach` does. The first member
+    /// stays where it is. Errs, saying why, if a joint's surface is gone or won't go together.
+    pub fn rebuilt(&self, boards: Vec<Board>) -> Result<Assembly, String> {
+        assert_eq!(boards.len(), self.members.len(), "a board for each member");
+        // Each group: its members, by their places here, and how they're put together now.
+        let mut groups: Vec<Option<(Vec<usize>, Assembly)>> = boards
+            .into_iter()
+            .zip(&self.members)
+            .enumerate()
+            .map(|(index, (board, member))| {
+                let member = Member {
+                    board,
+                    ..member.clone()
+                };
+                Some((vec![index], Assembly::from_parts(vec![member], Vec::new())))
+            })
+            .collect();
+        let mut group_of: Vec<usize> = (0..self.members.len()).collect();
+        let mut numbers: Vec<u64> = self.joints.iter().map(|joint| joint.number).collect();
+        numbers.sort_unstable();
+        numbers.dedup();
+        for number in numbers {
+            // The joint that brought two groups together: the first that still does.
+            let Some(joint) = self.joints.iter().find(|joint| {
+                joint.number == number
+                    && group_of[joint.between[0].0] != group_of[joint.between[1].0]
+            }) else {
+                continue;
+            };
+            let [(i, was_i), (j, was_j)] = joint.between;
+            let (a, b) = (group_of[i], group_of[j]);
+            let (members_a, built_a) = groups[a].take().expect("a group");
+            let (members_b, built_b) = groups[b].take().expect("a group");
+            let place = |members: &[usize], index| {
+                members
+                    .iter()
+                    .position(|&m| m == index)
+                    .expect("in its group")
+            };
+            let (at_a, at_b) = (place(&members_a, i), place(&members_b, j));
+            // How it went on, from where it is in this assembly.
+            let as_was = |members: &[usize]| {
+                Assembly::from_parts(
+                    members.iter().map(|&m| self.members[m].clone()).collect(),
+                    Vec::new(),
+                )
+            };
+            let named = |index: usize| format!("part {}", index + 1);
+            let mating = as_was(&members_a)
+                .mating_of((at_a, was_i), &as_was(&members_b), (at_b, was_j))
+                .ok_or_else(|| format!("couldn't tell how {} went on", named(j)))?;
+            let found = |index: usize, surface: Surface, built: &Assembly, at: usize| {
+                same_surface(
+                    &self.members[index].board,
+                    surface,
+                    &built.members[at].board,
+                )
+                .ok_or_else(|| format!("the surface {} was glued on is gone", named(index)))
+            };
+            let now_i = found(i, was_i, &built_a, at_a)?;
+            let now_j = found(j, was_j, &built_b, at_b)?;
+            let mut built = built_a;
+            if !built.attach_as(
+                (at_a, now_i),
+                &built_b,
+                (at_b, now_j),
+                mating,
+                joint.fastener,
+                Some(number),
+            ) {
+                return Err(format!("{} won't go back on", named(j)));
+            }
+            let mut members = members_a;
+            for &m in &members_b {
+                group_of[m] = a;
+            }
+            members.extend(members_b);
+            groups[a] = Some((members, built));
+        }
+        // Back in the members' order, with anything that was never joined where it was.
+        let mut order: Vec<usize> = Vec::new();
+        let mut built = Assembly::default();
+        for (members, group) in groups.into_iter().flatten() {
+            let first = built.members.len();
+            built.members.extend(group.members);
+            built
+                .joints
+                .extend(group.joints.into_iter().map(|joint| Joint {
+                    between: joint.between.map(|(m, surface)| (m + first, surface)),
+                    ..joint
+                }));
+            order.extend(members);
+        }
+        let mut place = vec![0; order.len()];
+        for (now, &was) in order.iter().enumerate() {
+            place[was] = now;
+        }
+        Ok(Assembly {
+            members: (0..order.len())
+                .map(|was| built.members[place[was]].clone())
+                .collect(),
+            joints: built
+                .joints
+                .into_iter()
+                .map(|joint| Joint {
+                    between: joint.between.map(|(m, surface)| (order[m], surface)),
+                    ..joint
+                })
+                .collect(),
+        })
+    }
+
+    /// The glue-up with the joints at `joints` (by their places in `joints()`) taken apart:
+    /// as many glue-ups as that leaves it in, each part where it was, with the joints still
+    /// between them, the one with the first member first. A joint whose parts are still held
+    /// together some other way, like one corner of a frame, leaves it in one piece.
+    pub fn taken_apart(&self, joints: &[usize]) -> Vec<Assembly> {
+        let mut group: Vec<usize> = (0..self.members.len()).collect();
+        fn root(group: &mut [usize], mut m: usize) -> usize {
+            while group[m] != m {
+                group[m] = group[group[m]];
+                m = group[m];
+            }
+            m
+        }
+        let kept: Vec<&Joint> = self
+            .joints
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| !joints.contains(index))
+            .map(|(_, joint)| joint)
+            .collect();
+        for joint in &kept {
+            let (a, b) = (
+                root(&mut group, joint.between[0].0),
+                root(&mut group, joint.between[1].0),
+            );
+            group[a.max(b)] = a.min(b);
+        }
+        let mut pieces: Vec<(usize, Vec<usize>)> = Vec::new();
+        for m in 0..self.members.len() {
+            let r = root(&mut group, m);
+            match pieces.iter_mut().find(|(of, _)| *of == r) {
+                Some((_, members)) => members.push(m),
+                None => pieces.push((r, vec![m])),
+            }
+        }
+        pieces
+            .into_iter()
+            .map(|(_, members)| {
+                let place = |m: usize| members.iter().position(|&k| k == m);
+                Assembly {
+                    members: members.iter().map(|&m| self.members[m].clone()).collect(),
+                    joints: kept
+                        .iter()
+                        .filter_map(|joint| {
+                            let [(a, sa), (b, sb)] = joint.between;
+                            Some(Joint {
+                                between: [(place(a)?, sa), (place(b)?, sb)],
+                                ..**joint
+                            })
+                        })
+                        .collect(),
+                }
+            })
+            .collect()
     }
 
     /// Every place two members' surfaces meet or nearly do, facing each other, with how far
@@ -656,6 +874,46 @@ impl Member {
             .apply([l, w, t].map(|length| length.as_nm() as f64));
         [0, 1, 2].map(|k| self.at[k] + nm(p[k]))
     }
+}
+
+/// `surface` of `board`, found on `now`, the same board cut another way: a face is still the
+/// face; a side or a slot's surface is the one on `now` facing most nearly the same way, within
+/// 45°, nearest where it was. `None` if there's none.
+pub fn same_surface(board: &Board, surface: Surface, now: &Board) -> Option<Surface> {
+    let candidates: Vec<Surface> = match surface {
+        Surface::Bottom | Surface::Top => return Some(surface),
+        Surface::Side(_) => surfaces(now),
+        Surface::Slot(_) => crate::slot_surfaces(now),
+    };
+    let middle = |board: &Board, surface: Surface| {
+        let points: Vec<[f64; 3]> = outline(board, surface)
+            .into_iter()
+            .flatten()
+            .map(|p| p.map(|length| length.as_nm() as f64))
+            .collect();
+        let count = points.len().max(1) as f64;
+        points
+            .iter()
+            .fold([0.0; 3], |sum, p| {
+                [sum[0] + p[0], sum[1] + p[1], sum[2] + p[2]]
+            })
+            .map(|sum| sum / count)
+    };
+    let (normal, ..) = axes(surface);
+    let was = middle(board, surface);
+    candidates
+        .into_iter()
+        .filter(|&candidate| {
+            std::mem::discriminant(&candidate) == std::mem::discriminant(&surface)
+                && dot(axes(candidate).0, normal) > std::f64::consts::FRAC_1_SQRT_2
+        })
+        .map(|candidate| {
+            let at = middle(now, candidate);
+            let off = [at[0] - was[0], at[1] - was[1], at[2] - was[2]];
+            (candidate, dot(off, off))
+        })
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(candidate, _)| candidate)
 }
 
 /// The flat surfaces of `board`'s outline: its bottom, its top, and each straight side around

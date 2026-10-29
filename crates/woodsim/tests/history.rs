@@ -483,4 +483,40 @@ proptest! {
             prop_assert!(t + board.thickness() <= stock.thickness());
         }
     }
+
+    /// Any pass in any history, made again just as it was, makes every board again just as it
+    /// was: the same wood, the same passes, still shared as they were.
+    #[test]
+    fn a_pass_made_again_as_it_was_changes_nothing(
+        width in 32..800i64,
+        passes in prop::collection::vec((pass(), any::<Index>()), 1..6),
+        pick in any::<Index>(),
+    ) {
+        let stock = Board::new(inches(48), Length::from_inch_fraction(width, 64), fraction(3, 4));
+        let mut boards = vec![stock.clone()];
+        for (pass, which) in &passes {
+            let board = boards[which.index(boards.len())].clone();
+            boards.extend(apply(pass, &board));
+        }
+        let cut: Vec<&Board> = boards.iter().filter(|board| !board.origin().operations().is_empty()).collect();
+        prop_assume!(!cut.is_empty());
+        let board = cut[pick.index(cut.len())];
+        let operations = board.origin().operations();
+        let pass = &operations[pick.index(operations.len())];
+        let mut remake = woodsim::Remake::new(pass, pass.tool);
+        for board in &boards {
+            let Some(made) = remake.board(board).unwrap() else {
+                prop_assert!(!board.origin().operations().iter().any(|op| Arc::ptr_eq(op, pass)));
+                continue;
+            };
+            prop_assert_eq!(&made, board);
+            prop_assert_eq!(&made.origin().replay(), board);
+            prop_assert_eq!(made.origin().at_on_stock(), board.origin().at_on_stock());
+            prop_assert_eq!(made.origin().side(), board.origin().side());
+            let numbers = |board: &Board| -> Vec<u64> {
+                board.origin().operations().iter().map(|op| op.number).collect()
+            };
+            prop_assert_eq!(numbers(&made), numbers(board));
+        }
+    }
 }

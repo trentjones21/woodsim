@@ -9,10 +9,12 @@
 //! lies as its `Orientation` says: unturned, its length runs along the table, ripping; turned a
 //! quarter turn, across it, crosscutting.
 
+use std::sync::Arc;
+
 use bevy::prelude::*;
 use woodsim::{
-    Angle, Axis, Blade, Board, CutError, Length, MAX_GAUGE, MAX_TILT, Orientation, Recipe, Surface,
-    TableSaw, Tool,
+    Angle, Axis, Blade, Board, CutError, Length, MAX_GAUGE, MAX_TILT, Orientation, Recipe, Refusal,
+    Remake, Surface, TableSaw, Tool,
 };
 
 use crate::{
@@ -28,8 +30,8 @@ use crate::{
 pub const FENCE_MIN: Length = Length::ZERO;
 pub const FENCE_MAX: Length = Length::from_inches(24);
 /// How far the miter gauge's stop goes from the blade, along its 21" auxiliary fence.
-const GAUGE_STOP_MIN: Length = Length::from_inch_fraction(1, 16);
-const GAUGE_STOP_MAX: Length = Length::from_inches(20);
+pub const GAUGE_STOP_MIN: Length = Length::from_inch_fraction(1, 16);
+pub const GAUGE_STOP_MAX: Length = Length::from_inches(20);
 /// As high as a 10" blade goes.
 pub const HEIGHT_MAX: Length = Length::from_inch_fraction(25, 8);
 /// A blade's teeth reach at most its radius in front of its center, so a board this far in
@@ -509,6 +511,45 @@ impl TableSawStation {
             _ if self.taken.contains(&Part::Whole) => Vec::new(),
             _ => vec![(Part::Whole, work::hand_off(self.current_board(), self.lie))],
         }
+    }
+
+    /// Makes the wood on the saw again as `remake` makes it, and the pass under way, or just
+    /// made, again on it: made the new way, if it's the pass being changed. Changes nothing
+    /// unless `apply`; returns whether anything would change, or why it can't.
+    pub fn remake(&mut self, remake: &mut Remake, apply: bool) -> Result<bool, Refusal> {
+        let board = work::remade(remake, &self.board)?;
+        let Some(pass) = &self.pass else {
+            let changed = board.is_some();
+            if let (Some(board), true) = (board, apply) {
+                self.board = board;
+            }
+            return Ok(changed);
+        };
+        let here = self.wood().iter().any(|(_, work)| {
+            work::last_pass(work).is_some_and(|last| Arc::ptr_eq(&last, remake.pass()))
+        });
+        if board.is_none() && !here {
+            return Ok(false);
+        }
+        let saw = match (here, remake.tool()) {
+            (true, Tool::TableSaw { saw, .. }) => saw,
+            _ => pass.saw,
+        };
+        let board = board.unwrap_or_else(|| self.board.clone());
+        let result = work::feed(&saw, &board, self.lie, pass.reached.0, pass.reached.1);
+        // What's been carried off came from the cut the pass made: it still has to make one.
+        let still_cut = matches!(result, Ok(Passed::Cut(_)));
+        if !self.taken.is_empty() && !still_cut {
+            let why = "the pass on the table saw doesn't cut it apart".to_string();
+            return Err(Refusal::Pass(remake.pass().number, why));
+        }
+        if apply {
+            self.board = board;
+            let pass = self.pass.as_mut().expect("a pass under way");
+            pass.saw = saw;
+            pass.result = result;
+        }
+        Ok(true)
     }
 
     /// Whether a board can be set down on the saw: not while one is at the blade.

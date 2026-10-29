@@ -61,6 +61,10 @@ pub enum Icon {
     Copy,
     /// A board with another behind it, and a plus: another made the same way.
     Duplicate,
+    /// A pencil: change how it was made.
+    Pencil,
+    /// Two boards pulled apart: take a joint apart.
+    Unglue,
     /// A floppy disk: save it as a file.
     Save,
     /// Into the inventory, out of it to where you are, cut again, and throw away.
@@ -91,7 +95,7 @@ pub enum Icon {
 }
 
 impl Icon {
-    const ALL: [Icon; 50] = [
+    const ALL: [Icon; 52] = [
         Icon::TurnLeft,
         Icon::TurnRight,
         Icon::Flip,
@@ -99,6 +103,8 @@ impl Icon {
         Icon::Rest,
         Icon::Copy,
         Icon::Duplicate,
+        Icon::Pencil,
+        Icon::Unglue,
         Icon::Save,
         Icon::SwitchGuide,
         Icon::Push,
@@ -213,6 +219,24 @@ impl Icon {
                 Line(vec![p(0.62, 0.7), p(0.62, 0.94)], 0.09),
                 Line(vec![p(0.5, 0.82), p(0.74, 0.82)], 0.09),
             ],
+            Icon::Pencil => vec![
+                Fill(vec![
+                    p(0.88, 0.28),
+                    p(0.72, 0.12),
+                    p(0.22, 0.62),
+                    p(0.38, 0.78),
+                ]),
+                Fill(vec![p(0.19, 0.66), p(0.34, 0.81), p(0.1, 0.9)]),
+            ],
+            Icon::Unglue => {
+                let mut shapes = vec![
+                    Rounded(p(0.06, 0.4), p(0.4, 0.86), 0.05),
+                    Rounded(p(0.6, 0.4), p(0.94, 0.86), 0.05),
+                ];
+                shapes.extend(arrow_line(p(0.44, 0.18), p(0.12, 0.18), 0.08));
+                shapes.extend(arrow_line(p(0.56, 0.18), p(0.88, 0.18), 0.08));
+                shapes
+            }
             Icon::Rest => {
                 let mut shapes = vec![
                     Fill(vec![

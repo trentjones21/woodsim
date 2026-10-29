@@ -167,6 +167,18 @@ impl Inventory {
         self.items.iter().find(|item| item.id == id)
     }
 
+    /// Every piece, in the order they were stored.
+    pub fn items(&self) -> &[Item] {
+        &self.items
+    }
+
+    /// Puts `work` in place of the piece `id`, on the same shelf.
+    pub fn replace(&mut self, id: u64, work: Workpiece) {
+        if let Some(item) = self.items.iter_mut().find(|item| item.id == id) {
+            item.work = work;
+        }
+    }
+
     /// The first piece on the same shelf as `id` that's just like it: the one its line is
     /// named for.
     pub fn first_like(&self, id: u64) -> u64 {
@@ -628,10 +640,7 @@ mod tests {
         world
             .resource_mut::<BenchStation>()
             .set_down(Workpiece::GlueUp(panel.clone()), None);
-        let member = Entry {
-            at: Where::Bench(0),
-            member: Some(1),
-        };
+        let member = Entry::member(Where::Bench(0), 1);
         act(&mut world, Action::Duplicate(member));
         let inventory = world.resource::<Inventory>();
         assert_eq!(

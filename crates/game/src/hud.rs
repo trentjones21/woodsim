@@ -29,13 +29,14 @@ use crate::{
     chop::MiterSawStation,
     controls::{Action, Actions, Arrow, Step, key_for},
     copy::{Notice, to_copy},
+    edit::{self, Editor, Knob},
     feed::TableSawStation,
     flights::{HandPicture, InventoryButton, LastPress, ListArea, RowOf},
     hand::{self, Hand, Workpiece},
     icons::{Icon, Icons, picture},
     inventory::{self, Inventory, LUMBER, Shelf},
     join::BenchStation,
-    parts::{self, Entry, Heading, Line, Places, Tree, Where, WoodLine},
+    parts::{self, DetailLine, Entry, Heading, Kind, Line, Places, Tree, Where, WoodLine},
     plan,
     saved::Saved,
     shoot::Studio,
@@ -283,9 +284,10 @@ fn dock(view: ShopView) -> Vec<Vec<Tool>> {
                 tool(PickUp, Icon::PickUp),
                 tool(Store, Icon::Store),
                 tool(TakeApart, Icon::TakeApart),
-                tool(Plans, Icon::Plans),
-                tool(Studio, Icon::Camera),
+                tool(Loosen, Icon::Unglue),
+                tool(History, Icon::Pencil),
             ],
+            vec![tool(Plans, Icon::Plans), tool(Studio, Icon::Camera)],
         ],
         ShopView::Studio => vec![
             vec![
@@ -391,6 +393,7 @@ struct Game<'w> {
     inventory: Res<'w, Inventory>,
     saved: Res<'w, Saved>,
     tree: Res<'w, Tree>,
+    editor: Res<'w, Editor>,
     notice: Res<'w, Notice>,
     studio: Res<'w, Studio>,
 }
@@ -407,6 +410,7 @@ impl Game<'_> {
             inventory: &self.inventory,
             saved: &self.saved,
             tree: &self.tree,
+            editor: &self.editor,
             notice: self.notice.0.as_ref().map(|(notice, _)| notice.as_str()),
             studio: &self.studio,
         }
@@ -423,6 +427,7 @@ impl Game<'_> {
             || self.inventory.is_changed()
             || self.saved.is_changed()
             || self.tree.is_changed()
+            || self.editor.is_changed()
             || self.studio.is_changed()
     }
 }
@@ -438,6 +443,7 @@ struct Shop<'a> {
     inventory: &'a Inventory,
     saved: &'a Saved,
     tree: &'a Tree,
+    editor: &'a Editor,
     /// A line in place of the status for now, like where a copy went.
     notice: Option<&'a str>,
     studio: &'a Studio,
@@ -602,11 +608,34 @@ impl Shop<'_> {
             DeleteSaved(_) => "Delete its file".to_string(),
             Select(_) => "Pick it out".to_string(),
             Fold(fold) => match (fold, self.tree.is_open(fold)) {
-                (parts::Fold::GlueUp(_), true) => "Hide its boards".to_string(),
-                (parts::Fold::GlueUp(_), false) => "List its boards".to_string(),
                 (_, true) => "Fold it away".to_string(),
+                (parts::Fold::Wood(entry), false) => match self.places().wood(entry) {
+                    Some(Workpiece::GlueUp(_)) => "List its boards and joints".to_string(),
+                    _ => "List the cuts that made it".to_string(),
+                },
                 (_, false) => "Open it".to_string(),
             },
+            Edit(_) => "Change this cut".to_string(),
+            Tweak(knob, s) => {
+                let (less, more, small, big) = match knob {
+                    Knob::Fence => ("Fence in", "Fence out", "1/16\"", "1\""),
+                    Knob::GaugeStop => ("Stop in", "Stop out", "1/16\"", "1\""),
+                    Knob::GaugeAngle => ("Swing left", "Swing right", "1°", "to the next stop"),
+                    Knob::Height => ("Blade down", "Blade up", "1/16\"", "1/4\""),
+                    Knob::Tilt => ("Tilt back", "Tilt further", "1°", "to the next stop"),
+                    Knob::Stop => ("Shorter", "Longer", "1/16\"", "1\""),
+                    Knob::Miter => ("Swing left", "Swing right", "1°", "to the next stop"),
+                    Knob::Depth => ("Depth stop down", "Depth stop up", "1/16\"", "1/4\""),
+                };
+                step(s, less, more, small, big)
+            }
+            Remake => {
+                "Make it this way: every piece this cut made, and everything after".to_string()
+            }
+            StopEditing => "Leave it as it was".to_string(),
+            Unglue(_) => "Take this joint apart".to_string(),
+            History => "List how it was made, to change a cut".to_string(),
+            Loosen => "Take it off its glue-up".to_string(),
             Duplicate(entry) if entry.member.is_some() => {
                 "Duplicate this board on its own: another made the same way, from new lumber, \
                  on the parts shelf"
@@ -646,6 +675,14 @@ impl Shop<'_> {
             (_, Stash(Where::Saw(ShopView::MiterSaw, part))) => miter.can_take(part),
             (_, Stash(Where::Bench(index))) => index < bench.groups.len(),
             (_, Stash(_)) => false,
+            (_, Tweak(..) | StopEditing) => self.editor.editing.is_some(),
+            (_, Remake) => self
+                .editor
+                .editing
+                .as_ref()
+                .is_some_and(|editing| editing.changed() && editing.preview.is_ok()),
+            (ShopView::Bench, History) => bench.picked.is_some(),
+            (ShopView::Bench, Loosen) => !bench.picked_joints().is_empty(),
             // Nothing in the studio comes from the inventory or goes into it.
             (ShopView::Studio, Inventory) => false,
             (view, Copy) => to_copy(view, self.hand, table, miter, bench).is_some(),
@@ -1398,6 +1435,9 @@ fn toggle_panels(actions: Res<Actions>, mut showing: ResMut<Showing>) {
     if actions.just(Action::Inventory) {
         showing.inventory = !showing.inventory;
     }
+    if actions.just(Action::History) && !showing.inventory {
+        showing.inventory = true;
+    }
 }
 
 /// Fills the dock and the settings cards with what's at the view the camera's at.
@@ -1726,8 +1766,20 @@ const THUMBNAIL: f32 = 30.0;
 struct BuiltTree {
     view: Option<ShopView>,
     lines: Vec<Line>,
-    card: Option<(Entry, Workpiece, String)>,
+    card: Option<Card>,
     pictures: Vec<(Workpiece, Handle<Image>)>,
+}
+
+/// What the card under the tree shows: the line picked out, its wood, and where that is in
+/// words; the pass or joint, if it's one; and the saw as it's being set to change the pass,
+/// with what that makes of the wood, or why it can't.
+#[derive(Clone, PartialEq)]
+struct Card {
+    entry: Entry,
+    work: Workpiece,
+    at: String,
+    detail: Option<DetailLine>,
+    editing: Option<(woodsim::Tool, Result<Workpiece, String>)>,
 }
 
 impl BuiltTree {
@@ -1795,14 +1847,30 @@ fn build_tree(
                     let picture = built.picture(&line.work, &mut images);
                     tree_line(&mut commands, &icons, &shop, list, line, picture);
                 }
+                Line::Detail(line) => tree_detail(&mut commands, &icons, list, line),
             }
         }
         built.lines = lines;
     }
-    let card = shop
-        .tree
-        .selected
-        .and_then(|entry| Some((entry, places.wood(entry)?, places.say_where(entry))));
+    let card = shop.tree.selected.and_then(|entry| {
+        let detail = match entry.detail {
+            Some(_) => Some(places.detail(entry)?),
+            None => None,
+        };
+        let editing = shop
+            .editor
+            .editing
+            .as_ref()
+            .filter(|editing| editing.entry == entry)
+            .map(|editing| (editing.tool, editing.preview.clone()));
+        Some(Card {
+            entry,
+            work: places.wood(entry.wood())?,
+            at: places.say_where(entry),
+            detail,
+            editing,
+        })
+    });
     if built.card != card || built.view != view {
         let (details, mut node) = details.into_inner();
         commands.entity(details).despawn_related::<Children>();
@@ -1814,23 +1882,31 @@ fn build_tree(
         if node.display != display {
             node.display = display;
         }
-        if let Some(selected) = &card {
-            let picture = built.picture(&selected.1, &mut images);
-            let label = selected.0.member.and_then(|member| {
-                match places.wood(Entry::at(selected.0.at))? {
+        if let Some(shown) = &card {
+            let label = shown.entry.member.and_then(|member| {
+                match places.wood(Entry::at(shown.entry.at))? {
                     Workpiece::GlueUp(assembly) => plan::labels(&assembly).get(member).cloned(),
                     Workpiece::Board(_) => None,
                 }
             });
-            fill_card(
-                &mut commands,
-                &icons,
-                &shop,
-                details,
-                selected,
-                label,
-                picture,
-            );
+            let shows = match &shown.editing {
+                Some((_, Ok(made))) => made,
+                _ => &shown.work,
+            };
+            let picture = built.picture(shows, &mut images);
+            let mut fill = Fill {
+                commands: &mut commands,
+                icons: &icons,
+                shop: &shop,
+                card: details,
+            };
+            match (&shown.detail, &shown.editing) {
+                (Some(detail), Some((saw, made))) => {
+                    fill.editor(detail, *saw, made, label, picture);
+                }
+                (Some(detail), None) => fill.detail(shown, detail, label, picture),
+                (None, _) => fill.wood(shown, label, picture),
+            }
         }
         built.card = card;
     }
@@ -1980,7 +2056,7 @@ fn tree_line(
                 commands,
                 icons,
                 row,
-                Action::Fold(parts::Fold::GlueUp(line.entry.at)),
+                Action::Fold(parts::Fold::Wood(line.entry)),
                 Icon::Step(arrow, false),
                 Look::Chevron,
                 TipAt::Right,
@@ -2106,86 +2182,318 @@ fn use_icon(view: ShopView) -> Icon {
     }
 }
 
-/// Fills the card for the line picked out, `selected`, with where it is in words: its picture,
-/// what it is and where, and buttons for what can be done with it there.
-fn fill_card(
-    commands: &mut Commands,
-    icons: &Icons,
-    shop: &Shop,
+/// What fills the card under the tree.
+struct Fill<'a, 'w, 's> {
+    commands: &'a mut Commands<'w, 's>,
+    icons: &'a Icons,
+    shop: &'a Shop<'a>,
     card: Entity,
-    (entry, work, at): &(Entry, Workpiece, String),
-    label: Option<String>,
-    picture: Handle<Image>,
-) {
-    let top = commands
-        .spawn((
+}
+
+impl Fill<'_, '_, '_> {
+    /// The line picked out, a piece of wood: its picture, what it is and where, and buttons
+    /// for what can be done with it there.
+    fn wood(&mut self, shown: &Card, label: Option<String>, picture: Handle<Image>) {
+        let (name, notes) = inventory::describe(&shown.work);
+        let words = self.top(picture);
+        named(self.commands, words, label.as_deref(), &name, 16.0);
+        self.said(words, &notes, 0.7);
+        self.said(words, &capitalized(&shown.at), 0.55);
+        let actions = card_actions(self.shop, shown.entry);
+        self.buttons(actions);
+    }
+
+    /// A pass that cut it, or a joint that holds it: what it did, how, and a button to change
+    /// it, if it can be.
+    fn detail(
+        &mut self,
+        shown: &Card,
+        detail: &DetailLine,
+        label: Option<String>,
+        picture: Handle<Image>,
+    ) {
+        let words = self.top(picture);
+        named(self.commands, words, label.as_deref(), &detail.name, 16.0);
+        self.said(words, &detail.notes, 0.7);
+        let what = match detail.kind {
+            Kind::Joint => "A joint of the glue-up",
+            _ => "A cut that made it",
+        };
+        self.said(words, &format!("{what}, {}", shown.at), 0.55);
+        let action = match detail.kind {
+            Kind::Joint => (Action::Unglue(shown.entry), Icon::Unglue),
+            _ => (Action::Edit(shown.entry), Icon::Pencil),
+        };
+        if detail.changes {
+            self.buttons(vec![action]);
+        } else {
+            let why = match (shown.entry.at, detail.kind) {
+                (Where::Saved(_), _) => "Saved parts stay as they were saved.",
+                (_, Kind::Joint) => "Take it off the saw to take it apart.",
+                _ => "It went through a glue-up, so it can't be cut again.",
+            };
+            self.said(words, why, 0.55);
+        }
+    }
+
+    /// A pass being changed: each of the saw's settings with buttons to step it, what the piece
+    /// comes out as set that way (or why it can't be), and buttons to make it that way or
+    /// leave it as it was.
+    fn editor(
+        &mut self,
+        detail: &DetailLine,
+        saw: woodsim::Tool,
+        made: &Result<Workpiece, String>,
+        label: Option<String>,
+        picture: Handle<Image>,
+    ) {
+        let title = format!("Changing the {}", detail.name.to_lowercase());
+        let header = self
+            .commands
+            .spawn((Node::default(), ChildOf(self.card)))
+            .id();
+        named(self.commands, header, label.as_deref(), &title, 16.0);
+        for knob in edit::knobs(saw) {
+            let (name, value) = edit::reading(saw, knob);
+            let row = self
+                .commands
+                .spawn((
+                    Node {
+                        align_items: AlignItems::Center,
+                        column_gap: px(4),
+                        ..default()
+                    },
+                    ChildOf(self.card),
+                ))
+                .id();
+            self.commands.spawn((
+                Node {
+                    flex_direction: FlexDirection::Column,
+                    flex_grow: 1.0,
+                    ..default()
+                },
+                ChildOf(row),
+                children![
+                    (bold(name, 12.0, INK.with_alpha(0.6)), Pickable::IGNORE),
+                    (bold(value, 18.0, ACCENT), Pickable::IGNORE),
+                ],
+            ));
+            for (more, big) in [(false, true), (false, false), (true, false), (true, true)] {
+                let arrow = if more { Arrow::Right } else { Arrow::Left };
+                spawn_button(
+                    self.commands,
+                    self.icons,
+                    row,
+                    Action::Tweak(knob, Step { more, big }),
+                    Icon::Step(arrow, big),
+                    Look::Small,
+                    TipAt::Above,
+                );
+            }
+        }
+        let words = self.top(picture);
+        match made {
+            Ok(made) => {
+                let (name, notes) = inventory::describe(made);
+                self.said(words, "Comes out", 0.55);
+                named(self.commands, words, None, &name, 15.0);
+                self.said(words, &notes, 0.7);
+            }
+            Err(why) => {
+                self.said(words, "Can't be made this way:", 0.55);
+                self.commands.spawn((
+                    text(why.clone(), 13.0, ACCENT),
+                    Pickable::IGNORE,
+                    ChildOf(words),
+                ));
+            }
+        }
+        let remake = Tool {
+            look: Look::Go,
+            ..tool(Action::Remake, Icon::Fasten)
+        };
+        let row = self.button_row();
+        for button in [remake, tool(Action::StopEditing, Icon::LetGo)] {
+            spawn_button(
+                self.commands,
+                self.icons,
+                row,
+                button.action,
+                button.icon,
+                button.look,
+                TipAt::Above,
+            );
+        }
+    }
+
+    /// A row along the card with `picture` in it, and the column of words beside it.
+    fn top(&mut self, picture: Handle<Image>) -> Entity {
+        let top = self
+            .commands
+            .spawn((
+                Node {
+                    align_items: AlignItems::Center,
+                    column_gap: px(10),
+                    ..default()
+                },
+                ChildOf(self.card),
+            ))
+            .id();
+        self.commands.spawn((
+            ImageNode::new(picture),
             Node {
-                align_items: AlignItems::Center,
-                column_gap: px(10),
+                width: px(52),
+                height: px(52),
+                flex_shrink: 0.0,
                 ..default()
             },
-            ChildOf(card),
-        ))
-        .id();
-    commands.spawn((
-        ImageNode::new(picture),
-        Node {
-            width: px(52),
-            height: px(52),
-            flex_shrink: 0.0,
-            ..default()
-        },
-        Pickable::IGNORE,
-        ChildOf(top),
-    ));
-    let words = commands
-        .spawn((
-            Node {
-                flex_direction: FlexDirection::Column,
-                flex_shrink: 1.0,
-                min_width: px(0),
-                row_gap: px(1),
-                ..default()
-            },
+            Pickable::IGNORE,
             ChildOf(top),
-        ))
-        .id();
-    let (name, notes) = inventory::describe(work);
-    named(commands, words, label.as_deref(), &name, 16.0);
-    if !notes.is_empty() {
-        commands.spawn((
-            text(notes, 13.0, INK.with_alpha(0.7)),
+        ));
+        self.commands
+            .spawn((
+                Node {
+                    flex_direction: FlexDirection::Column,
+                    flex_shrink: 1.0,
+                    min_width: px(0),
+                    row_gap: px(1),
+                    ..default()
+                },
+                ChildOf(top),
+            ))
+            .id()
+    }
+
+    /// A line of words in `words`, as dark as `ink` says.
+    fn said(&mut self, words: Entity, said: &str, ink: f32) {
+        if said.is_empty() {
+            return;
+        }
+        self.commands.spawn((
+            text(said, 13.0, INK.with_alpha(ink)),
             Pickable::IGNORE,
             ChildOf(words),
         ));
     }
-    let mut at = at.to_string();
-    if let Some(first) = at.get(..1) {
-        at.replace_range(..1, &first.to_uppercase());
+
+    fn button_row(&mut self) -> Entity {
+        self.commands
+            .spawn((
+                Node {
+                    column_gap: px(6),
+                    ..default()
+                },
+                ChildOf(self.card),
+            ))
+            .id()
     }
-    commands.spawn((
-        text(at, 13.0, INK.with_alpha(0.55)),
-        Pickable::IGNORE,
-        ChildOf(words),
-    ));
-    let buttons = commands
+
+    /// A row of small buttons along the card.
+    fn buttons(&mut self, actions: Vec<(Action, Icon)>) {
+        let row = self.button_row();
+        for (action, icon) in actions {
+            spawn_button(
+                self.commands,
+                self.icons,
+                row,
+                action,
+                icon,
+                Look::Small,
+                TipAt::Above,
+            );
+        }
+    }
+}
+
+/// `said` with its first letter a capital.
+fn capitalized(said: &str) -> String {
+    let mut chars = said.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
+/// A line of the tree for a pass that cut a board, or a joint of a glue-up: its saw or glue,
+/// what it did, how, and a button to change it or take it apart, if it can be. A click picks it
+/// out.
+fn tree_detail(commands: &mut Commands, icons: &Icons, list: Entity, line: &DetailLine) {
+    let row = commands
         .spawn((
+            Button,
+            Hovered::default(),
+            Control {
+                action: Action::Select(line.entry),
+                look: Look::Row,
+                tip: TipAt::Right,
+            },
             Node {
+                align_items: AlignItems::Center,
                 column_gap: px(6),
+                padding: UiRect {
+                    left: px(line.depth() as f32 * INDENT + CHEVRON + 6.0),
+                    right: px(2),
+                    top: px(2),
+                    bottom: px(2),
+                },
+                border_radius: BorderRadius::all(px(8)),
                 ..default()
             },
-            ChildOf(card),
+            BackgroundColor(Color::NONE),
+            ChildOf(list),
         ))
         .id();
-    for (action, icon) in card_actions(shop, *entry) {
+    let icon = match line.kind {
+        Kind::TableSaw => Icon::TableSaw,
+        Kind::MiterSaw => Icon::MiterSaw,
+        Kind::Joint => Icon::Glue,
+    };
+    commands.spawn((
+        ImageNode {
+            image: icons.get(icon),
+            color: INK.with_alpha(0.55),
+            ..default()
+        },
+        Node {
+            width: px(18),
+            height: px(18),
+            flex_shrink: 0.0,
+            ..default()
+        },
+        Pickable::IGNORE,
+        ChildOf(row),
+    ));
+    commands.spawn((
+        Node {
+            flex_direction: FlexDirection::Column,
+            flex_grow: 1.0,
+            flex_shrink: 1.0,
+            min_width: px(0),
+            ..default()
+        },
+        Pickable::IGNORE,
+        ChildOf(row),
+        children![
+            (bold(&line.name, 13.0, INK), Pickable::IGNORE),
+            (
+                text(&line.notes, 12.0, INK.with_alpha(0.6)),
+                Pickable::IGNORE
+            ),
+        ],
+    ));
+    if line.changes {
+        let (action, icon) = match line.kind {
+            Kind::Joint => (Action::Unglue(line.entry), Icon::Unglue),
+            _ => (Action::Edit(line.entry), Icon::Pencil),
+        };
         spawn_button(
             commands,
             icons,
-            buttons,
+            row,
             action,
             icon,
             Look::Small,
-            TipAt::Above,
+            TipAt::Right,
         );
     }
 }
@@ -2382,6 +2690,7 @@ mod tests {
             std::sync::LazyLock::new(Inventory::default);
         static SAVED: std::sync::LazyLock<Saved> = std::sync::LazyLock::new(Saved::default);
         static TREE: std::sync::LazyLock<Tree> = std::sync::LazyLock::new(Tree::default);
+        static EDITOR: std::sync::LazyLock<Editor> = std::sync::LazyLock::new(Editor::default);
         static STUDIO: std::sync::LazyLock<Studio> = std::sync::LazyLock::new(Studio::default);
         Shop {
             view,
@@ -2393,6 +2702,7 @@ mod tests {
             inventory: &INVENTORY,
             saved: &SAVED,
             tree: &TREE,
+            editor: &EDITOR,
             notice: None,
             studio: &STUDIO,
         }

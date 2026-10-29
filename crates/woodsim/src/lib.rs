@@ -15,6 +15,7 @@ mod kerf;
 mod length;
 mod orientation;
 mod recipe;
+mod remake;
 mod saw;
 mod solid;
 mod wide;
@@ -22,7 +23,7 @@ mod wide;
 pub use angle::Angle;
 pub use assembly::{
     Assembly, Contact, Extent, Fastener, Joint, Mating, Member, Motion, Rotation, Surface,
-    Unsteady, outline, surfaces,
+    Unsteady, outline, same_surface, surfaces,
 };
 pub use board::{Board, Piece, Run, SlotSize};
 pub use exposed::{exposed, slot_bottoms, slot_surfaces};
@@ -33,4 +34,5 @@ pub use kerf::{Across, Kerf, Opening};
 pub use length::Length;
 pub use orientation::{Axis, Orientation};
 pub use recipe::{Recipe, Wood};
+pub use remake::{Refusal, Remake};
 pub use saw::{Blade, Cut, CutError, MAX_GAUGE, MAX_TILT, MiterSaw, Pass, TableSaw};

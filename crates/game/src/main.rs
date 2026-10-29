@@ -6,6 +6,7 @@ mod chop;
 mod controls;
 mod copy;
 mod cutting;
+mod edit;
 mod feed;
 mod flights;
 mod gpu;
@@ -51,6 +52,7 @@ use bench::BenchPlugin;
 use blades::BladesPlugin;
 use controls::ControlsPlugin;
 use copy::CopyPlugin;
+use edit::EditPlugin;
 use flights::FlightsPlugin;
 use hand::HandPlugin;
 use hud::HudPlugin;
@@ -121,7 +123,7 @@ fn main() {
         HandPlugin,
         ControlsPlugin,
         InventoryPlugin,
-        PartsPlugin,
+        (PartsPlugin, EditPlugin),
         HudPlugin,
         FlightsPlugin,
         RestPlugin,

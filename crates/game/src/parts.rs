@@ -3,27 +3,32 @@
 //! both sides of the cut it made), the parts and glue-ups on the workbench, the two shelves, the
 //! parts saved as files, and new lumber, each under its heading. Wood doesn't drop out of the
 //! tree when it's used: it moves from one heading to another. A glue-up opens to list its
-//! boards, lettered as its plans letter them, and a heading folds away what's under it.
+//! boards, lettered as its plans letter them, and its joints; a board that's been cut opens to
+//! list the passes that cut it, from its stock on, as a CAD program lists a part's features;
+//! and a heading folds away what's under it.
 //!
 //! Clicking a line picks it out, and the card under the tree says what it is and where it is,
 //! with buttons for what can be done with it there (`Where`): use it at the station you're at,
-//! duplicate it, put it away, move it to the other shelf, save it, or throw it away.
+//! duplicate it, put it away, move it to the other shelf, save it, or throw it away; change a
+//! pass, or take a joint apart (`edit`).
 
-use std::collections::HashSet;
+use std::{collections::HashSet, sync::Arc};
 
 use bevy::prelude::*;
 
 use crate::{
     chop::MiterSawStation,
     controls::{Action, Actions},
+    cutting,
     feed::TableSawStation,
     hand::{Hand, Workpiece},
     inventory::{self, Inventory, LUMBER, Shelf, lumber},
-    join::BenchStation,
+    join::{self, BenchStation},
     plan,
     saved::Saved,
     shop::{Part, ShopView, describe_board, describe_size},
 };
+use woodsim::{Lie, Operation, Origin, Side, Source, Tool};
 
 /// Where a piece of wood is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -41,18 +46,48 @@ pub enum Where {
     Lumber(u64),
 }
 
-/// A line of the tree: the wood somewhere, or one board of a glue-up there.
+/// A line of the tree: the wood somewhere, one board of a glue-up there, or a pass that cut it
+/// or a joint that holds it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Entry {
     pub at: Where,
     /// Which board of a glue-up, by its place in it.
     pub member: Option<usize>,
+    pub detail: Option<Detail>,
+}
+
+/// Something in how wood was made: a pass that cut a board, by its number, or a joint of a
+/// glue-up, by its place in its joints.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Detail {
+    Pass(u64),
+    Joint(usize),
 }
 
 impl Entry {
     /// The wood at `at`, as a whole.
     pub fn at(at: Where) -> Entry {
-        Entry { at, member: None }
+        Entry {
+            at,
+            member: None,
+            detail: None,
+        }
+    }
+
+    /// The board `member` of the glue-up at `at`.
+    pub fn member(at: Where, member: usize) -> Entry {
+        Entry {
+            member: Some(member),
+            ..Entry::at(at)
+        }
+    }
+
+    /// The wood this is, or is something in how it was made.
+    pub fn wood(self) -> Entry {
+        Entry {
+            detail: None,
+            ..self
+        }
     }
 }
 
@@ -106,11 +141,12 @@ impl Heading {
     }
 }
 
-/// What folds away: everything under a heading, or a glue-up's boards.
+/// What folds away: everything under a heading, or what's listed under a piece of wood: a
+/// glue-up's boards and joints, or the passes that cut a board.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Fold {
     Heading(Heading),
-    GlueUp(Where),
+    Wood(Entry),
 }
 
 /// A line of the tree, as it's drawn.
@@ -125,6 +161,35 @@ pub enum Line {
     /// What's said under a heading with nothing under it.
     Empty(&'static str),
     Wood(Box<WoodLine>),
+    /// A pass that cut a board, or a joint of a glue-up, under it.
+    Detail(Box<DetailLine>),
+}
+
+/// A line for a pass or a joint: what it was, and how it was done.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DetailLine {
+    pub entry: Entry,
+    pub kind: Kind,
+    pub name: String,
+    pub notes: String,
+    /// Whether it can be changed: a pass through a board on its own, a joint anywhere but on a
+    /// saw.
+    pub changes: bool,
+}
+
+/// What a pass or joint line is: a pass of one saw or the other, or a joint.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    TableSaw,
+    MiterSaw,
+    Joint,
+}
+
+impl DetailLine {
+    /// How far in it's indented: one more than the wood it's under.
+    pub fn depth(&self) -> usize {
+        1 + usize::from(self.entry.member.is_some())
+    }
 }
 
 /// A piece of wood's line: what it is, in bold, and what else there is to say about it.
@@ -138,7 +203,8 @@ pub struct WoodLine {
     /// How many identical pieces it stands for, and the inventory's pieces, on a shelf.
     pub count: usize,
     pub ids: Vec<u64>,
-    /// A glue-up's: whether its boards are listed under it.
+    /// Whether what's under it (a glue-up's boards and joints, or the passes that cut a board)
+    /// is listed; `None` if there's nothing under it.
     pub open: Option<bool>,
     pub work: Workpiece,
 }
@@ -148,15 +214,34 @@ pub struct WoodLine {
 pub struct Tree {
     pub selected: Option<Entry>,
     folded: HashSet<Heading>,
-    /// Glue-ups whose boards are listed: they start closed.
-    opened: HashSet<Where>,
+    /// Wood whose glue-up or history is listed: it starts closed.
+    opened: HashSet<Entry>,
 }
 
 impl Tree {
     pub fn is_open(&self, fold: Fold) -> bool {
         match fold {
             Fold::Heading(heading) => !self.folded.contains(&heading),
-            Fold::GlueUp(at) => self.opened.contains(&at),
+            Fold::Wood(entry) => self.opened.contains(&entry),
+        }
+    }
+
+    /// Lists what's under `entry`, and the glue-up it's in, and shows its heading.
+    pub fn open(&mut self, entry: Entry) {
+        self.opened.insert(entry.wood());
+        self.opened.insert(Entry::at(entry.at));
+        let heading = match entry.at {
+            Where::Hand => Heading::Hand,
+            Where::Saw(ShopView::MiterSaw, _) => Heading::MiterSaw,
+            Where::Saw(..) => Heading::TableSaw,
+            Where::Bench(_) => Heading::Bench,
+            Where::Shelf(_) => Heading::Parts,
+            Where::Saved(_) => Heading::Saved,
+            Where::Lumber(_) => Heading::Lumber,
+        };
+        self.folded.remove(&heading);
+        if let Where::Shelf(_) = entry.at {
+            self.folded.remove(&Heading::Offcuts);
         }
     }
 
@@ -168,7 +253,7 @@ impl Tree {
         }
         match fold {
             Fold::Heading(heading) => flip(&mut self.folded, heading),
-            Fold::GlueUp(at) => flip(&mut self.opened, at),
+            Fold::Wood(entry) => flip(&mut self.opened, entry),
         }
     }
 
@@ -188,7 +273,14 @@ impl Tree {
         if let Some(entry) = &mut self.selected {
             entry.at = moved(entry.at);
         }
-        self.opened = self.opened.drain().map(moved).collect();
+        self.opened = self
+            .opened
+            .drain()
+            .map(|entry| Entry {
+                at: moved(entry.at),
+                ..entry
+            })
+            .collect();
     }
 }
 
@@ -232,6 +324,24 @@ impl Places<'_> {
         }
     }
 
+    /// The line for the pass or joint at `entry`, whether or not it's listed.
+    pub fn detail(&self, entry: Entry) -> Option<DetailLine> {
+        let changes = !matches!(entry.at, Where::Saved(_) | Where::Lumber(_));
+        let lines = match (entry.detail?, self.wood(entry.wood())?) {
+            (Detail::Pass(_), Workpiece::Board(board)) => passes(entry.wood(), &board, changes),
+            (Detail::Joint(_), Workpiece::GlueUp(assembly)) => {
+                let labels = plan::labels(&assembly);
+                let on_saw = matches!(entry.at, Where::Saw(..));
+                joints(entry.at, &assembly, &labels, changes && !on_saw)
+            }
+            _ => return None,
+        };
+        lines.into_iter().find_map(|line| match line {
+            Line::Detail(line) if line.entry == entry => Some(*line),
+            _ => None,
+        })
+    }
+
     /// Where `entry` is, in words: "on the table saw, the measured piece".
     pub fn say_where(&self, entry: Entry) -> String {
         let at = match entry.at {
@@ -263,8 +373,8 @@ impl Places<'_> {
         }
     }
 
-    /// The tree's lines: each heading, and unless it's folded away, the wood under it, a
-    /// glue-up's boards under it if it's open.
+    /// The tree's lines: each heading, and unless it's folded away, the wood under it, with
+    /// what's under each piece that's open.
     pub fn lines(&self, tree: &Tree) -> Vec<Line> {
         let mut lines = Vec::new();
         for heading in Heading::ALL {
@@ -285,14 +395,12 @@ impl Places<'_> {
                 lines.push(Line::Empty(heading.empty()));
             }
             for line in wood {
-                let boards = match &line.work {
-                    Workpiece::GlueUp(assembly) if line.open == Some(true) => {
-                        boards(line.entry.at, assembly)
-                    }
+                let under = match line.open {
+                    Some(true) => details(&line, tree),
                     _ => Vec::new(),
                 };
                 lines.push(Line::Wood(Box::new(line)));
-                lines.extend(boards.into_iter().map(|line| Line::Wood(Box::new(line))));
+                lines.extend(under);
             }
         }
         lines
@@ -393,6 +501,10 @@ fn join(first: &str, rest: &str) -> String {
 /// The line for `work` at `entry`.
 fn wood_line(entry: Entry, work: Workpiece, tree: &Tree) -> WoodLine {
     let (name, notes) = inventory::describe(&work);
+    let listed = match &work {
+        Workpiece::GlueUp(_) => true,
+        Workpiece::Board(board) => !board.origin().operations().is_empty(),
+    };
     WoodLine {
         entry,
         label: None,
@@ -400,14 +512,44 @@ fn wood_line(entry: Entry, work: Workpiece, tree: &Tree) -> WoodLine {
         notes,
         count: 1,
         ids: Vec::new(),
-        open: matches!(work, Workpiece::GlueUp(_)).then(|| tree.is_open(Fold::GlueUp(entry.at))),
+        open: listed.then(|| tree.is_open(Fold::Wood(entry))),
         work,
     }
 }
 
+/// What's listed under an open piece of wood: a glue-up's boards, each with the passes that
+/// cut it if it's open, then its joints; or the passes that cut a board.
+fn details(line: &WoodLine, tree: &Tree) -> Vec<Line> {
+    let at = line.entry.at;
+    // Saved parts are files, kept as they were; lumber's new.
+    let changes = !matches!(at, Where::Saved(_) | Where::Lumber(_));
+    match &line.work {
+        Workpiece::Board(board) => passes(line.entry, board, changes),
+        Workpiece::GlueUp(assembly) => {
+            let labels = plan::labels(assembly);
+            let mut lines = Vec::new();
+            for (member, line) in boards(at, assembly, &labels, tree).into_iter().enumerate() {
+                let open = line.open == Some(true);
+                lines.push(Line::Wood(Box::new(line)));
+                if open {
+                    let board = &assembly.members()[member].board;
+                    lines.extend(passes(Entry::member(at, member), board, changes));
+                }
+            }
+            let on_saw = matches!(at, Where::Saw(..));
+            lines.extend(joints(at, assembly, &labels, changes && !on_saw));
+            lines
+        }
+    }
+}
+
 /// The lines for a glue-up's boards, lettered as its plans letter them.
-fn boards(at: Where, assembly: &woodsim::Assembly) -> Vec<WoodLine> {
-    let labels = plan::labels(assembly);
+fn boards(
+    at: Where,
+    assembly: &woodsim::Assembly,
+    labels: &[String],
+    tree: &Tree,
+) -> Vec<WoodLine> {
     assembly
         .members()
         .iter()
@@ -418,19 +560,113 @@ fn boards(at: Where, assembly: &woodsim::Assembly) -> Vec<WoodLine> {
             let size = describe_size(board);
             let all = describe_board(board);
             let notes = all.strip_prefix(&size).unwrap_or(&all);
+            let entry = Entry::member(at, member);
+            let cut = !board.origin().operations().is_empty();
             WoodLine {
-                entry: Entry {
-                    at,
-                    member: Some(member),
-                },
-                label: Some(label),
+                entry,
+                label: Some(label.clone()),
                 name: size.clone(),
                 notes: notes.trim_start_matches(", ").to_string(),
                 count: 1,
                 ids: Vec::new(),
-                open: None,
+                open: cut.then(|| tree.is_open(Fold::Wood(entry))),
                 work: Workpiece::Board(board.clone()),
             }
+        })
+        .collect()
+}
+
+/// The passes that made `board`, from its stock on: each, the board it cut, and which side of
+/// the cut the piece was on.
+pub fn history(origin: &Origin) -> Vec<(Arc<Operation>, Origin, Side)> {
+    match origin.source() {
+        Source::Stock { .. } => Vec::new(),
+        Source::Sawn {
+            operation,
+            from,
+            side,
+            ..
+        } => {
+            let mut passes = history(from);
+            passes.push((Arc::clone(operation), from.clone(), *side));
+            passes
+        }
+    }
+}
+
+/// Whether a pass went through a glue-up, rather than a board on its own.
+pub fn through_glue_up(tool: Tool) -> bool {
+    matches!(
+        tool,
+        Tool::TableSaw {
+            lie: Lie::GlueUp(_),
+            ..
+        } | Tool::MiterSaw {
+            lie: Lie::GlueUp(_),
+            ..
+        }
+    )
+}
+
+/// The lines for the passes that made `board`, the wood `entry` is: what each did, and the saw
+/// as it was set.
+fn passes(entry: Entry, board: &woodsim::Board, changes: bool) -> Vec<Line> {
+    history(board.origin())
+        .into_iter()
+        .map(|(operation, from, side)| {
+            let kept = match side {
+                Side::Offcut => ", keeping the offcut",
+                Side::Loose => ", a strip it set loose",
+                Side::Measured | Side::Whole => "",
+            };
+            let glue_up = through_glue_up(operation.tool);
+            let through = if glue_up { " (through a glue-up)" } else { "" };
+            Line::Detail(Box::new(DetailLine {
+                entry: Entry {
+                    detail: Some(Detail::Pass(operation.number)),
+                    ..entry
+                },
+                kind: match operation.tool {
+                    Tool::TableSaw { .. } => Kind::TableSaw,
+                    Tool::MiterSaw { .. } => Kind::MiterSaw,
+                },
+                name: cutting::verb(operation.tool).to_string(),
+                notes: format!(
+                    "{}{kept}{through}",
+                    cutting::settings_of(&operation, Some(&from))
+                ),
+                changes: changes && !glue_up,
+            }))
+        })
+        .collect()
+}
+
+/// The lines for a glue-up's joints: which parts, which of their surfaces, and how they're
+/// held.
+fn joints(at: Where, assembly: &woodsim::Assembly, labels: &[String], changes: bool) -> Vec<Line> {
+    assembly
+        .joints()
+        .iter()
+        .enumerate()
+        .map(|(index, joint)| {
+            let [(a, on_a), (b, on_b)] = joint.between;
+            let surface =
+                |member: usize, surface| join::name_on(&assembly.members()[member].board, surface);
+            Line::Detail(Box::new(DetailLine {
+                entry: Entry {
+                    detail: Some(Detail::Joint(index)),
+                    ..Entry::at(at)
+                },
+                kind: Kind::Joint,
+                name: format!("{} to {}", labels[a], labels[b]),
+                notes: format!(
+                    "{} to {}, {}",
+                    surface(a, on_a),
+                    surface(b, on_b),
+                    join::fastened(joint.fastener)
+                ),
+                changes,
+            }))
         })
         .collect()
 }
@@ -606,7 +842,7 @@ mod tests {
             .unwrap();
         assert_eq!(glue_up.open, Some(false));
         assert_eq!(glue_up.notes, "glue-up of 2 parts");
-        tree.toggle(Fold::GlueUp(at));
+        tree.toggle(Fold::Wood(Entry::at(at)));
         let lines = shop.places().lines(&tree);
         let boards: Vec<_> = wood(&lines)
             .into_iter()
@@ -620,10 +856,7 @@ mod tests {
                 ("A2".to_string(), "3/4\" x 4\" x 24\"".to_string()),
             ]
         );
-        let member = Entry {
-            at,
-            member: Some(1),
-        };
+        let member = Entry::member(at, 1);
         assert_eq!(
             shop.places().wood(member),
             Some(Workpiece::Board(panel.members()[1].board.clone()))
@@ -631,6 +864,53 @@ mod tests {
         assert_eq!(
             shop.places().say_where(member),
             "in a glue-up on the workbench"
+        );
+    }
+
+    #[test]
+    fn a_cut_board_lists_its_cuts_and_a_glue_up_its_joints() {
+        let mut shop = Shop::new();
+        shop.miter_saw.load(board(24));
+        shop.miter_saw.set_stop(Length::from_inches(10));
+        shop.miter_saw.lower(1.0);
+        shop.miter_saw.raise(1.0);
+        let piece = Entry::at(Where::Saw(ShopView::MiterSaw, Part::Piece));
+        let mut tree = Tree::default();
+        tree.toggle(Fold::Wood(piece));
+        let lines = shop.places().lines(&tree);
+        let cuts: Vec<&DetailLine> = lines
+            .iter()
+            .filter_map(|line| match line {
+                Line::Detail(line) => Some(line.as_ref()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(cuts.len(), 1);
+        assert_eq!(cuts[0].name, "Cut");
+        assert_eq!(cuts[0].notes, "Miter saw, square, stop at 10\"");
+        assert_eq!(cuts[0].kind, Kind::MiterSaw);
+        assert!(cuts[0].changes);
+        assert_eq!(shop.places().detail(cuts[0].entry).as_ref(), Some(cuts[0]));
+
+        let panel = crate::work::panel(
+            &[Length::from_inches(4), Length::from_inches(2)],
+            Length::from_inches(24),
+        );
+        shop.bench.set_down(Workpiece::GlueUp(panel), None);
+        tree.toggle(Fold::Wood(Entry::at(Where::Bench(0))));
+        let joint = Entry {
+            detail: Some(Detail::Joint(0)),
+            ..Entry::at(Where::Bench(0))
+        };
+        let line = shop.places().detail(joint).expect("the panel's joint");
+        assert_eq!(
+            (line.name.as_str(), line.notes.as_str()),
+            ("A to B", "edge to edge, glue")
+        );
+        assert!(
+            shop.places()
+                .lines(&tree)
+                .contains(&Line::Detail(Box::new(line)))
         );
     }
 
@@ -676,10 +956,10 @@ mod tests {
         let mut tree = Tree::default();
         let on_shelf = Entry::at(Where::Shelf(3));
         tree.select(on_shelf);
-        tree.toggle(Fold::GlueUp(Where::Shelf(3)));
+        tree.toggle(Fold::Wood(on_shelf));
         tree.follow(Where::Shelf(3), Where::Bench(0));
         assert_eq!(tree.selected, Some(Entry::at(Where::Bench(0))));
-        assert!(tree.is_open(Fold::GlueUp(Where::Bench(0))));
+        assert!(tree.is_open(Fold::Wood(Entry::at(Where::Bench(0)))));
         tree.select(Entry::at(Where::Bench(0)));
         assert_eq!(tree.selected, None);
         // Taken off the bench, what was after it moves up.

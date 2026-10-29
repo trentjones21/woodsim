@@ -8,8 +8,8 @@
 
 use bevy::{math::DVec3, prelude::*};
 use woodsim::{
-    Assembly, Board, Contact, Fastener, Length, Mating, Member, Motion, Rotation, Surface,
-    slot_bottoms, slot_surfaces, surfaces,
+    Assembly, Board, Contact, Fastener, Length, Mating, Member, Motion, Refusal, Remake, Rotation,
+    Surface, slot_bottoms, slot_surfaces, surfaces,
 };
 
 use crate::{hand::Workpiece, shop::inches, work::glue_up_bounds};
@@ -49,6 +49,27 @@ struct Joined {
     order: u64,
     /// How many places it was fastened: where it was put, and wherever else it met flush.
     places: usize,
+}
+
+/// What put a group together, made again as `remake` makes its wood: what each joint went
+/// onto, and the group that went on, as each was.
+fn remade_joins(remake: &mut Remake, joined: &[Joined]) -> Result<Vec<Joined>, Refusal> {
+    joined
+        .iter()
+        .map(|joined| {
+            let mut group = joined.group.clone();
+            if let Some(assembly) = remake.assembly(&group.assembly)? {
+                group.assembly = assembly;
+            }
+            group.joined = remade_joins(remake, &group.joined)?;
+            let before = remake.assembly(&joined.before)?;
+            Ok(Joined {
+                before: before.unwrap_or_else(|| joined.before.clone()),
+                group,
+                ..joined.clone()
+            })
+        })
+        .collect()
 }
 
 /// A surface of a part on the bench.
@@ -597,6 +618,97 @@ impl BenchStation {
         }
         self.note = None;
         Some(work)
+    }
+
+    /// Makes every part and glue-up on the bench again as `remake` makes its wood, keeping where
+    /// it lies, and what put it together, to take apart again, made again too, or forgotten if
+    /// it can't be. Changes nothing unless `apply`; returns how many it would change, or why it
+    /// can't.
+    pub fn remake(&mut self, remake: &mut Remake, apply: bool) -> Result<usize, Refusal> {
+        let mut changed = 0;
+        for index in 0..self.groups.len() {
+            let Some(assembly) = remake.assembly(&self.groups[index].assembly)? else {
+                continue;
+            };
+            changed += 1;
+            if !apply {
+                continue;
+            }
+            let joined = std::mem::take(&mut self.groups[index].joined);
+            let group = &mut self.groups[index];
+            group.assembly = assembly;
+            group.joined = remade_joins(remake, &joined).unwrap_or_default();
+            // Its surfaces may have moved, or gone.
+            if self.picked.is_some_and(|picked| picked.group == index)
+                || self
+                    .lining_up
+                    .is_some_and(|lining_up| lining_up.onto.group == index)
+            {
+                self.picked = None;
+                self.lining_up = None;
+            }
+            self.make_room(index);
+            self.note = None;
+        }
+        Ok(changed)
+    }
+
+    /// Takes the joints `joints` (by their places in its glue-up) of group `index` apart. The
+    /// biggest piece that leaves stays where it is, and the others are set down beside it, each
+    /// as near where it was as there's room. Its joints have set, so U no longer takes them
+    /// apart one by one. Returns false if there's no such joint.
+    pub fn take_apart_joints(&mut self, index: usize, joints: &[usize]) -> bool {
+        let Some(group) = self.groups.get(index) else {
+            return false;
+        };
+        let count = group.assembly.joints().len();
+        if joints.is_empty() || joints.iter().any(|&joint| joint >= count) {
+            return false;
+        }
+        let mut pieces = group.assembly.taken_apart(joints);
+        let biggest = (0..pieces.len())
+            .max_by_key(|&k| (pieces[k].members().len(), std::cmp::Reverse(k)))
+            .expect("at least one piece");
+        let stays = pieces.remove(biggest);
+        let (turn, at) = (group.turn, group.at);
+        let group = &mut self.groups[index];
+        group.assembly = stays;
+        group.joined.clear();
+        for piece in pieces {
+            let mut apart = Group {
+                assembly: piece,
+                turn,
+                at,
+                joined: Vec::new(),
+            };
+            let spot = self.free_spot(&apart, None);
+            apart.center_on(spot);
+            self.groups.push(apart);
+        }
+        self.picked = None;
+        self.lining_up = None;
+        self.note = None;
+        true
+    }
+
+    /// The joints the picked part has, by their places in its glue-up's.
+    pub fn picked_joints(&self) -> Vec<usize> {
+        let Some(picked) = self.picked else {
+            return Vec::new();
+        };
+        self.groups[picked.group]
+            .assembly
+            .joints()
+            .iter()
+            .enumerate()
+            .filter(|(_, joint)| {
+                joint
+                    .between
+                    .iter()
+                    .any(|&(member, _)| member == picked.member)
+            })
+            .map(|(index, _)| index)
+            .collect()
     }
 
     /// What to draw up plans for, lying as it lies on the bench: the glue-up (or loose part)

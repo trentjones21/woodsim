@@ -5,13 +5,15 @@
 //! board's length, width, and thickness, and an `Orientation` lays them on the saw. It can't
 //! stand on edge.
 
+use std::sync::Arc;
+
 use bevy::{
     math::{DQuat, DVec2, DVec3},
     prelude::*,
 };
 use woodsim::{
-    Assembly, Cut, CutError, GlueUpCut, GlueUpPass, Length, Lie, MiterSaw, Motion, Orientation,
-    Pass, Surface, TableSaw, Unsteady, Wood, outline, surfaces,
+    Assembly, Cut, CutError, GlueUpCut, GlueUpPass, Length, Lie, MiterSaw, Motion, Operation,
+    Orientation, Pass, Refusal, Remake, Surface, TableSaw, Unsteady, Wood, outline, surfaces,
 };
 
 use crate::{
@@ -85,6 +87,34 @@ pub fn chop(
         Workpiece::GlueUp(glue_up) => saw
             .chop_glue_up(glue_up, lie.rotation(), length, bottom)
             .map(Passed::of_glue_up),
+    }
+}
+
+/// `work` made again as `remake` makes it: `None` if it's as it was.
+pub fn remade(remake: &mut Remake, work: &Workpiece) -> Result<Option<Workpiece>, Refusal> {
+    Ok(match work {
+        Workpiece::Board(board) => remake.board(board)?.map(Workpiece::Board),
+        Workpiece::GlueUp(assembly) => remake.assembly(assembly)?.map(Workpiece::GlueUp),
+    })
+}
+
+/// The last pass that cut `work`: for a glue-up, the latest that cut any of its boards.
+pub fn last_pass(work: &Workpiece) -> Option<Arc<Operation>> {
+    match work {
+        Workpiece::Board(board) => board.origin().operations().pop(),
+        Workpiece::GlueUp(assembly) => assembly
+            .members()
+            .iter()
+            .filter_map(|member| member.board.origin().operations().pop())
+            .max_by_key(|operation| operation.number),
+    }
+}
+
+/// `assembly` as wood to carry: one board on its own, or a glue-up.
+pub fn workpiece(assembly: Assembly) -> Workpiece {
+    match assembly.members() {
+        [one] => Workpiece::Board(one.board.clone()),
+        _ => Workpiece::GlueUp(assembly),
     }
 }
 

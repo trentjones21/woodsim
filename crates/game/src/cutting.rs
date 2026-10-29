@@ -454,8 +454,14 @@ impl Cutting {
 
 /// The saw and how it's set for a pass, and how the wood lies on it, the way you'd set it up.
 fn settings(step: &CutStep) -> String {
-    let tool = step.operation.tool;
-    let lying = lying(step);
+    settings_of(&step.operation, step.inputs.first())
+}
+
+/// The saw and how it's set for `operation`, and how the wood lies on it: `cut`, the board it
+/// cut, if it went through one board on its own.
+pub fn settings_of(operation: &Operation, cut: Option<&Origin>) -> String {
+    let tool = operation.tool;
+    let lying = lying(tool, cut);
     match tool {
         Tool::TableSaw { saw, .. } => {
             let guide = match saw.miter_gauge {
@@ -503,8 +509,8 @@ fn settings(step: &CutStep) -> String {
 /// How the wood lay on the saw, if not flat the way it came: ", the board on edge", or, rested
 /// on a surface at an angle, ", the board resting on its beveled edge, its bottom face to the
 /// fence".
-fn lying(step: &CutStep) -> String {
-    let (lie, glue_up) = match step.operation.tool {
+fn lying(tool: Tool, cut: Option<&Origin>) -> String {
+    let (lie, glue_up) = match tool {
         Tool::TableSaw { lie, .. } | Tool::MiterSaw { lie, .. } => match lie {
             Lie::Board(lie) if lie.is_square() && lie.on_edge() => {
                 return ", the board on edge".to_string();
@@ -525,10 +531,7 @@ fn lying(step: &CutStep) -> String {
     };
     // What it rested on, from the wood it cut.
     let wood = match glue_up {
-        false => step
-            .inputs
-            .first()
-            .map(|board| Assembly::of(board.replay())),
+        false => cut.map(|board| Assembly::of(board.replay())),
         true => None,
     };
     match wood.as_ref().and_then(|wood| wood.rests_on(lie)) {
@@ -1064,7 +1067,7 @@ fn nibbles(first: Tool, then: Tool) -> bool {
 /// What a pass does to the wood: rips it, crosscuts it, resaws it, or cuts it to length. The
 /// table saw's blade stands square to whichever of a board's axes lies across the table:
 /// through its thickness it resaws, through its length it crosscuts.
-fn verb(tool: Tool) -> &'static str {
+pub fn verb(tool: Tool) -> &'static str {
     match tool {
         _ if is_resaw(tool) => "Resaw",
         Tool::TableSaw {

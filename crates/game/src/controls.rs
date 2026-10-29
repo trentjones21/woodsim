@@ -6,6 +6,7 @@ use bevy::{input::InputSystems, picking::PickingSystems, prelude::*};
 use woodsim::Fastener;
 
 use crate::{
+    edit::Knob,
     parts::{Entry, Fold, Where},
     shop::ShopView,
 };
@@ -102,6 +103,17 @@ pub enum Action {
     Fold(Fold),
     Duplicate(Entry),
     Stash(Where),
+    /// Changing how wood was made: open a pass from the tree to change it, step one of its
+    /// settings, make every piece it cut again that way, or leave it as it was; and take a
+    /// joint apart. At the bench, list how the picked part was made, or take it off the
+    /// glue-up it's in.
+    Edit(Entry),
+    Tweak(Knob, Step),
+    Remake,
+    StopEditing,
+    Unglue(Entry),
+    History,
+    Loosen,
     /// The list of every control here, and the inventory.
     Help,
     Inventory,
@@ -211,13 +223,15 @@ pub fn bound(view: ShopView, key: KeyCode, shift: bool) -> Option<Action> {
         (Bench, KeyU) => TakeApart,
         (Bench, Space) => PickUp,
         (Bench, KeyP) => Plans,
+        (Bench, KeyM) => History,
+        (Bench, KeyL) => Loosen,
         (Bench, KeyR) => Action::Studio,
         _ => return None,
     })
 }
 
 /// Every key some action is bound to, in the order they're named on buttons.
-const KEYS: [KeyCode; 39] = [
+const KEYS: [KeyCode; 40] = [
     KeyCode::KeyQ,
     KeyCode::KeyE,
     KeyCode::KeyF,
@@ -230,6 +244,7 @@ const KEYS: [KeyCode; 39] = [
     KeyCode::KeyP,
     KeyCode::KeyN,
     KeyCode::KeyM,
+    KeyCode::KeyL,
     KeyCode::KeyH,
     KeyCode::KeyI,
     KeyCode::KeyX,
@@ -299,6 +314,7 @@ fn key_name(key: KeyCode) -> (&'static str, Option<&'static str>) {
         KeyCode::KeyP => ("P", Some("P")),
         KeyCode::KeyN => ("N", Some("N")),
         KeyCode::KeyM => ("M", Some("M")),
+        KeyCode::KeyL => ("L", Some("L")),
         KeyCode::KeyH => ("H", Some("H")),
         KeyCode::KeyI => ("I", Some("I")),
         KeyCode::KeyX => ("X", Some("X")),

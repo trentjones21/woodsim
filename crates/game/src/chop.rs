@@ -9,10 +9,12 @@
 //! A board lies as its `Orientation` says: unturned, its length runs along the fence with its
 //! `l = length` end against the stop and its `w = width` edge against the fence.
 
-use std::f32::consts::FRAC_PI_2;
+use std::{f32::consts::FRAC_PI_2, sync::Arc};
 
 use bevy::prelude::*;
-use woodsim::{Angle, CutError, Length, MiterSaw, Orientation, Recipe, Surface, Tool};
+use woodsim::{
+    Angle, CutError, Length, MiterSaw, Orientation, Recipe, Refusal, Remake, Surface, Tool,
+};
 
 use crate::{
     blades::{self, Rim},
@@ -26,7 +28,7 @@ use crate::{
 pub const STOP_MIN: Length = Length::from_inch_fraction(1, 16);
 pub const STOP_MAX: Length = Length::from_inches(36);
 /// The highest the depth stop can hold the blade above the table.
-const DEPTH_STOP_MAX: Length = Length::from_inches(4);
+pub const DEPTH_STOP_MAX: Length = Length::from_inches(4);
 /// Where the saw's table clicks into place as it turns, either way from square.
 pub const MITER_STOPS: [Angle; 5] = [
     Angle::ZERO,
@@ -445,6 +447,73 @@ impl MiterSawStation {
                 .into_iter()
                 .filter_map(|part| Some((part, cut.take(part, self.lie)?)))
                 .collect(),
+        }
+    }
+
+    /// Makes the wood on the saw again as `remake` makes it: the board against the stop, or the
+    /// board a cut was made in and the cut again on it, made the new way if it's the pass being
+    /// changed. Changes nothing unless `apply`; returns whether anything would change, or why
+    /// it can't.
+    pub fn remake(&mut self, remake: &mut Remake, apply: bool) -> Result<bool, Refusal> {
+        let lie = self.lie;
+        match &mut self.work {
+            Work::Empty => Ok(false),
+            Work::Ready {
+                board,
+                missed,
+                scarred,
+            } => {
+                let Some(made) = work::remade(remake, board)? else {
+                    return Ok(false);
+                };
+                if apply {
+                    *board = made;
+                    *missed = None;
+                    *scarred = None;
+                }
+                Ok(true)
+            }
+            Work::Cut {
+                board, stop, cut, ..
+            } => {
+                // The pass that made the cut, from what it cut.
+                let Some(pass) = cut
+                    .take(Part::Piece, lie)
+                    .and_then(|piece| work::last_pass(&piece))
+                else {
+                    return Ok(false);
+                };
+                let here = Arc::ptr_eq(&pass, remake.pass());
+                let made = work::remade(remake, board)?;
+                if made.is_none() && !here {
+                    return Ok(false);
+                }
+                let tool = if here { remake.tool() } else { pass.tool };
+                let Tool::MiterSaw {
+                    saw,
+                    length,
+                    bottom,
+                    ..
+                } = tool
+                else {
+                    return Ok(false);
+                };
+                let made = made.unwrap_or_else(|| board.clone());
+                match work::chop(&saw, &made, lie, length, bottom) {
+                    Ok(Passed::Cut(again)) => {
+                        if apply {
+                            *board = made;
+                            *stop = length;
+                            *cut = again;
+                        }
+                        Ok(true)
+                    }
+                    _ => Err(Refusal::Pass(
+                        pass.number,
+                        "the cut on the miter saw doesn't cut it apart".to_string(),
+                    )),
+                }
+            }
         }
     }
 
