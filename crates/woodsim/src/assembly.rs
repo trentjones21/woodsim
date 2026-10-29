@@ -8,7 +8,7 @@ use crate::{
     Angle, Board, Length, Orientation,
     exposed::{exposed, slot_shapes},
     face::Edge,
-    history::{Copies, next_number},
+    history::{self, Copies, next_number},
 };
 
 /// Why something can't rest on a saw the way it was asked to (`Assembly::resting`).
@@ -266,34 +266,10 @@ impl Assembly {
     /// this one's boards came from, and every pass and joint is numbered after everything so
     /// far, in the order they were, joints fastened at once still sharing a number.
     pub fn duplicate(&self) -> Assembly {
-        let passes = self
-            .members
-            .iter()
-            .flat_map(|member| member.board.origin().operations())
-            .map(|operation| operation.number);
+        let origins = self.members.iter().map(|member| member.board.origin());
         let joints = self.joints.iter().map(|joint| joint.number);
-        let mut copies = Copies::numbering(passes.chain(joints));
-        Assembly {
-            members: self
-                .members
-                .iter()
-                .map(|member| Member {
-                    board: member
-                        .board
-                        .clone()
-                        .with_origin(copies.origin(member.board.origin())),
-                    ..*member
-                })
-                .collect(),
-            joints: self
-                .joints
-                .iter()
-                .map(|joint| Joint {
-                    number: copies.number(joint.number),
-                    ..*joint
-                })
-                .collect(),
-        }
+        let mut copies = Copies::numbering(history::numbers(origins).into_iter().chain(joints));
+        copies.assembly(self)
     }
 
     /// The assembly, moved as a whole.
@@ -534,17 +510,16 @@ impl Assembly {
             })
             .collect();
         let mut group_of: Vec<usize> = (0..self.members.len()).collect();
-        let mut numbers: Vec<u64> = self.joints.iter().map(|joint| joint.number).collect();
-        numbers.sort_unstable();
-        numbers.dedup();
-        for number in numbers {
-            // The joint that brought two groups together: the first that still does.
-            let Some(joint) = self.joints.iter().find(|joint| {
-                joint.number == number
-                    && group_of[joint.between[0].0] != group_of[joint.between[1].0]
-            }) else {
+        // In the order they were made; joints fastened at once, as listed.
+        let mut joints: Vec<&Joint> = self.joints.iter().collect();
+        joints.sort_by_key(|joint| joint.number);
+        for joint in joints {
+            // Each joint that brought two groups together: a cut can leave one joint as several,
+            // between its pieces, and fastening one fastens any others that then meet flush.
+            if group_of[joint.between[0].0] == group_of[joint.between[1].0] {
                 continue;
-            };
+            }
+            let number = joint.number;
             let [(i, was_i), (j, was_j)] = joint.between;
             let (a, b) = (group_of[i], group_of[j]);
             let (members_a, built_a) = groups[a].take().expect("a group");

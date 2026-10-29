@@ -9,7 +9,7 @@
 //! equal however they were made.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fmt,
     sync::{
         Arc,
@@ -18,7 +18,8 @@ use std::{
 };
 
 use crate::{
-    Board, Jointer, Kerf, Length, MiterSaw, Orientation, Piece, Planer, Rotation, TableSaw,
+    Assembly, Board, Joint, Jointer, Kerf, Length, Member, MiterSaw, Orientation, Piece, Planer,
+    Rotation, TableSaw,
 };
 
 static NEXT: AtomicU64 = AtomicU64::new(1);
@@ -85,11 +86,16 @@ pub enum Part {
     Piece(usize),
 }
 
-/// A pass of a saw: when it happened, the saw as it was set, and how the wood went through it.
+/// A pass of a saw: when it happened, the saw as it was set, how the wood went through it, and
+/// the wood it went through, so it can be made again another way (`Remake`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Operation {
     pub number: u64,
     pub tool: Tool,
+    /// What was on the saw, as a glue-up (a board on its own is a glue-up of one), which `tool`
+    /// lays on it. `None` only for a pass through a glue-up read from a recipe written before
+    /// passes kept it.
+    pub wood: Option<Assembly>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -134,12 +140,35 @@ pub enum Lie {
     GlueUp(Rotation),
 }
 
+impl Tool {
+    /// How the wood lay on it.
+    pub fn lie(&self) -> Lie {
+        match *self {
+            Tool::TableSaw { lie, .. }
+            | Tool::MiterSaw { lie, .. }
+            | Tool::Jointer { lie, .. }
+            | Tool::Planer { lie, .. } => lie,
+        }
+    }
+}
+
+impl Lie {
+    /// How it turns the wood's axes onto the saw's.
+    pub fn rotation(self) -> Rotation {
+        match self {
+            Lie::Board(lie) => lie.rotation(),
+            Lie::GlueUp(rotation) => rotation,
+        }
+    }
+}
+
 impl Operation {
-    /// A pass of `tool`, numbered now.
-    pub(crate) fn new(tool: Tool) -> Arc<Operation> {
+    /// A pass of `tool` through `wood`, numbered now.
+    pub(crate) fn new(tool: Tool, wood: Assembly) -> Arc<Operation> {
         Arc::new(Operation {
             number: next_number(),
             tool,
+            wood: Some(wood),
         })
     }
 }
@@ -350,6 +379,31 @@ impl Copies {
         copy
     }
 
+    /// The copy of `assembly`: its boards' copies where they were, and its joints numbered
+    /// anew.
+    pub(crate) fn assembly(&mut self, assembly: &Assembly) -> Assembly {
+        let members = assembly
+            .members()
+            .iter()
+            .map(|member| Member {
+                board: member
+                    .board
+                    .clone()
+                    .with_origin(self.origin(member.board.origin())),
+                ..*member
+            })
+            .collect();
+        let joints = assembly
+            .joints()
+            .iter()
+            .map(|joint| Joint {
+                number: self.number(joint.number),
+                ..*joint
+            })
+            .collect();
+        Assembly::from_parts(members, joints)
+    }
+
     fn operation(&mut self, operation: &Arc<Operation>) -> Arc<Operation> {
         if let Some((_, copy)) = self
             .operations
@@ -358,14 +412,57 @@ impl Copies {
         {
             return Arc::clone(copy);
         }
+        let wood = operation.wood.as_ref().map(|wood| self.assembly(wood));
         let copy = Arc::new(Operation {
             number: self.number(operation.number),
             tool: operation.tool,
+            wood,
         });
         self.operations
             .push((Arc::clone(operation), Arc::clone(&copy)));
         copy
     }
+}
+
+/// The number of every pass and joint in the histories of `origins`: the passes that cut them,
+/// and every pass and joint in the histories of the wood those passes went through, as a
+/// glue-up's other boards and the joints that held them.
+pub(crate) fn numbers<'a>(origins: impl IntoIterator<Item = &'a Origin>) -> Vec<u64> {
+    #[derive(Default)]
+    struct Walk {
+        origins: HashSet<*const Source>,
+        operations: HashSet<*const Operation>,
+        numbers: Vec<u64>,
+    }
+    impl Walk {
+        fn origin(&mut self, origin: &Origin) {
+            if !self.origins.insert(Arc::as_ptr(&origin.0)) {
+                return;
+            }
+            let Source::Sawn {
+                operation, from, ..
+            } = origin.source()
+            else {
+                return;
+            };
+            if self.operations.insert(Arc::as_ptr(operation)) {
+                self.numbers.push(operation.number);
+                if let Some(wood) = &operation.wood {
+                    let joints = wood.joints().iter().map(|joint| joint.number);
+                    self.numbers.extend(joints);
+                    for member in wood.members() {
+                        self.origin(member.board.origin());
+                    }
+                }
+            }
+            self.origin(from);
+        }
+    }
+    let mut walk = Walk::default();
+    for origin in origins {
+        walk.origin(origin);
+    }
+    walk.numbers
 }
 
 /// Says where it came from in a line, back to the stock: "piece 1 of pass #12, from new 3/4" x

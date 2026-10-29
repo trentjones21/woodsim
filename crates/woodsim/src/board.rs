@@ -8,7 +8,7 @@ use crate::{
     Angle, Axis, Kerf, Length, Surface,
     assembly::surfaces,
     face::{Direction, Edge, Region, Vector, merge_all},
-    history::{Copies, Operation, Origin, Part, Side},
+    history::{self, Copies, Operation, Origin, Part, Side},
     kerf::{self, Opening},
     solid::{self, hull, line_crosses},
 };
@@ -127,8 +127,7 @@ impl Board {
     /// one, but its stock and every pass that cut it are its own, numbered after everything so
     /// far, so plans buy it and cut it again.
     pub fn duplicate(&self) -> Board {
-        let operations = self.origin.operations();
-        let mut copies = Copies::numbering(operations.iter().map(|operation| operation.number));
+        let mut copies = Copies::numbering(history::numbers([&self.origin]));
         self.clone().with_origin(copies.origin(&self.origin))
     }
 

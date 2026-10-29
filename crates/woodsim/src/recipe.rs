@@ -1,42 +1,48 @@
 //! A piece of wood written out as text and read back exactly (`Recipe`): a board or a glue-up,
 //! and how a saw was set for it, to the nanometer. Every board is written as where it came
 //! from, the new lumber it started as and each saw pass that cut it, with the saw's every
-//! setting and the exact slot it cut, so reading it back cuts it again (as `Origin::replay`
-//! does) and keeps its history, down to which boards shared a cut. A glue-up adds where each of
-//! its boards is and how it's turned, and its joints.
+//! setting, what was on the saw, and the exact slot it cut, so reading it back cuts it again (as
+//! `Origin::replay` does) and keeps its history, down to which boards shared a cut, and each
+//! pass can be made again another way (`Remake`). A glue-up adds where each of its boards is and
+//! how it's turned, and its joints.
 //!
 //! One thing to a line, a word and then whole numbers, and `#` starts a comment. Lengths are in
 //! nanometers, angles in hundredths of a degree, and turns are their nine whole numbers over
 //! 2^40, by column:
 //!
 //! ```text
-//! version 1
+//! version 2
 //! stock s0 609600000 63500000 19050000
 //! pass p0 7 table-saw 254000000 3175000 25400000 25400000 none 0 1500 board 1099511627776 0 0 0 1099511627776 0 0 0 1099511627776 -127000000 736600000
 //! sawn s1 s0 p0 0 -16777216 4495441 ... piece 0 0 0 0 measured
 //! board s1
 //! ```
 //!
-//! `version` comes first: which way of writing wood this is (`Recipe::VERSION`). A recipe
-//! with no `version` line is from before there was one, and reads as version 1; one from a
-//! newer woodsim than this doesn't read. `stock` names new lumber: its length, width, and thickness. `pass` names a saw pass: its
-//! number, then the saw (`table-saw`: blade diameter and kerf, fence, height, the miter gauge's
-//! stop or `none`, its angle, and the tilt; `miter-saw`: blade diameter and kerf, miter, the
-//! furthest it turns, the pivot behind the fence and up, the arm, and the stroke's top and
-//! bottom; `jointer`: the cutterhead's diameter, the knives' length, the depth of cut, the
-//! fence from the knives' end, and its tilt; `planer`: the cutterhead's diameter, the knives'
-//! length, the thinnest and thickest it goes, the most it takes a pass, and the thickness it's
-//! set to), how the wood lay (`board` or `glue-up`, and the
-//! turn), and how far the pass went (the table saw's, the jointer's, and the planer's travel from and to; the
-//! miter saw's length from the stop, and how low the blade came). `sawn` names a board a pass cut from another: which board, which pass, the slot
-//! (its faces' normal, its near and far faces, the way it traveled, the blade's radius, the
-//! path's height, and its start and end), which part it is (`whole`, or `piece` and which),
-//! where its corner was on the board it was cut from, and which side of the cut it was on.
-//! Then either `board`, the piece itself, or a `member` line for each board of a glue-up (which
-//! board, where its corner is, and its turn) and a `joint` line for each joint (each member and
-//! its surface, `top`, `bottom`, `side` and the side's edge, or `slot` and the plane of a
-//! slot's side or bottom, then the fastener and when it was fastened). A `saw` line, the saw and how what's on it lies, as a pass has them, says
-//! how it's set up now.
+//! `version` comes first: which way of writing wood this is (`Recipe::VERSION`). A recipe with no
+//! `version` line is from before there was one, and reads as version 1; one from a newer woodsim
+//! than this doesn't read. Version 1 didn't say what was on the saw for a pass through a glue-up,
+//! so such a pass read from one can't be made again. `stock` names new lumber: its length, width,
+//! and thickness. `pass` names a saw pass: its number, then the saw (`table-saw`: blade diameter
+//! and kerf, fence, height, the miter gauge's stop or `none`, its angle, and the tilt; `miter-saw`:
+//! blade diameter and kerf, miter, the furthest it turns, the pivot behind the fence and up, the
+//! arm, and the stroke's top and bottom; `jointer`: the cutterhead's diameter, the knives' length,
+//! the depth of cut, the fence from the knives' end, and its tilt; `planer`: the cutterhead's
+//! diameter, the knives' length, the thinnest and thickest it goes, the most it takes a pass, and
+//! the thickness it's set to), how the wood lay (`board` or `glue-up`, and the turn), and how far
+//! the pass went (the table saw's, the jointer's, and the planer's travel from and to; the miter
+//! saw's length from the stop, and how low the blade came). After a pass through a glue-up, an `on`
+//! line for each board that was on the saw (the pass, then as a `member` line has it) and an
+//! `on-joint` line for each of its joints (the pass, then as a `joint` line has it) say what the
+//! glue-up was; a pass through a board on its own went through the board the first `sawn` line
+//! naming it cut. `sawn` names a board a pass cut from another: which board, which pass, the slot
+//! (its faces' normal, its near and far faces, the way it traveled, the blade's radius, the path's
+//! height, and its start and end), which part it is (`whole`, or `piece` and which), where its
+//! corner was on the board it was cut from, and which side of the cut it was on. Then either
+//! `board`, the piece itself, or a `member` line for each board of a glue-up (which board, where
+//! its corner is, and its turn) and a `joint` line for each joint (each member and its surface,
+//! `top`, `bottom`, `side` and the side's edge, or `slot` and the plane of a slot's side or bottom,
+//! then the fastener and when it was fastened). A `saw` line, the saw and how what's on it lies, as
+//! a pass has them, says how it's set up now.
 
 use std::{collections::HashMap, fmt::Write, sync::Arc};
 
@@ -66,7 +72,7 @@ impl Recipe {
     /// (saved parts, plans put online), so bump it whenever one already written would read
     /// back differently, as a change to which piece a `sawn` line's number picks out of what
     /// `Board::pieces` leaves would, and keep reading the versions before it.
-    pub const VERSION: u32 = 1;
+    pub const VERSION: u32 = 2;
 
     /// The recipe as text, every board's history written once and shared as it's shared.
     pub fn write(&self) -> String {
@@ -78,24 +84,11 @@ impl Recipe {
                 writer.line(format!("board {id}"));
             }
             Wood::GlueUp(glue_up) => {
-                for member in glue_up.members() {
-                    let id = writer.origin(member.board.origin());
-                    let [x, y, z] = member.at.map(nm);
-                    writer.line(format!("member {id} {x} {y} {z} {}", turn(member.rotation)));
+                for member in writer.members(glue_up) {
+                    writer.line(format!("member {member}"));
                 }
                 for joint in glue_up.joints() {
-                    let [(a, sa), (b, sb)] = joint.between;
-                    let fastener = match joint.fastener {
-                        Fastener::Glue => "glue",
-                        Fastener::Brads => "brads",
-                        Fastener::Screws => "screws",
-                    };
-                    writer.line(format!(
-                        "joint {a} {} {b} {} {fastener} {}",
-                        surface(sa),
-                        surface(sb),
-                        joint.number
-                    ));
+                    writer.line(format!("joint {}", joint_words(joint)));
                 }
             }
         }
@@ -143,6 +136,22 @@ fn turn(rotation: Rotation) -> String {
         .map(|v| v.to_string())
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// A joint's members and their surfaces, its fastener, and its number, as words.
+fn joint_words(joint: &Joint) -> String {
+    let [(a, sa), (b, sb)] = joint.between;
+    let fastener = match joint.fastener {
+        Fastener::Glue => "glue",
+        Fastener::Brads => "brads",
+        Fastener::Screws => "screws",
+    };
+    format!(
+        "{a} {} {b} {} {fastener} {}",
+        surface(sa),
+        surface(sb),
+        joint.number
+    )
 }
 
 fn surface(surface: Surface) -> String {
@@ -302,7 +311,9 @@ impl Writer {
         id
     }
 
-    /// The name of `operation`, written out if it's new here.
+    /// The name of `operation`, written out if it's new here. Through a glue-up, `on` and
+    /// `on-joint` lines after it say what was on the saw; a board on its own was the board a
+    /// piece it cut was cut from.
     fn pass(&mut self, operation: &Arc<Operation>) -> String {
         if let Some((_, id)) = self
             .passes
@@ -311,14 +322,40 @@ impl Writer {
         {
             return id.clone();
         }
+        let wood = match (operation.tool.lie(), &operation.wood) {
+            (Lie::GlueUp(_), Some(wood)) => Some((self.members(wood), wood.joints())),
+            _ => None,
+        };
         let id = format!("p{}", self.passes.len());
         self.line(format!(
             "pass {id} {} {}",
             operation.number,
             tool_words(&operation.tool)
         ));
+        if let Some((members, joints)) = wood {
+            for member in members {
+                self.line(format!("on {id} {member}"));
+            }
+            for joint in joints {
+                self.line(format!("on-joint {id} {}", joint_words(joint)));
+            }
+        }
         self.passes.push((Arc::clone(operation), id.clone()));
         id
+    }
+
+    /// Each of `glue_up`'s members as words: which board, where its corner is, and its turn,
+    /// every board's history written out first.
+    fn members(&mut self, glue_up: &Assembly) -> Vec<String> {
+        glue_up
+            .members()
+            .iter()
+            .map(|member| {
+                let id = self.origin(member.board.origin());
+                let [x, y, z] = member.at.map(nm);
+                format!("{id} {x} {y} {z} {}", turn(member.rotation))
+            })
+            .collect()
     }
 }
 
@@ -355,12 +392,23 @@ fn kerf_words(kerf: &Kerf) -> String {
 struct Reader {
     /// Whether any line's been read, since a `version` line has to come before them all.
     started: bool,
-    origins: HashMap<String, Origin>,
-    passes: HashMap<String, Arc<Operation>>,
+    /// Each board named, cut again as it was cut.
+    boards: HashMap<String, Board>,
+    passes: HashMap<String, Pass>,
     board: Option<Board>,
     members: Vec<Member>,
     joints: Vec<Joint>,
     saw: Option<Tool>,
+}
+
+/// A pass named, what was on the saw for it as far as it's been read, and the pass, once it's
+/// cut a board.
+struct Pass {
+    number: u64,
+    tool: Tool,
+    members: Vec<Member>,
+    joints: Vec<Joint>,
+    made: Option<Arc<Operation>>,
 }
 
 /// The words of a line, read one at a time.
@@ -423,6 +471,40 @@ impl<'a> Words<'a> {
             "side" => Surface::Side(self.plane()?),
             "slot" => Surface::Slot(self.plane()?),
             other => return Err(format!("`{other}` isn't a surface")),
+        })
+    }
+
+    /// A board named before this, where its corner is, and its turn.
+    fn member(&mut self, boards: &HashMap<String, Board>) -> Result<Member, String> {
+        let id = self.word()?;
+        let board = boards
+            .get(id)
+            .cloned()
+            .ok_or_else(|| format!("no board `{id}` before this"))?;
+        let at = [self.length()?, self.length()?, self.length()?];
+        Ok(Member {
+            board,
+            rotation: self.turn()?,
+            at,
+        })
+    }
+
+    /// A joint, and notes its number as used.
+    fn joint(&mut self) -> Result<Joint, String> {
+        let a = (self.number()?, self.surface()?);
+        let b = (self.number()?, self.surface()?);
+        let fastener = match self.word()? {
+            "glue" => Fastener::Glue,
+            "brads" => Fastener::Brads,
+            "screws" => Fastener::Screws,
+            other => return Err(format!("`{other}` isn't a fastener")),
+        };
+        let number = self.number()?;
+        number_used(number);
+        Ok(Joint {
+            between: [a, b],
+            fastener,
+            number,
         })
     }
 
@@ -516,11 +598,50 @@ impl<'a> Words<'a> {
 }
 
 impl Reader {
-    fn origin(&self, id: &str) -> Result<Origin, String> {
-        self.origins
+    fn board(&self, id: &str) -> Result<&Board, String> {
+        self.boards
             .get(id)
-            .cloned()
             .ok_or_else(|| format!("no board `{id}` before this"))
+    }
+
+    /// The pass named `id`, made once it's cut `from`: through what the `on` and `on-joint`
+    /// lines after it said was on the saw, or a board on its own, `from` itself. A pass through
+    /// a glue-up with none, written before passes kept what they went through, doesn't know.
+    fn operation(&mut self, id: &str, from: &Board) -> Result<Arc<Operation>, String> {
+        let pass = self
+            .passes
+            .get_mut(id)
+            .ok_or_else(|| format!("no pass `{id}` before this"))?;
+        let operation = pass.made.get_or_insert_with(|| {
+            let wood = match pass.tool.lie() {
+                _ if !pass.members.is_empty() => Some(Assembly::from_parts(
+                    std::mem::take(&mut pass.members),
+                    std::mem::take(&mut pass.joints),
+                )),
+                Lie::Board(_) => Some(Assembly::of(from.clone())),
+                Lie::GlueUp(_) => None,
+            };
+            Arc::new(Operation {
+                number: pass.number,
+                tool: pass.tool,
+                wood,
+            })
+        });
+        Ok(Arc::clone(operation))
+    }
+
+    /// What's been read of what was on the saw for the pass named `id`.
+    fn on(&mut self, id: &str) -> Result<(&mut Vec<Member>, &mut Vec<Joint>), String> {
+        match self.passes.get_mut(id) {
+            Some(Pass {
+                members,
+                joints,
+                made: None,
+                ..
+            }) => Ok((members, joints)),
+            Some(_) => Err(format!("pass `{id}` has already cut a board")),
+            None => Err(format!("no pass `{id}` before this")),
+        }
     }
 
     fn line(&mut self, line: &str) -> Result<(), String> {
@@ -545,27 +666,40 @@ impl Reader {
             }
             "stock" => {
                 let id = words.word()?.to_string();
-                let origin = Origin::new_stock(words.length()?, words.length()?, words.length()?);
-                self.origins.insert(id, origin);
+                let sizes = [words.length()?, words.length()?, words.length()?];
+                if sizes.iter().any(|&size| size <= Length::ZERO) {
+                    return Err("new lumber has to be some size every way".to_string());
+                }
+                let [length, width, thickness] = sizes;
+                self.boards.insert(id, Board::new(length, width, thickness));
             }
             "pass" => {
                 let id = words.word()?.to_string();
-                let operation = Operation {
-                    number: words.number()?,
+                let number = words.number()?;
+                number_used(number);
+                let pass = Pass {
+                    number,
                     tool: words.tool()?,
+                    members: Vec::new(),
+                    joints: Vec::new(),
+                    made: None,
                 };
-                number_used(operation.number);
-                self.passes.insert(id, Arc::new(operation));
+                self.passes.insert(id, pass);
+            }
+            "on" => {
+                let pass = words.word()?;
+                let member = words.member(&self.boards)?;
+                self.on(pass)?.0.push(member);
+            }
+            "on-joint" => {
+                let pass = words.word()?;
+                let joint = words.joint()?;
+                self.on(pass)?.1.push(joint);
             }
             "sawn" => {
                 let id = words.word()?.to_string();
-                let from = self.origin(words.word()?)?;
-                let pass = words.word()?;
-                let operation = self
-                    .passes
-                    .get(pass)
-                    .cloned()
-                    .ok_or_else(|| format!("no pass `{pass}` before this"))?;
+                let from = self.board(words.word()?)?.clone();
+                let operation = self.operation(words.word()?, &from)?;
                 let kerf = Kerf {
                     normal: words.vector()?,
                     near: words.length()?,
@@ -589,39 +723,24 @@ impl Reader {
                     "loose" => Side::Loose,
                     other => return Err(format!("`{other}` isn't a side")),
                 };
-                let origin = Origin::sawn(&operation, &from, kerf, part, at, side);
-                self.origins.insert(id, origin);
-            }
-            "board" => {
-                let origin = self.origin(words.word()?)?;
-                self.board = Some(origin.replay().with_origin(origin));
-            }
-            "member" => {
-                let origin = self.origin(words.word()?)?;
-                let at = [words.length()?, words.length()?, words.length()?];
-                self.members.push(Member {
-                    board: origin.replay().with_origin(origin),
-                    rotation: words.turn()?,
-                    at,
-                });
-            }
-            "joint" => {
-                let a = (words.number()?, words.surface()?);
-                let b = (words.number()?, words.surface()?);
-                let fastener = match words.word()? {
-                    "glue" => Fastener::Glue,
-                    "brads" => Fastener::Brads,
-                    "screws" => Fastener::Screws,
-                    other => return Err(format!("`{other}` isn't a fastener")),
+                let origin = Origin::sawn(&operation, from.origin(), kerf, part, at, side);
+                // Cut again from the board it was cut from, as `Origin::replay` would.
+                let kerfed = from.with_kerf(kerf);
+                let board = match part {
+                    Part::Whole => kerfed,
+                    Part::Piece(n) => {
+                        let mut pieces = kerfed.pieces();
+                        if n >= pieces.len() {
+                            return Err(format!("the cut leaves only {} pieces", pieces.len()));
+                        }
+                        pieces.swap_remove(n).board
+                    }
                 };
-                let number = words.number()?;
-                number_used(number);
-                self.joints.push(Joint {
-                    between: [a, b],
-                    fastener,
-                    number,
-                });
+                self.boards.insert(id, board.with_origin(origin));
             }
+            "board" => self.board = Some(self.board(words.word()?)?.clone()),
+            "member" => self.members.push(words.member(&self.boards)?),
+            "joint" => self.joints.push(words.joint()?),
             "saw" => self.saw = Some(words.tool()?),
             other => return Err(format!("`{other}` isn't something a recipe has")),
         }

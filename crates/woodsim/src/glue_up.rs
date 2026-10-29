@@ -6,6 +6,8 @@
 //! boards that were fastened together still meet flush, and it comes apart into whatever no
 //! longer holds together.
 
+use std::sync::Arc;
+
 use crate::{
     Assembly, Board, CutError, Direction, Length, Rotation, Vector,
     assembly::{Joint, Member},
@@ -35,6 +37,30 @@ pub struct GlueUpCut {
     pub piece: Assembly,
     pub offcut: Option<Assembly>,
     pub loose: Vec<Assembly>,
+}
+
+impl GlueUpPass {
+    /// What it left: the glue-up with a slot in it, or the piece, the offcut, and anything
+    /// loose, in that order.
+    pub(crate) fn parts(&self) -> Vec<&Assembly> {
+        match self {
+            GlueUpPass::Missed => Vec::new(),
+            GlueUpPass::Kerfed(glue_up) => vec![glue_up],
+            GlueUpPass::Cut(cut) => std::iter::once(&cut.piece)
+                .chain(&cut.offcut)
+                .chain(&cut.loose)
+                .collect(),
+        }
+    }
+}
+
+/// A pass, the operation it was, and where what it left came from: for each of its `parts`,
+/// which member of what was on the saw each of that part's members was cut from (or is, if the
+/// blade missed it).
+pub(crate) struct Traced {
+    pub pass: GlueUpPass,
+    pub operation: Arc<Operation>,
+    pub from: Vec<Vec<usize>>,
 }
 
 /// Where a saw's blade swept, in the saw's frame: `x` along the table (or the fence), `y`
@@ -201,8 +227,13 @@ impl<'a> Laid<'a> {
     /// Runs the blade along `sweep` through every board, and sorts out what's left: none of it,
     /// if the blade took all the wood there was.
     pub(crate) fn cut(&self, sweep: &Sweep) -> Result<GlueUpPass, CutError> {
+        Ok(self.traced(sweep)?.pass)
+    }
+
+    /// The same, saying which board on the saw each board it left came from.
+    pub(crate) fn traced(&self, sweep: &Sweep) -> Result<Traced, CutError> {
         // One pass, through every board it touches.
-        let operation = Operation::new(sweep.tool);
+        let operation = Operation::new(sweep.tool, self.glue_up.clone());
         let mut members = Vec::new();
         // Which of the glue-up's boards each new member came from.
         let mut from = Vec::new();
@@ -229,7 +260,11 @@ impl<'a> Laid<'a> {
             }
         }
         if !touched {
-            return Ok(GlueUpPass::Missed);
+            return Ok(Traced {
+                pass: GlueUpPass::Missed,
+                operation,
+                from: Vec::new(),
+            });
         }
 
         // Pieces of boards that were fastened together still are wherever they meet flush,
@@ -254,13 +289,21 @@ impl<'a> Laid<'a> {
             })
             .collect();
 
-        let mut parts = held_together(pieces.members(), &joints);
-        if parts.len() == 1 && !shaped {
-            return Ok(GlueUpPass::Kerfed(parts.remove(0)));
-        }
-        let (mut near, mut far): (Vec<Assembly>, Vec<Assembly>) = parts
+        let mut parts: Vec<(Assembly, Vec<usize>)> = held_together(pieces.members(), &joints)
             .into_iter()
-            .partition(|part| self.ahead(part, sweep) == sweep.measured_ahead);
+            .map(|(part, members)| (part, members.into_iter().map(|k| from[k]).collect()))
+            .collect();
+        if parts.len() == 1 && !shaped {
+            let (part, from) = parts.remove(0);
+            return Ok(Traced {
+                pass: GlueUpPass::Kerfed(part),
+                operation,
+                from: vec![from],
+            });
+        }
+        let (mut near, mut far): (Vec<_>, Vec<_>) = parts
+            .into_iter()
+            .partition(|(part, _)| self.ahead(part, sweep) == sweep.measured_ahead);
         // With no wood on the measured side, the piece is what's left on the other.
         let side = if near.is_empty() {
             std::mem::swap(&mut near, &mut far);
@@ -268,17 +311,24 @@ impl<'a> Laid<'a> {
         } else {
             Side::Measured
         };
-        let piece = self.take_biggest(&mut near).ok_or(CutError::AllSawdust)?;
+        let (piece, piece_from) = self.take_biggest(&mut near).ok_or(CutError::AllSawdust)?;
         let offcut = self.take_biggest(&mut far);
         near.append(&mut far);
+        let mut from = vec![piece_from];
+        from.extend(offcut.iter().map(|(_, from)| from.clone()));
+        from.extend(near.iter().map(|(_, from)| from.clone()));
         // Each board the blade cut is on the side of the cut its part of the glue-up is.
         let piece = on_side(piece, side);
-        let offcut = offcut.map(|offcut| on_side(offcut, Side::Offcut));
-        Ok(GlueUpPass::Cut(GlueUpCut {
-            piece,
-            offcut,
-            loose: near,
-        }))
+        let offcut = offcut.map(|(offcut, _)| on_side(offcut, Side::Offcut));
+        Ok(Traced {
+            pass: GlueUpPass::Cut(GlueUpCut {
+                piece,
+                offcut,
+                loose: near.into_iter().map(|(part, _)| part).collect(),
+            }),
+            operation,
+            from,
+        })
     }
 
     /// How far its wood reaches `toward` (a unit vector in the saw's axes), in nanometers from
@@ -332,14 +382,15 @@ impl<'a> Laid<'a> {
     }
 
     /// Removes and returns the biggest part, the one reaching nearest the fence among equals.
-    fn take_biggest(&self, parts: &mut Vec<Assembly>) -> Option<Assembly> {
+    fn take_biggest<T>(&self, parts: &mut Vec<(Assembly, T)>) -> Option<(Assembly, T)> {
         let toward_fence = |part: &Assembly| {
             self.on_saw(part)
                 .map(|point| point[1].round() as i64)
                 .max()
                 .unwrap_or(i64::MIN)
         };
-        let index = (0..parts.len()).max_by_key(|&k| (size(&parts[k]), toward_fence(&parts[k])))?;
+        let index =
+            (0..parts.len()).max_by_key(|&k| (size(&parts[k].0), toward_fence(&parts[k].0)))?;
         Some(parts.remove(index))
     }
 }
@@ -398,8 +449,8 @@ fn corners(member: &Member) -> Vec<[f64; 3]> {
 }
 
 /// `members` sorted into the assemblies that `joints` hold together, each in the order its
-/// members came.
-fn held_together(members: &[Member], joints: &[Joint]) -> Vec<Assembly> {
+/// members came, with which of `members` they are.
+fn held_together(members: &[Member], joints: &[Joint]) -> Vec<(Assembly, Vec<usize>)> {
     let mut group: Vec<usize> = (0..members.len()).collect();
     fn root(group: &mut [usize], mut k: usize) -> usize {
         while group[k] != k {
@@ -432,10 +483,11 @@ fn held_together(members: &[Member], joints: &[Joint]) -> Vec<Assembly> {
                     })
                 })
                 .collect();
-            Assembly::from_parts(
+            let part = Assembly::from_parts(
                 indices.iter().map(|&k| members[k].clone()).collect(),
                 joints,
-            )
+            );
+            (part, indices)
         })
         .collect()
 }

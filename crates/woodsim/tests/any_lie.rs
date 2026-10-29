@@ -2,12 +2,16 @@
 //! either saw, the jointer, or the planer (on edge, on end, upside down), cut with the blade at
 //! any angle and tilt, or the jointer's fence at any tilt, stopped or all the way through, keeps
 //! exactly the wood the blade didn't take, in exactly one piece, and every piece replays from
-//! its stock.
+//! its stock. Made again just as it was, from the wood it kept (`Remake`), the pass leaves just
+//! what it left.
+
+use std::sync::Arc;
 
 use proptest::prelude::*;
 use woodsim::{
     Angle, Assembly, Blade, Board, CutError, Fastener, GlueUpPass, Jointer, Kerf, Length, Mating,
-    Member, MiterSaw, Orientation, Planer, Rotation, Source, Surface, TableSaw, surfaces,
+    Member, MiterSaw, Operation, Orientation, Planer, Remake, Rotation, Side, Source, Surface,
+    TableSaw, Tool, surfaces,
 };
 
 fn inches(n: i64) -> Length {
@@ -270,11 +274,115 @@ fn holds_its_wood(before: &Assembly, pass: &GlueUpPass) -> Result<(), TestCaseEr
     Ok(())
 }
 
-/// Checks a pass's result: anything it left holds the wood, and it only refuses a cut the saw
-/// can't make, never a way of lying.
+/// The parts a pass left.
+fn parts(pass: &GlueUpPass) -> Vec<&Assembly> {
+    match pass {
+        GlueUpPass::Missed => Vec::new(),
+        GlueUpPass::Kerfed(after) => vec![after],
+        GlueUpPass::Cut(cut) => std::iter::once(&cut.piece)
+            .chain(&cut.offcut)
+            .chain(&cut.loose)
+            .collect(),
+    }
+}
+
+/// The pass that cut `before`: the one after everything it went through, unless it turned what
+/// it cut all to chips.
+fn operation(before: &Assembly, pass: &GlueUpPass) -> Option<Arc<Operation>> {
+    let latest = |members: &[Member]| {
+        members
+            .iter()
+            .filter_map(|member| member.board.origin().operations().pop())
+            .max_by_key(|operation| operation.number)
+    };
+    let earlier = latest(before.members()).map_or(0, |operation| operation.number);
+    parts(pass)
+        .into_iter()
+        .filter_map(|part| latest(part.members()))
+        .find(|operation| operation.number > earlier)
+}
+
+/// Checks that the pass, made again just as it was, leaves every part it left just as it was:
+/// the same boards on the same sides of the cut, where they were, held by the same joints.
+fn made_again(before: &Assembly, pass: &GlueUpPass) -> Result<(), TestCaseError> {
+    let Some(operation) = operation(before, pass) else {
+        return Ok(());
+    };
+    let parts = parts(pass);
+    let mut remake = Remake::new(&operation, operation.tool);
+    for part in parts {
+        let made = remake
+            .assembly(part)
+            .map_err(|why| TestCaseError::fail(why.to_string()))?;
+        let Some(made) = made else {
+            continue;
+        };
+        prop_assert_eq!(made.joints(), part.joints());
+        for (now, was) in made.members().iter().zip(part.members()) {
+            prop_assert_eq!(&now.board, &was.board);
+            prop_assert_eq!(now.board.origin().side(), was.board.origin().side());
+            // Turned out of square, put back together it can turn a 2^40th differently.
+            let columns = now
+                .rotation
+                .columns()
+                .into_iter()
+                .zip(was.rotation.columns());
+            let turned = columns.flat_map(|(a, b)| (0..3).map(move |k| (a[k] - b[k]).abs()));
+            prop_assert!(turned.fold(0.0, f64::max) < 1e-11, "{:?} {:?}", now, was);
+            for k in 0..3 {
+                prop_assert!(
+                    (now.at[k] - was.at[k]).as_nm().abs() <= 2,
+                    "{:?} {:?}",
+                    now,
+                    was
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Checks that the pass, made again with the saw set as `nudged` sets it, leaves only boards a
+/// pass of the saw set that way leaves, `direct`, on the same sides of the cut: unless it's
+/// refused, as it has to be if `direct` cuts nothing.
+fn made_another_way(
+    before: &Assembly,
+    pass: &Result<GlueUpPass, CutError>,
+    nudged: impl Fn(Tool) -> Tool,
+    direct: Result<GlueUpPass, CutError>,
+) -> Result<(), TestCaseError> {
+    let Some(operation) = pass.as_ref().ok().and_then(|pass| operation(before, pass)) else {
+        return Ok(());
+    };
+    let boards: Vec<(&woodsim::Board, Option<Side>)> = match &direct {
+        Ok(direct) => parts(direct)
+            .into_iter()
+            .flat_map(|part| part.members())
+            .map(|member| (&member.board, member.board.origin().side()))
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+    let mut remake = Remake::new(&operation, nudged(operation.tool));
+    for part in parts(pass.as_ref().unwrap()) {
+        let Ok(made) = remake.assembly(part) else {
+            return Ok(());
+        };
+        for member in made.iter().flat_map(|made| made.members()) {
+            let board = (&member.board, member.board.origin().side());
+            prop_assert!(boards.contains(&board), "{:?}", board);
+        }
+    }
+    Ok(())
+}
+
+/// Checks a pass's result: anything it left holds the wood and comes out the same made again,
+/// and it only refuses a cut the saw can't make, never a way of lying.
 fn check(before: &Assembly, pass: Result<GlueUpPass, CutError>) -> Result<(), TestCaseError> {
     match pass {
-        Ok(pass) => holds_its_wood(before, &pass),
+        Ok(pass) => {
+            holds_its_wood(before, &pass)?;
+            made_again(before, &pass)
+        }
         Err(CutError::MissesBoard { .. }) => Ok(()),
         Err(other) => {
             prop_assert!(false, "{}", other);
@@ -299,8 +407,7 @@ proptest! {
         height in 1..=25i64,
         stopped in proptest::option::of(0.0..1.0f64),
     ) {
-        let saw = table_saw(guide, tilt, fraction(height, 8));
-        let pass = match stopped {
+        let pass = |saw: TableSaw| match stopped {
             None => saw.rip_glue_up(&glue_up, lie),
             Some(part) => {
                 // Stopped somewhere along the first 40" of the way through.
@@ -309,7 +416,19 @@ proptest! {
                 saw.feed_glue_up(&glue_up, lie, -radius, end)
             }
         };
-        check(&glue_up, pass)?;
+        let saw = table_saw(guide, tilt, fraction(height, 8));
+        // Set a 16th further from the blade, made again or made that way.
+        let further = TableSaw {
+            fence: saw.fence + fraction(1, 16),
+            miter_gauge: saw.miter_gauge.map(|stop| stop + fraction(1, 16)),
+            ..saw
+        };
+        let nudged = |tool| match tool {
+            Tool::TableSaw { lie, travel, .. } => Tool::TableSaw { saw: further, lie, travel },
+            tool => tool,
+        };
+        made_another_way(&glue_up, &pass(saw), nudged, pass(further))?;
+        check(&glue_up, pass(saw))?;
     }
 
     #[test]
@@ -324,12 +443,19 @@ proptest! {
             miter: Angle::from_hundredths(miter),
             ..MiterSaw::twelve_inch()
         };
-        let length = fraction(length, 8);
-        let pass = match bottom {
+        let pass = |length: Length| match bottom {
             None => saw.crosscut_glue_up(&glue_up, lie, length),
             Some(bottom) => saw.chop_glue_up(&glue_up, lie, length, fraction(bottom, 8)),
         };
-        check(&glue_up, pass)?;
+        let length = fraction(length, 8);
+        // Set a 16th longer, made again or made that way.
+        let longer = length + fraction(1, 16);
+        let nudged = |tool| match tool {
+            Tool::MiterSaw { saw, lie, bottom, .. } => Tool::MiterSaw { saw, lie, length: longer, bottom },
+            tool => tool,
+        };
+        made_another_way(&glue_up, &pass(length), nudged, pass(longer))?;
+        check(&glue_up, pass(length))?;
     }
 
     #[test]

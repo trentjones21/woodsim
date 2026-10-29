@@ -129,7 +129,7 @@ impl Planer {
     /// Where the knives sweep through what `laid` lays on the bed, in its frame: along the bed,
     /// across it, and up, from the near corner of the box it fills. The wood goes through
     /// wherever it fits across the bed, so the knives' ends are either side of it.
-    fn sweep(
+    pub(crate) fn sweep(
         &self,
         laid: &Laid,
         lie: Lie,

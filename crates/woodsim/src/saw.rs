@@ -170,7 +170,7 @@ impl TableSaw {
     }
 
     /// How far what's laid on the saw reaches along the blade's travel.
-    fn reach_of(&self, laid: &Laid) -> Length {
+    pub(crate) fn reach_of(&self, laid: &Laid) -> Length {
         let travel = self.travel();
         let along: Vec<i128> = laid
             .box_corners()
@@ -201,7 +201,7 @@ impl TableSaw {
     /// sawdust. The blade stands square to the table, or leans away from the fence going up,
     /// about where it meets the table; the gauge turns the board, so the blade crosses it at
     /// the gauge's angle.
-    fn sweep(
+    pub(crate) fn sweep(
         &self,
         laid: &Laid,
         lie: Lie,
@@ -436,7 +436,7 @@ impl MiterSaw {
     /// there at the miter angle; its center is out in front of the fence along it, where the
     /// arm brings it down to. Also where the slot is along the fence, for what a board loses to
     /// sawdust.
-    fn sweep(
+    pub(crate) fn sweep(
         &self,
         laid: &Laid,
         tool: Tool,

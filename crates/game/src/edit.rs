@@ -1,10 +1,11 @@
 //! Changing how wood was made, the way a CAD program edits a feature in a part's history. Any
-//! pass that cut a board on its own can be opened from the inventory's tree (`Action::Edit`),
-//! its saw set another way a step at a time, as its own cards step it at the saw (`Knob`), with
-//! what that makes of the piece shown before anything changes. Then every piece of wood in the
-//! shop that pass cut is made again that way, each pass after it made as it was
-//! (`woodsim::Remake`), and the glue-ups they're in put back together around them: all of it,
-//! or, if any of it can't be, none, and the status says why.
+//! pass that cut a board, on its own or in a glue-up, can be opened from the inventory's tree
+//! (`Action::Edit`), its saw set another way a step at a time, as its own cards step it at the
+//! saw (`Knob`), with what that makes of the piece shown before anything changes. Then every
+//! piece of wood in the shop that pass cut is made again that way, each pass after it made as it
+//! was, through a glue-up on the glue-up made again (`woodsim::Remake`), and the glue-ups they're
+//! in put back together around them: all of it, or, if any of it can't be, none, and the status
+//! says why.
 //!
 //! Any joint of a glue-up can be taken apart from the tree (`Action::Unglue`), wherever it is but
 //! on a saw. At the bench, the picked part's history can be opened in the tree, or the part
@@ -27,7 +28,7 @@ use crate::{
     hand::{Hand, Workpiece},
     inventory::{Inventory, InventorySystems, Shelf},
     join::BenchStation,
-    parts::{Detail, Entry, Places, Tree, Where, through_glue_up},
+    parts::{Detail, Entry, Places, Tree, Where},
     saved::Saved,
     shop::ShopView,
     thickness::PlanerStation,
@@ -286,7 +287,9 @@ impl Editing {
 fn said(why: &Refusal) -> String {
     match why {
         Refusal::GlueUpPass(_) => {
-            "a later cut went through a glue-up, which can't be cut again".to_string()
+            "a later cut went through a glue-up saved by an older version, which can't be cut \
+             again"
+                .to_string()
         }
         why => why.to_string(),
     }
@@ -443,8 +446,10 @@ fn edit_wood(
                 else {
                     continue;
                 };
-                if through_glue_up(pass.tool) {
-                    say("That cut went through a glue-up, so it can't be made again.".to_string());
+                if pass.wood.is_none() {
+                    let why = "That cut went through a glue-up saved by an older version, so it \
+                               can't be made again.";
+                    say(why.to_string());
                     continue;
                 }
                 tree.selected = Some(entry);
@@ -653,6 +658,61 @@ mod tests {
             said(&world),
             "Can't make it that way: it doesn't cut it apart."
         );
+    }
+
+    #[test]
+    fn a_crosscut_through_a_glue_up_changed_from_the_tree_changes_both_sides_of_it() {
+        let mut world = shop(ShopView::Overview);
+        let panel = work::panel(&[Length::from_inches(2); 2], Length::from_inches(24));
+        let crosscut = MiterSaw::twelve_inch().crosscut_glue_up(
+            &panel,
+            woodsim::Rotation::NONE,
+            Length::from_inches(10),
+        );
+        let Ok(woodsim::GlueUpPass::Cut(cut)) = crosscut else {
+            panic!("the panel crosscut");
+        };
+        let number = cut.piece.members()[0].board.origin().operations()[0].number;
+        let mut inventory = world.resource_mut::<Inventory>();
+        let piece = inventory.store(Shelf::Parts, Workpiece::GlueUp(cut.piece));
+        let offcut = inventory.store(Shelf::Offcuts, Workpiece::GlueUp(cut.offcut.unwrap()));
+        // Opened from the second board's history.
+        let pass = Entry {
+            detail: Some(Detail::Pass(number)),
+            ..Entry::member(Where::Shelf(piece), 1)
+        };
+        act(&mut world, Action::Edit(pass));
+        assert!(
+            world.resource::<Editor>().editing.is_some(),
+            "{}",
+            said(&world)
+        );
+        let longer = Step {
+            more: true,
+            big: true,
+        };
+        act(&mut world, Action::Tweak(Knob::Stop, longer));
+        act(&mut world, Action::Remake);
+        assert!(
+            said(&world).starts_with("Made 2 pieces again"),
+            "{}",
+            said(&world)
+        );
+        let lengths = |work: &Workpiece| match work {
+            Workpiece::GlueUp(glue_up) => glue_up
+                .members()
+                .iter()
+                .map(|member| member.board.length())
+                .collect::<Vec<_>>(),
+            Workpiece::Board(_) => panic!("a glue-up"),
+        };
+        let inventory = world.resource::<Inventory>();
+        assert_eq!(
+            lengths(&inventory.get(piece).unwrap().work),
+            [Length::from_inches(11); 2]
+        );
+        let rest = Length::from_inches(13) - Blade::FULL_KERF;
+        assert_eq!(lengths(&inventory.get(offcut).unwrap().work), [rest; 2]);
     }
 
     /// The cut on a saw, opened from its measured piece and set `knob` a big step further.

@@ -115,7 +115,8 @@ mod tests {
         );
 
         // The recipe comes back as this woodsim writes it, and reads back as the same wood.
-        assert!(drawn.recipe.starts_with("version 1\n"), "{}", drawn.recipe);
+        let version = format!("version {}\n", Recipe::VERSION);
+        assert!(drawn.recipe.starts_with(&version), "{}", drawn.recipe);
         assert!(!drawn.recipe.contains("\nsaw "));
         assert_eq!(
             Recipe::read(&drawn.recipe).unwrap().wood,

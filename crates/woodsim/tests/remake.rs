@@ -1,6 +1,8 @@
 //! Wood made again with a pass made another way: a strip ripped wider, and every piece cut from
 //! it, and the frame they were glued into back together; a side cut longer, and a frame that no
-//! longer closes; a change that stops a cut from cutting refused; and joints taken apart.
+//! longer closes; a change that stops a cut from cutting refused; and joints taken apart. A pass
+//! through a glue-up is made again the same way, on the glue-up made again: a panel crosscut
+//! longer, or ripped wider before it was glued up; read back from a recipe, or duplicated.
 
 mod common;
 
@@ -8,8 +10,9 @@ use std::sync::Arc;
 
 use common::CutApart;
 use woodsim::{
-    Angle, Assembly, Blade, Board, Fastener, Length, Mating, MiterSaw, Operation, Orientation,
-    Refusal, Remake, Surface, TableSaw, Tool, surfaces,
+    Angle, Assembly, Blade, Board, Fastener, GlueUpCut, GlueUpPass, Length, Mating, MiterSaw,
+    Operation, Orientation, Recipe, Refusal, Remake, Rotation, Surface, TableSaw, Tool, Wood,
+    surfaces,
 };
 
 fn inches(n: i64) -> Length {
@@ -278,5 +281,311 @@ fn a_corner_taken_apart_leaves_a_frame_in_one_piece_and_two_in_two() {
         assert!(frame.joints().iter().any(|was| {
             was.between[0].0 == a + 1 && was.between[1].0 == b + 1 && was.number == joint.number
         }));
+    }
+}
+
+/// The `w = 0` edge of `board`, or its other one.
+fn edge(board: &Board, far: bool) -> Surface {
+    surfaces(board)
+        .into_iter()
+        .find(|surface| matches!(surface, Surface::Side(edge) if edge.out.l == 0 && (edge.out.w > 0) == far))
+        .expect("an edge")
+}
+
+/// A 48" 1x6 ripped to a 2" strip, and the strip glued edge to edge with what's left of the
+/// board, face up, flush at their ends.
+fn panel() -> Assembly {
+    let stock = Board::new(inches(48), fraction(11, 2), fraction(3, 4));
+    let cut = table_saw(inches(2))
+        .rip(&stock, Orientation::default())
+        .cut_apart();
+    let (strip, rest) = (cut.piece.board, cut.offcut.expect("the rest").board);
+    let mut panel = Assembly::of(strip.clone());
+    add(
+        &mut panel,
+        (0, edge(&strip, true)),
+        &rest,
+        edge(&rest, false),
+    );
+    panel
+}
+
+/// `glue_up` crosscut square at the miter saw, `length` from the stop.
+fn crosscut(glue_up: &Assembly, length: Length) -> GlueUpCut {
+    match mitered(0).crosscut_glue_up(glue_up, Rotation::NONE, length) {
+        Ok(GlueUpPass::Cut(cut)) => cut,
+        other => panic!("expected the glue-up cut apart, got {other:?}"),
+    }
+}
+
+/// The last pass that cut `board`.
+fn last(board: &Board) -> Arc<Operation> {
+    board.origin().operations().pop().expect("a cut board")
+}
+
+/// `tool` set to cut `length` from the stop.
+fn at_length(tool: Tool, length: Length) -> Tool {
+    let Tool::MiterSaw {
+        saw, lie, bottom, ..
+    } = tool
+    else {
+        panic!("cut on the miter saw");
+    };
+    Tool::MiterSaw {
+        saw,
+        lie,
+        length,
+        bottom,
+    }
+}
+
+/// Checks every joint in `assembly` is flush all across.
+fn closed(assembly: &Assembly) {
+    for joint in assembly.joints() {
+        let contact = assembly
+            .fit()
+            .into_iter()
+            .find(|contact| contact.between == joint.between)
+            .expect("the surfaces still meet");
+        assert!(contact.is_tight(), "{contact:?}");
+    }
+}
+
+#[test]
+fn a_crosscut_through_a_glue_up_made_longer_comes_out_longer_still_glued() {
+    let cut = crosscut(&panel(), inches(10));
+    let pass = last(&cut.piece.members()[0].board);
+    let mut remake = Remake::new(&pass, at_length(pass.tool, inches(12)));
+    let piece = remake
+        .assembly(&cut.piece)
+        .unwrap()
+        .expect("the crosscut cut both boards");
+    for (member, was) in piece.members().iter().zip(cut.piece.members()) {
+        assert_eq!(member.board.length(), inches(12));
+        assert_eq!(member.board.width(), was.board.width());
+        assert_eq!(member.board.origin().replay(), member.board);
+    }
+    // Still one pass through both boards, numbered as it was, and they're still glued.
+    let [a, b] = [0, 1].map(|k| last(&piece.members()[k].board));
+    assert!(Arc::ptr_eq(&a, &b));
+    assert_eq!(a.number, pass.number);
+    assert_eq!(numbers(&piece), numbers(&cut.piece));
+    closed(&piece);
+    // The offcut, from the same pass made again, is shorter by as much.
+    let was = cut.offcut.expect("an offcut");
+    let offcut = remake.assembly(&was).unwrap().unwrap();
+    for (member, was) in offcut.members().iter().zip(was.members()) {
+        assert_eq!(member.board.length(), was.board.length() - inches(2));
+    }
+    assert!(Arc::ptr_eq(&last(&offcut.members()[0].board), &a));
+}
+
+#[test]
+fn a_rip_before_a_glue_up_was_crosscut_can_be_made_wider() {
+    let cut = crosscut(&panel(), inches(10));
+    let rip = pass(&cut.piece.members()[0].board, 0);
+    let Tool::TableSaw { saw, lie, travel } = rip.tool else {
+        panic!("ripped on the table saw");
+    };
+    let wider = Tool::TableSaw {
+        saw: TableSaw {
+            fence: fraction(5, 2),
+            ..saw
+        },
+        lie,
+        travel,
+    };
+    let piece = Remake::new(&rip, wider)
+        .assembly(&cut.piece)
+        .unwrap()
+        .expect("both boards came from the rip");
+    let widths: Vec<Length> = piece
+        .members()
+        .iter()
+        .map(|member| member.board.width())
+        .collect();
+    let rest = fraction(11, 2) - fraction(5, 2) - Blade::FULL_KERF;
+    assert_eq!(widths, [fraction(5, 2), rest]);
+    for member in piece.members() {
+        assert_eq!(member.board.length(), inches(10));
+        assert_eq!(member.board.origin().replay(), member.board);
+    }
+    assert_eq!(numbers(&piece), numbers(&cut.piece));
+    closed(&piece);
+}
+
+#[test]
+fn a_pass_through_a_glue_up_made_again_as_it_was_changes_nothing() {
+    let cut = crosscut(&panel(), inches(10));
+    let pass = last(&cut.piece.members()[0].board);
+    let made = Remake::new(&pass, pass.tool)
+        .assembly(&cut.piece)
+        .unwrap()
+        .unwrap();
+    assert_eq!(made.joints(), cut.piece.joints());
+    assert_eq!(numbers(&made), numbers(&cut.piece));
+    for (now, was) in made.members().iter().zip(cut.piece.members()) {
+        assert_eq!(now.board, was.board);
+        assert_eq!(now.rotation, was.rotation);
+        for k in 0..3 {
+            assert!(
+                (now.at[k] - was.at[k]).as_nm().abs() <= 2,
+                "{now:?} {was:?}"
+            );
+        }
+        let (now, was) = (now.board.origin(), was.board.origin());
+        assert_eq!(now.side(), was.side());
+        assert_eq!(now.at_on_stock(), was.at_on_stock());
+    }
+}
+
+#[test]
+fn a_rip_along_one_board_of_a_glue_up_made_wider_keeps_the_other_glued_on() {
+    // The fence is at the rest's free edge: the rip cuts only it.
+    let Ok(GlueUpPass::Cut(cut)) = table_saw(inches(1)).rip_glue_up(&panel(), Rotation::NONE)
+    else {
+        panic!("expected the panel ripped apart");
+    };
+    assert_eq!(cut.piece.members().len(), 1);
+    let was = cut.offcut.expect("the rest of the panel");
+    assert_eq!(was.members().len(), 2);
+    let pass = last(&cut.piece.members()[0].board);
+    let Tool::TableSaw { saw, lie, travel } = pass.tool else {
+        panic!("ripped on the table saw");
+    };
+    let wider = Tool::TableSaw {
+        saw: TableSaw {
+            fence: fraction(5, 4),
+            ..saw
+        },
+        lie,
+        travel,
+    };
+    let mut remake = Remake::new(&pass, wider);
+    let strip = remake.assembly(&cut.piece).unwrap().unwrap();
+    assert_eq!(strip.members()[0].board.width(), fraction(5, 4));
+    let rest = remake.assembly(&was).unwrap().unwrap();
+    // The board the blade missed is just as it was, still glued to what's left of the other.
+    let (missed, ripped) = (&rest.members()[0].board, &rest.members()[1].board);
+    assert!(missed.origin().same(was.members()[0].board.origin()));
+    assert_eq!(missed.width(), inches(2));
+    assert_eq!(
+        ripped.width(),
+        was.members()[1].board.width() - fraction(1, 4)
+    );
+    assert_eq!(numbers(&rest), numbers(&was));
+    closed(&rest);
+}
+
+#[test]
+fn a_cut_through_a_glue_up_that_would_miss_or_cut_another_board_is_refused() {
+    // A 12" board glued along a 24" one's edge, flush with its end against the stop.
+    let long = Board::new(inches(24), inches(2), fraction(3, 4));
+    let short = Board::new(inches(12), inches(2), fraction(3, 4));
+    let mut glue_up = Assembly::of(long.clone());
+    add(
+        &mut glue_up,
+        (0, edge(&long, true)),
+        &short,
+        edge(&short, false),
+    );
+    let cut_by = |board: &Board, pass: &Arc<Operation>| {
+        board
+            .origin()
+            .operations()
+            .iter()
+            .any(|op| Arc::ptr_eq(op, pass))
+    };
+
+    let both = crosscut(&glue_up, inches(6));
+    let pass = last(&both.piece.members()[0].board);
+    assert!(
+        both.piece
+            .members()
+            .iter()
+            .all(|member| cut_by(&member.board, &pass))
+    );
+    let refused = Remake::new(&pass, at_length(pass.tool, inches(18)))
+        .assembly(&both.piece)
+        .unwrap_err();
+    let why = "it misses a board of the glue-up it cut".to_string();
+    assert_eq!(refused, Refusal::Pass(pass.number, why));
+
+    // 18" from the stop, the blade misses the short board, on the stop's side of it.
+    let one = crosscut(&glue_up, inches(18));
+    let pass = last(&one.piece.members()[0].board);
+    let missed = &one.piece.members()[1].board;
+    assert!(!cut_by(missed, &pass) && *missed == short);
+    let refused = Remake::new(&pass, at_length(pass.tool, inches(6)))
+        .board(&one.piece.members()[0].board)
+        .unwrap_err();
+    let why = "it cuts a board of the glue-up it missed".to_string();
+    assert_eq!(refused, Refusal::Pass(pass.number, why));
+}
+
+#[test]
+fn a_glue_up_read_back_can_have_its_crosscut_made_another_way() {
+    let cut = crosscut(&panel(), inches(10));
+    let text = Recipe {
+        wood: Wood::GlueUp(cut.piece.clone()),
+        saw: None,
+    }
+    .write();
+    let lines = |kind: &str| text.lines().filter(|line| line.starts_with(kind)).count();
+    assert_eq!((lines("on "), lines("on-joint ")), (2, 1), "{text}");
+    let Wood::GlueUp(read) = Recipe::read(&text).unwrap().wood else {
+        panic!("a glue-up reads back as a glue-up");
+    };
+    let pass = last(&read.members()[0].board);
+    assert_eq!(pass.wood.as_ref().map(|wood| wood.members().len()), Some(2));
+    let longer = at_length(pass.tool, inches(12));
+    let piece = Remake::new(&pass, longer).assembly(&read).unwrap().unwrap();
+    for member in piece.members() {
+        assert_eq!(member.board.length(), inches(12));
+    }
+    closed(&piece);
+
+    // Written before passes kept what they went through, it doesn't know what was on the saw.
+    let old: String = text
+        .lines()
+        .filter(|line| !line.starts_with("on"))
+        .map(|line| format!("{line}\n"))
+        .collect::<String>()
+        .replacen(&format!("version {}", Recipe::VERSION), "version 1", 1);
+    let Wood::GlueUp(read) = Recipe::read(&old).unwrap().wood else {
+        panic!("a glue-up reads back as a glue-up");
+    };
+    assert_eq!(read, cut.piece);
+    let pass = last(&read.members()[0].board);
+    assert!(pass.wood.is_none());
+    let refused = Remake::new(&pass, longer).assembly(&read).unwrap_err();
+    assert_eq!(refused, Refusal::GlueUpPass(pass.number));
+}
+
+#[test]
+fn a_glue_up_cut_from_another_duplicates_with_what_was_on_the_saw() {
+    let cut = crosscut(&panel(), inches(10));
+    let copy = cut.piece.duplicate();
+    let (pass, was) = (
+        last(&copy.members()[0].board),
+        last(&cut.piece.members()[0].board),
+    );
+    assert!(Arc::ptr_eq(&pass, &last(&copy.members()[1].board)));
+    assert!(pass.number > was.number);
+    // The panel it was cut from is copied too: boards of its own, its joint numbered anew.
+    let (wood, original) = (pass.wood.as_ref().unwrap(), was.wood.as_ref().unwrap());
+    for (now, then) in wood.members().iter().zip(original.members()) {
+        assert_eq!(now.board, then.board);
+        let stocks = (now.board.origin().stock(), then.board.origin().stock());
+        assert!(!stocks.0.same(stocks.1));
+    }
+    assert!(wood.joints()[0].number > was.number);
+    // And the copy's crosscut can be made another way.
+    let piece = Remake::new(&pass, at_length(pass.tool, inches(12)))
+        .assembly(&copy)
+        .unwrap()
+        .unwrap();
+    for member in piece.members() {
+        assert_eq!(member.board.length(), inches(12));
     }
 }

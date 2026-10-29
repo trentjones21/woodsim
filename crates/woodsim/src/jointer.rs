@@ -155,7 +155,7 @@ impl Jointer {
     /// tables, across them toward the fence, and up, from the near corner of the box it fills.
     /// The fence stands, or leans, against the wood's far side, and meets the tables where the
     /// knives' cutting starts `fence` back toward their end.
-    fn sweep(
+    pub(crate) fn sweep(
         &self,
         laid: &Laid,
         lie: Lie,

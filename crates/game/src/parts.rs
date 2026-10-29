@@ -183,8 +183,8 @@ pub struct DetailLine {
     pub kind: Kind,
     pub name: String,
     pub notes: String,
-    /// Whether it can be changed: a pass through a board on its own, a joint anywhere but on a
-    /// saw.
+    /// Whether it can be changed: a pass that kept the wood it went through (all but one through
+    /// a glue-up read from an older recipe), a joint anywhere but on a saw.
     pub changes: bool,
 }
 
@@ -667,7 +667,7 @@ fn passes(entry: Entry, board: &woodsim::Board, changes: bool) -> Vec<Line> {
                     "{}{kept}{through}",
                     cutting::settings_of(&operation, Some(&from))
                 ),
-                changes: changes && !glue_up,
+                changes: changes && operation.wood.is_some(),
             }))
         })
         .collect()

@@ -224,29 +224,37 @@ fn a_recipe_says_which_version_it_is_and_reads_without_one() {
         saw: None,
     };
     let text = board.write();
-    assert_eq!(text.lines().next(), Some("version 1"), "{text}");
-    // Saved before there was a version line, it reads as version 1.
+    let version = format!("version {}", Recipe::VERSION);
+    assert_eq!(text.lines().next(), Some(version.as_str()), "{text}");
+    // Saved before there was a version line, it reads as version 1, and version 1 still reads.
     let unversioned: String = text
         .lines()
         .skip(1)
         .map(|line| format!("{line}\n"))
         .collect();
-    assert_eq!(Recipe::read(&unversioned), Ok(board));
+    assert_eq!(Recipe::read(&unversioned), Ok(board.clone()));
+    assert_eq!(
+        Recipe::read(&text.replacen(&version, "version 1", 1)),
+        Ok(board)
+    );
     // Comments can come before it.
     assert!(Recipe::read(&format!("# a part\n{text}")).is_ok());
 
-    let newer = text.replacen("version 1", "version 2", 1);
+    let next = Recipe::VERSION + 1;
+    let newer = text.replacen(&version, &format!("version {next}"), 1);
     let why = Recipe::read(&newer).unwrap_err();
     assert!(
-        why.starts_with("line 1: it's version 2, from a newer woodsim"),
+        why.starts_with(&format!(
+            "line 1: it's version {next}, from a newer woodsim"
+        )),
         "{why}"
     );
-    let why = Recipe::read(&format!("{unversioned}version 1\n")).unwrap_err();
+    let why = Recipe::read(&format!("{unversioned}{version}\n")).unwrap_err();
     assert!(
         why.contains("`version` comes before everything else"),
         "{why}"
     );
-    assert!(Recipe::read(&text.replacen("version 1", "version 0", 1)).is_err());
+    assert!(Recipe::read(&text.replacen(&version, "version 0", 1)).is_err());
 }
 
 proptest! {
