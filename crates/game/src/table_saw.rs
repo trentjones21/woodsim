@@ -6,6 +6,7 @@ use bevy::{picking::pointer::PointerButton, prelude::*};
 use woodsim::Length;
 
 use crate::{
+    blades::{BladeSystems, Motor, Sawing, spawn_blade},
     controls::{Action, Actions, Step},
     feed::TableSawStation,
     hand::Hand,
@@ -59,6 +60,11 @@ const KNIFE_BELOW_BLADE: f32 = inches(1.0 / 8.0);
 const KNIFE_HEIGHT: f32 = inches(4.0);
 /// How fast the board moves while Space is held: 10" a second.
 const FEED_SPEED: f32 = inches(10.0);
+/// Seconds the saw takes to come up to speed and to coast to a stop, and how long it runs on
+/// after the board's clear of the blade, as if switched off then.
+const SPIN_UP: f32 = 0.6;
+const COAST: f32 = 2.5;
+const RUN_ON: f32 = 1.5;
 
 pub struct TableSawPlugin;
 
@@ -81,6 +87,7 @@ impl Plugin for TableSawPlugin {
                         bring_back,
                     )
                         .run_if(resource_equals(ShopView::TableSaw)),
+                    run_saw.before(BladeSystems),
                     (draw_fence, draw_gauge, draw_blade, draw_board),
                 )
                     .chain(),
@@ -113,7 +120,7 @@ struct GaugeStop {
     grab_offset: f32,
 }
 
-/// The blade, which rises and falls with its height setting.
+/// The blade, which rises and falls with its height setting, and tilts.
 #[derive(Component)]
 struct BladeDisc;
 
@@ -133,6 +140,7 @@ fn spawn_saw(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut images: ResMut<Assets<Image>>,
     shop: Res<ShopAssets>,
     station: Res<TableSawStation>,
 ) {
@@ -257,21 +265,18 @@ fn spawn_saw(
         Vec3::new(inches(19.0), inches(-0.75), OUTFEED_END + inches(0.75)),
     );
 
-    // The blade and riving knife are placed at the blade's height by `draw_blade`.
+    // The blade and riving knife are placed at the blade's height by `draw_blade`. The blade
+    // turns about x, its top toward the operator.
     let kerf = station.saw.blade.kerf.as_meters_f32();
-    let radius = station.saw.blade.radius().as_meters_f32();
-    commands.spawn((
-        Mesh3d(meshes.add(Cylinder::new(radius, kerf))),
-        MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgb(0.88, 0.89, 0.92),
-            perceptual_roughness: 0.3,
-            ..default()
-        })),
-        // A cylinder's axis starts along Y; turn it to X so the blade spins toward the operator.
-        Transform::from_rotation(Quat::from_rotation_z(FRAC_PI_2)),
-        Pickable::IGNORE,
-        BladeDisc,
-    ));
+    let blade = spawn_blade(
+        &mut commands,
+        &mut meshes,
+        &mut materials,
+        &mut images,
+        station.saw.blade,
+        Motor::new(SPIN_UP, COAST, RUN_ON),
+    );
+    commands.entity(blade).insert(BladeDisc);
     // The riving knife stands in the kerf just behind the blade, so pieces pass either side.
     let knife = Block {
         min: Vec3::new(-kerf * 0.8, -KNIFE_HEIGHT, inches(-6.5)),
@@ -558,6 +563,36 @@ fn push_board(actions: Res<Actions>, time: Res<Time>, mut station: ResMut<TableS
     }
 }
 
+/// Runs the saw while a board's at the blade, or being pushed toward it, and throws sawdust up
+/// wherever the blade took wood this frame, more the faster the board's going.
+fn run_saw(
+    station: Res<TableSawStation>,
+    actions: Res<Actions>,
+    view: Res<ShopView>,
+    time: Res<Time>,
+    mut motor: Single<&mut Motor, With<BladeDisc>>,
+    mut sawing: MessageWriter<Sawing>,
+    mut last: Local<(u32, Length)>,
+) {
+    let pushing = *view == ShopView::TableSaw && actions.held(Action::Push);
+    if station.at_blade() || pushing && station.can_push() {
+        motor.run();
+    }
+    let (bites, advance) = (station.bites(), station.advance());
+    if bites != last.0
+        && let Some((at, toward)) = station.sawdust()
+    {
+        let moved = (advance - last.1).as_meters_f32().abs();
+        let amount = moved / (FEED_SPEED * time.delta_secs().max(1e-3));
+        sawing.write(Sawing {
+            at: ORIGIN + at,
+            toward,
+            amount: amount.clamp(0.3, 2.0),
+        });
+    }
+    *last = (bites, advance);
+}
+
 fn bring_back(actions: Res<Actions>, mut station: ResMut<TableSawStation>) {
     if actions.just(Action::BringBack) {
         station.bring_back();
@@ -734,7 +769,7 @@ fn draw_blade(
         let top = (height + kerf / 2.0 * tilt.sin()) / tilt.cos();
         let tilted = |x: f32, y: f32, z: f32| ORIGIN + turn * Vec3::new(x, y, z);
         blade.translation = tilted(-kerf / 2.0, top - radius, 0.0);
-        blade.rotation = turn * Quat::from_rotation_z(FRAC_PI_2);
+        blade.rotation = turn;
         let knife_top = top - KNIFE_BELOW_BLADE;
         knife.translation = tilted(-kerf * 0.8, knife_top - KNIFE_HEIGHT, inches(-6.5));
         knife.rotation = turn;

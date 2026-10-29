@@ -15,6 +15,7 @@ use bevy::prelude::*;
 use woodsim::{Angle, CutError, Length, MiterSaw, Orientation, Recipe, Surface, Tool};
 
 use crate::{
+    blades::{self, Rim},
     feed::shelf,
     hand::Workpiece,
     inventory::Shelf,
@@ -60,6 +61,8 @@ pub struct MiterSawStation {
     lie: Orientation,
     /// Choosing what the board rests on, and against the fence.
     rest: Rest,
+    /// How many times the blade's gone deeper and taken more wood, for sawdust.
+    bites: u32,
 }
 
 pub enum Work {
@@ -96,6 +99,7 @@ impl Default for MiterSawStation {
             set_aside: Vec::new(),
             lie: Orientation::default(),
             rest: Rest::default(),
+            bites: 0,
         }
     }
 }
@@ -300,6 +304,7 @@ impl MiterSawStation {
                 scarred,
             } => match work::chop(&self.saw, board, self.lie, self.stop, bottom) {
                 Ok(Passed::Cut(cut)) => {
+                    self.bites += 1;
                     self.work = Work::Cut {
                         board: board.clone(),
                         stop: self.stop,
@@ -307,7 +312,12 @@ impl MiterSawStation {
                         loose_set_aside: false,
                     }
                 }
-                Ok(Passed::Kerfed(scar)) => *scarred = Some(scar),
+                Ok(Passed::Kerfed(scar)) => {
+                    if scarred.as_ref() != Some(&scar) {
+                        self.bites += 1;
+                    }
+                    *scarred = Some(scar);
+                }
                 Ok(Passed::Missed) => {}
                 Err(error) => *missed = Some(error),
             },
@@ -316,7 +326,9 @@ impl MiterSawStation {
             } => {
                 if let Ok(Passed::Cut(deeper)) =
                     work::chop(&self.saw, board, self.lie, *stop, bottom)
+                    && deeper != *cut
                 {
+                    self.bites += 1;
                     *cut = deeper;
                 }
             }
@@ -476,6 +488,57 @@ impl MiterSawStation {
         self.lowered <= 0.0
     }
 
+    /// How many times the blade's gone deeper and taken more wood: it's sawing whenever this
+    /// goes up.
+    pub fn bites(&self) -> u32 {
+        self.bites
+    }
+
+    /// Where the blade throws up sawdust, in station space, and which way: the highest place
+    /// its teeth cross the top of the wood, where they come up out of it behind the cut once
+    /// they're in, and throw it up and back over the fence. It's worked out from the wood as it
+    /// was before the stroke, so the dust keeps coming as the blade finishes the cut after
+    /// breaking through.
+    pub fn sawdust(&self) -> Option<(Vec3, Vec3)> {
+        let (board, stop) = match &self.work {
+            Work::Empty => return None,
+            Work::Ready { board, .. } => (board, self.stop),
+            Work::Cut { board, stop, .. } => (board, *stop),
+        };
+        let wood: Vec<(Vec3, Vec3)> = work::placed(board, self.lie, self.near(board, stop))
+            .iter()
+            .map(|placed| {
+                // A quarter turn about up turns the box around the board into another box.
+                let (low, high) = placed.bounds();
+                let (a, b) = (board_turn() * low, board_turn() * high);
+                (a.min(b), b.max(a))
+            })
+            .collect();
+        let (out, up) = self.saw.center(self.bottom());
+        let turn = Quat::from_rotation_y(self.saw.miter.radians() as f32);
+        let kerf = self.saw.blade.kerf.as_meters_f32();
+        let rim = Rim {
+            center: turn * Vec3::new(-kerf / 2.0, up.as_meters_f32(), out.as_meters_f32()),
+            up: Vec3::Y,
+            along: turn * Vec3::Z,
+            radius: self.saw.blade.radius().as_meters_f32(),
+        };
+        blades::chips(&rim, &wood)
+    }
+
+    /// Where the near corner of the space `board` takes up on the saw is, in the saw's own
+    /// frame, against the stop at `stop`: its far end along the fence rests against the stop
+    /// block, and the rest reaches left past the blade. It reaches from the fence out toward the
+    /// operator.
+    fn near(&self, board: &Workpiece, stop: Length) -> Vec3 {
+        let reach = work::reach(board, self.lie);
+        Vec3::new(
+            -reach.across.as_meters_f32(),
+            0.0,
+            stop.as_meters_f32() - reach.along.as_meters_f32(),
+        )
+    }
+
     pub fn boards(&self) -> SawBoards {
         let (board, stop, cut) = match &self.work {
             Work::Empty => return SawBoards::default(),
@@ -486,13 +549,7 @@ impl MiterSawStation {
                 board, stop, cut, ..
             } => (board, *stop, Some(cut)),
         };
-        // The board's far end along the fence rests against the stop block; the rest reaches
-        // left past the blade. It reaches from the fence out toward the operator.
-        let near = Vec3::new(
-            -work::reach(board, self.lie).across.as_meters_f32(),
-            0.0,
-            stop.as_meters_f32() - work::reach(board, self.lie).along.as_meters_f32(),
-        );
+        let near = self.near(board, stop);
         match cut {
             None => SawBoards {
                 whole: work::placed(board, self.lie, near),
@@ -1210,5 +1267,30 @@ mod tests {
             status.ends_with("The piece is beveled 45° at one end."),
             "{status}"
         );
+    }
+
+    #[test]
+    fn the_blade_bites_as_it_goes_into_the_board_and_throws_the_dust_up_and_back() {
+        let mut station = loaded();
+        // Coming down toward the board, it isn't cutting yet.
+        station.lower(0.3);
+        assert_eq!(station.bites(), 0);
+        station.lower(0.3);
+        assert_eq!(station.bites(), 1);
+        // The teeth come up out of the top of the board between the fence and the blade's
+        // lowest point, and throw the dust up and back over the fence.
+        let (at, toward) = station.sawdust().expect("sawing");
+        assert!((at.y - inches(0.75)).abs() < inches(0.06), "{at}");
+        assert!(at.z > 0.0 && at.z < inches(3.0), "{at}");
+        assert!(toward.y > 0.0 && toward.z < 0.0, "{toward}");
+        // It keeps throwing it as it breaks through and clears the corners.
+        station.lower(0.05);
+        assert!(station.bites() > 1);
+        assert!(station.sawdust().is_some());
+        chop(&mut station);
+        // Another stroke through the cut it's already made takes nothing.
+        let bitten = station.bites();
+        chop(&mut station);
+        assert_eq!(station.bites(), bitten);
     }
 }

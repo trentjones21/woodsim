@@ -1,6 +1,7 @@
 //! Woodshop Simulator. Bevy draws the shop; `woodsim` owns every board's real dimensions.
 
 mod bench;
+mod blades;
 mod chop;
 mod controls;
 mod copy;
@@ -46,6 +47,7 @@ use bevy::{
 };
 
 use bench::BenchPlugin;
+use blades::BladesPlugin;
 use controls::ControlsPlugin;
 use copy::CopyPlugin;
 use flights::FlightsPlugin;
@@ -111,8 +113,8 @@ fn main() {
         MeshPickingPlugin,
         ShopPlugin,
         ScenePlugin,
-        TableSawPlugin,
-        MiterSawPlugin,
+        // A tuple of plugins holds at most 15.
+        (TableSawPlugin, MiterSawPlugin, BladesPlugin),
         BenchPlugin,
         HandPlugin,
         ControlsPlugin,

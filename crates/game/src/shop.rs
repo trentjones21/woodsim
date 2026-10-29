@@ -555,9 +555,11 @@ fn station_pose(station: ShopView, using_gauge: bool) -> Option<Transform> {
             Vec3::new(-0.3, 0.79, 1.35),
             Vec3::new(0.1, 0.0, -0.05),
         ),
+        // A little to the left, as a right hand on the handle has it, so the blade's open face
+        // shows rather than its edge.
         ShopView::MiterSaw => (
             miter_saw::ORIGIN,
-            Vec3::new(0.0, 0.7, 1.2),
+            Vec3::new(-0.3, 0.7, 1.15),
             Vec3::new(0.0, 0.12, 0.0),
         ),
         ShopView::Bench | ShopView::Studio => return None,

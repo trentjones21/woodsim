@@ -1196,6 +1196,240 @@ fn rounded(size: Vec3, map: impl Fn(Vec3) -> (Face, f32), offset: Vec3) -> Mesh 
     .with_inserted_indices(Indices::U32(indices))
 }
 
+/// About how far apart a saw blade's teeth are around its rim, and how deep the gullet in front
+/// of each one goes, in meters.
+const TOOTH_PITCH: f32 = 1.3 * 0.0254;
+const GULLET_DEPTH: f32 = 0.35 * 0.0254;
+/// Where a tooth's parts start, as a fraction of the way from its face to the next tooth's: the
+/// gullet in front of the next tooth runs out at `GULLET`, and the back of the tooth climbs from
+/// there to its tip at `TIP`. Its face drops from the tip `FACE` of the gullet's depth.
+const GULLET: f32 = 0.3;
+const TIP: f32 = 0.92;
+const FACE: f32 = 0.55;
+
+/// A saw blade's outline: a round steel plate with teeth around it. It turns about x, from up
+/// toward +z, and angles around it are measured the same way, so the faces of its teeth lead.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BladeShape {
+    /// Out to the tips of the teeth, in meters.
+    pub radius: f32,
+    pub thickness: f32,
+    pub teeth: u32,
+}
+
+impl BladeShape {
+    pub fn new(blade: woodsim::Blade) -> BladeShape {
+        let radius = blade.radius().as_meters_f32();
+        BladeShape {
+            radius,
+            thickness: blade.kerf.as_meters_f32(),
+            teeth: (std::f32::consts::TAU * radius / TOOTH_PITCH).round() as u32,
+        }
+    }
+
+    /// The angle from one tooth to the next.
+    pub fn pitch(&self) -> f32 {
+        std::f32::consts::TAU / self.teeth as f32
+    }
+
+    /// How far around its tooth `angle` is: 0 at the face of one tooth, rising to 1 at the face
+    /// of the next.
+    pub fn phase(&self, angle: f32) -> f32 {
+        (angle / self.pitch()).rem_euclid(1.0)
+    }
+
+    /// How far out the rim is at `angle`.
+    pub fn rim(&self, angle: f32) -> f32 {
+        self.rim_at(self.phase(angle))
+    }
+
+    /// How far out the rim is at `phase` of a tooth: down into a round gullet, up the tooth's
+    /// back to its tip, and straight down its face.
+    fn rim_at(&self, phase: f32) -> f32 {
+        let depth = if phase < GULLET {
+            FACE + (1.0 - FACE) * (std::f32::consts::PI * phase / GULLET).sin()
+        } else if phase < TIP {
+            FACE * (TIP - phase) / (TIP - GULLET)
+        } else {
+            0.0
+        };
+        self.radius - GULLET_DEPTH * depth
+    }
+
+    /// How far out the bottoms of the gullets are: the plate inside it is round.
+    pub fn plate(&self) -> f32 {
+        self.radius - GULLET_DEPTH
+    }
+
+    /// Points around the outline from up, tooth by tooth, in the plane x = 0. Each tooth's face
+    /// is two points at the same angle, its tip and the top of the gullet in front of it.
+    fn outline(&self) -> Vec<Vec3> {
+        let pitch = self.pitch();
+        let at = |angle: f32, radius: f32| Vec3::new(0.0, angle.cos(), angle.sin()) * radius;
+        (0..self.teeth)
+            .flat_map(|tooth| {
+                let start = tooth as f32 * pitch;
+                let gullet = (0..=6).map(move |step| GULLET * step as f32 / 6.0);
+                gullet
+                    .chain([TIP, 1.0])
+                    .map(move |phase| (start + phase * pitch, phase))
+            })
+            .map(|(angle, phase)| {
+                // At 1, it's the tip, not the next tooth's gullet.
+                let radius = if phase == 1.0 {
+                    self.radius
+                } else {
+                    self.rim_at(phase)
+                };
+                at(angle, radius)
+            })
+            .collect()
+    }
+
+    /// Where a point on either face of the blade is on its texture: the square around the
+    /// blade, seen from +x, with up at the top.
+    fn uv(&self, point: Vec3) -> [f32; 2] {
+        let across = 2.0 * self.radius;
+        [0.5 + point.z / across, 0.5 - point.y / across]
+    }
+}
+
+/// Flat-shaded triangles, each with its own corners, turned to face the way they're given.
+#[derive(Default)]
+struct Facets {
+    positions: Vec<[f32; 3]>,
+    normals: Vec<[f32; 3]>,
+    uvs: Vec<[f32; 2]>,
+}
+
+impl Facets {
+    fn add(&mut self, corners: [Vec3; 3], normal: Vec3, uvs: [[f32; 2]; 3]) {
+        let [a, b, c] = corners;
+        let order = if (b - a).cross(c - a).dot(normal) >= 0.0 {
+            [0, 1, 2]
+        } else {
+            [0, 2, 1]
+        };
+        for i in order {
+            self.positions.push(corners[i].to_array());
+            self.normals.push(normal.to_array());
+            self.uvs.push(uvs[i]);
+        }
+    }
+
+    /// A quad with the same corners on both faces of a blade, `half` its thickness out each
+    /// side, facing `normal`.
+    fn rim(&mut self, shape: &BladeShape, from: Vec3, to: Vec3, half: f32, normal: Vec3) {
+        let side = |point: Vec3, x: f32| point + Vec3::X * x;
+        let (uv_from, uv_to) = (shape.uv(from), shape.uv(to));
+        self.add(
+            [side(from, -half), side(to, -half), side(to, half)],
+            normal,
+            [uv_from, uv_to, uv_to],
+        );
+        self.add(
+            [side(from, -half), side(to, half), side(from, half)],
+            normal,
+            [uv_from, uv_to, uv_from],
+        );
+    }
+
+    /// A fan from the center out to `outline`, on both faces of a blade.
+    fn faces(&mut self, shape: &BladeShape, outline: &[Vec3], half: f32) {
+        for x in [-half, half] {
+            let center = Vec3::X * x;
+            for (i, &from) in outline.iter().enumerate() {
+                let to = outline[(i + 1) % outline.len()];
+                let (from, to) = (from + center, to + center);
+                self.add(
+                    [center, from, to],
+                    Vec3::X * x.signum(),
+                    [shape.uv(center), shape.uv(from), shape.uv(to)],
+                );
+            }
+        }
+    }
+
+    fn build(self) -> Mesh {
+        Mesh::new(
+            PrimitiveTopology::TriangleList,
+            RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
+        )
+        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, self.positions)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, self.normals)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, self.uvs)
+    }
+}
+
+/// A saw blade, teeth and all, centered on the origin and turning about x. Both faces take the
+/// square around it from a texture laid on flat (`textures::saw_blade` paints one), and its rim
+/// the colors at the edge.
+pub fn saw_blade(shape: &BladeShape) -> Mesh {
+    let outline = shape.outline();
+    let half = shape.thickness / 2.0;
+    let mut facets = Facets::default();
+    facets.faces(shape, &outline, half);
+    for (i, &from) in outline.iter().enumerate() {
+        let to = outline[(i + 1) % outline.len()];
+        // Facing out of the outline, which runs from up toward +z.
+        let along = to - from;
+        if along.length_squared() > 0.0 {
+            let normal = Vec3::new(0.0, along.z, -along.y).normalize();
+            facets.rim(shape, from, to, half, normal);
+        }
+    }
+    facets.build()
+}
+
+/// Steps around a spinning blade's round parts.
+const BLUR_STEPS: usize = 96;
+
+/// A spinning blade's plate, round out to the bottoms of its gullets, to draw with the texture
+/// `textures::spinning_blade` paints: solid, so it can be drawn opaque and cast its shadow.
+pub fn spinning_plate(shape: &BladeShape) -> Mesh {
+    let outline = circle(shape.plate());
+    let half = shape.thickness / 2.0;
+    let mut facets = Facets::default();
+    facets.faces(shape, &outline, half);
+    for (i, &from) in outline.iter().enumerate() {
+        let to = outline[(i + 1) % outline.len()];
+        let normal = ((from + to) / 2.0).normalize();
+        facets.rim(shape, from, to, half, normal);
+    }
+    facets.build()
+}
+
+/// The ring a spinning blade's teeth blur into, from the bottoms of the gullets out to the tips
+/// of the teeth, on both faces: see-through, where the texture is, as the teeth are only part
+/// of the way around.
+pub fn spinning_teeth(shape: &BladeShape) -> Mesh {
+    let (inner, outer) = (circle(shape.plate()), circle(shape.radius));
+    let half = shape.thickness / 2.0;
+    let mut facets = Facets::default();
+    for x in [-half, half] {
+        let side = Vec3::X * x;
+        for i in 0..BLUR_STEPS {
+            let next = (i + 1) % BLUR_STEPS;
+            let [a, b, c, d] = [inner[i], outer[i], outer[next], inner[next]].map(|p| p + side);
+            let uv = [a, b, c, d].map(|p| shape.uv(p));
+            let normal = Vec3::X * x.signum();
+            facets.add([a, b, c], normal, [uv[0], uv[1], uv[2]]);
+            facets.add([a, c, d], normal, [uv[0], uv[2], uv[3]]);
+        }
+    }
+    facets.build()
+}
+
+/// Points around a circle of `radius` in the plane x = 0, from up toward +z.
+fn circle(radius: f32) -> Vec<Vec3> {
+    (0..BLUR_STEPS)
+        .map(|i| {
+            let angle = std::f32::consts::TAU * i as f32 / BLUR_STEPS as f32;
+            Vec3::new(0.0, angle.cos(), angle.sin()) * radius
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use bevy::mesh::VertexAttributeValues;
@@ -1713,5 +1947,50 @@ mod tests {
             "{}",
             inside(far, -1.0)
         );
+    }
+
+    #[test]
+    fn a_saw_blades_teeth_lead_the_way_it_turns() {
+        let shape = BladeShape::new(Blade {
+            diameter: Length::from_inches(10),
+            kerf: Blade::FULL_KERF,
+        });
+        assert_eq!(shape.teeth, 24);
+        let (pitch, inch) = (shape.pitch(), 0.0254);
+        // Just short of a tooth's face is its tip; just past it, the gullet in front of it.
+        assert_eq!(shape.rim(3.0 * pitch - 1e-4), shape.radius);
+        assert!(shape.rim(3.0 * pitch + 1e-4) < shape.radius - 0.15 * inch);
+        // Its back climbs from the gullet to the tip.
+        assert!(shape.rim(3.5 * pitch) < shape.rim(3.8 * pitch));
+        assert!((0..1000).all(|i| shape.rim(i as f32 * 0.01) >= shape.plate() - 1e-6));
+    }
+
+    #[test]
+    fn a_saw_blade_faces_out_all_around() {
+        let shape = BladeShape::new(Blade {
+            diameter: Length::from_inches(12),
+            kerf: Blade::FULL_KERF,
+        });
+        for mesh in [
+            saw_blade(&shape),
+            spinning_plate(&shape),
+            spinning_teeth(&shape),
+        ] {
+            for (position, normal) in positions(&mesh).into_iter().zip(normals(&mesh)) {
+                // Its faces face away from its middle, and its rim away from its arbor; the
+                // faces of its teeth face the way it turns, square to the arbor.
+                let out = if normal.x != 0.0 {
+                    Vec3::X * position.x
+                } else {
+                    position.with_x(0.0)
+                };
+                assert!(normal.dot(out) >= -1e-6, "{normal} at {position}");
+            }
+            assert!(
+                uvs(&mesh)
+                    .iter()
+                    .all(|uv| uv.min_element() >= 0.0 && uv.max_element() <= 1.0)
+            );
+        }
     }
 }

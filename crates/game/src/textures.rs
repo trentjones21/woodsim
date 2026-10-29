@@ -4,12 +4,16 @@
 //! Every texture tiles seamlessly, so surfaces of any size can repeat it. They're painted
 //! rather than photographic: soft color and pattern, no bumps.
 
+use std::f32::consts::TAU;
+
 use bevy::{
     asset::RenderAssetUsages,
     image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor},
     prelude::*,
     render::render_resource::{Extent3d, TextureDimension, TextureFormat},
 };
+
+use crate::meshes::BladeShape;
 
 /// One repeat of a wood texture covers this much board, in meters: along the grain, and across.
 pub const WOOD_TILE_ALONG: f32 = 0.8;
@@ -159,6 +163,276 @@ pub fn grass() -> Image {
         }
     }
     texture(SIZE, SIZE, color, TextureFormat::Rgba8UnormSrgb)
+}
+
+/// A saw blade's face, square on, filling the square around it (`meshes::saw_blade` lays it on
+/// flat): bright steel, dark carbide on the front of each tooth, four expansion slots cut in
+/// from the rim, a mark printed near the rim, and a red label around the arbor nut with an
+/// arrow the way the blade turns. It's opaque everywhere: the mesh's outline cuts the teeth.
+pub fn saw_blade(shape: &BladeShape) -> Image {
+    const SIZE: u32 = 512;
+    let mut color = Vec::with_capacity((SIZE * SIZE * 4) as usize);
+    let pixel = 2.0 * shape.radius / SIZE as f32;
+    for y in 0..SIZE {
+        for x in 0..SIZE {
+            let (u, v) = (
+                (x as f32 + 0.5) / SIZE as f32,
+                (y as f32 + 0.5) / SIZE as f32,
+            );
+            let (up, out) = (
+                (0.5 - v) * 2.0 * shape.radius,
+                (u - 0.5) * 2.0 * shape.radius,
+            );
+            let paint = blade_paint(shape, up.hypot(out), out.atan2(up), pixel);
+            color.extend(paint.map(to_byte));
+            color.push(255);
+        }
+    }
+    blade_texture(SIZE, color)
+}
+
+/// The same blade spinning too fast for its teeth to be seen: each point shows the blade as it
+/// passed there over the last turn, more of what passed most recently, so the label's arrow and
+/// the printed mark smear into arcs trailing behind the way it turns, and the teeth into a
+/// see-through ring as solid as they are wide. Over that, white streaks whirl around it, as
+/// a cartoon draws speed: turned slowly, they and the arcs show it spinning.
+pub fn spinning_blade(shape: &BladeShape) -> Image {
+    // The blade around its arbor, ring by ring, enough steps around to see each tooth.
+    const AROUND: usize = 1024;
+    const RINGS: usize = 160;
+    // A third is the average all the way around, and the rest fades out behind each point in
+    // about an eighth of a turn.
+    const EVEN: f32 = 0.35;
+    let fade = (-8.0 / AROUND as f32).exp();
+    let step = TAU / AROUND as f32;
+    let ring_width = shape.radius / RINGS as f32;
+    let mut polar = vec![[0.0f32; 4]; AROUND * RINGS];
+    for ring in 0..RINGS {
+        let radius = (ring as f32 + 0.5) * ring_width;
+        // The blade where it is, with how much of it is there, and its color weighed by that.
+        let sharp: Vec<[f32; 4]> = (0..AROUND)
+            .map(|i| {
+                let samples = 4;
+                let mut sum = [0.0; 4];
+                for sample in 0..samples {
+                    let angle = (i as f32 + (sample as f32 + 0.5) / samples as f32) * step;
+                    if radius <= shape.rim(angle) {
+                        let paint = blade_paint(shape, radius, angle, ring_width);
+                        for channel in 0..3 {
+                            sum[channel] += paint[channel] / samples as f32;
+                        }
+                        sum[3] += 1.0 / samples as f32;
+                    }
+                }
+                sum
+            })
+            .collect();
+        let mut even = [0.0; 4];
+        for value in &sharp {
+            for channel in 0..4 {
+                even[channel] += value[channel] / AROUND as f32;
+            }
+        }
+        // What passed each point came from further around: run back against the way it turns,
+        // twice around so the trail coming into the start has built up.
+        let mut trail = [0.0; 4];
+        for k in (0..2 * AROUND).rev() {
+            let i = k % AROUND;
+            for channel in 0..4 {
+                trail[channel] = trail[channel] * fade + sharp[i][channel] * (1.0 - fade);
+            }
+            if k < AROUND {
+                for channel in 0..4 {
+                    polar[ring * AROUND + i][channel] =
+                        even[channel] * EVEN + trail[channel] * (1.0 - EVEN);
+                }
+            }
+        }
+        // A little darker than the blade standing still, as its slots and teeth smear over it,
+        // and the streaks on that, with their colors weighed by how much blade is there.
+        for i in 0..AROUND {
+            let streak = speed_streaks(shape, radius, (i as f32 + 0.5) * step, ring_width);
+            let value = &mut polar[ring * AROUND + i];
+            for channel in 0..3 {
+                value[channel] = lerp(value[channel] * 0.85, STREAK * value[3], streak);
+            }
+        }
+    }
+
+    const SIZE: u32 = 256;
+    let mut color = Vec::with_capacity((SIZE * SIZE * 4) as usize);
+    // Where nothing is, the teeth's color, so filtering at the edge doesn't darken them.
+    let edge = polar[(RINGS - 1) * AROUND];
+    for y in 0..SIZE {
+        for x in 0..SIZE {
+            let (u, v) = (
+                (x as f32 + 0.5) / SIZE as f32,
+                (y as f32 + 0.5) / SIZE as f32,
+            );
+            let (up, out) = (
+                (0.5 - v) * 2.0 * shape.radius,
+                (u - 0.5) * 2.0 * shape.radius,
+            );
+            // Between the four nearest points of the polar grid.
+            let ring = (up.hypot(out) / ring_width - 0.5).max(0.0);
+            let around = out.atan2(up).rem_euclid(TAU) / step - 0.5;
+            let (r0, a0) = (ring.floor() as usize, around.floor());
+            let (fr, fa) = (ring - r0 as f32, around - a0);
+            let mut sum = [0.0; 4];
+            for (dr, wr) in [(0, 1.0 - fr), (1, fr)] {
+                for (da, wa) in [(0, 1.0 - fa), (1, fa)] {
+                    let value = if r0 + dr < RINGS {
+                        let i = (a0 as i64 + da).rem_euclid(AROUND as i64) as usize;
+                        polar[(r0 + dr) * AROUND + i]
+                    } else {
+                        [0.0; 4]
+                    };
+                    for channel in 0..4 {
+                        sum[channel] += value[channel] * wr * wa;
+                    }
+                }
+            }
+            let alpha = sum[3];
+            for channel in 0..3 {
+                let straight = if alpha > 1e-3 {
+                    sum[channel] / alpha
+                } else {
+                    edge[channel] / edge[3].max(1e-3)
+                };
+                color.push(to_byte(straight));
+            }
+            color.push(to_byte(alpha));
+        }
+    }
+    blade_texture(SIZE, color)
+}
+
+/// The color of the streaks drawn around a spinning blade, in sRGB.
+const STREAK: f32 = 0.99;
+
+/// How much of a pixel `radius` out from a spinning blade's arbor at `angle`, soft over
+/// `pixel`, the speed streaks drawn around it cover: arcs at a few distances out, each thin at
+/// its tail and thick at its head, which leads the way the blade turns.
+fn speed_streaks(shape: &BladeShape, radius: f32, angle: f32, pixel: f32) -> f32 {
+    let r = shape.radius;
+    // Where each starts, how far out it is, how far around it goes, and how wide its head is.
+    const STREAKS: [(f32, f32, f32, f32); 4] = [
+        (0.3, 0.87, 1.8, 0.05),
+        (3.4, 0.85, 1.5, 0.045),
+        (1.9, 0.66, 1.6, 0.045),
+        (5.0, 0.53, 1.3, 0.04),
+    ];
+    STREAKS
+        .iter()
+        .map(|&(start, out, length, head)| {
+            let along = (angle - start).rem_euclid(TAU) / length;
+            if along >= 1.0 {
+                return 0.0;
+            }
+            // Widening from its tail to its head, then rounded off.
+            let half = head * r / 2.0 * along.sqrt() * (1.0 - along.powi(8)).sqrt();
+            smoothstep(-0.5, 0.5, (half - (radius - out * r).abs()) / pixel)
+        })
+        .fold(0.0, f32::max)
+}
+
+/// What a saw blade's face looks like `radius` out from its arbor at `angle` (from up toward
+/// +z, the way it turns), with edges soft over `pixel`, in sRGB.
+fn blade_paint(shape: &BladeShape, radius: f32, angle: f32, pixel: f32) -> [f32; 3] {
+    const STEEL: [f32; 3] = [0.8, 0.82, 0.86];
+    const SLOT: [f32; 3] = [0.16, 0.17, 0.21];
+    const CARBIDE: [f32; 3] = [0.3, 0.32, 0.38];
+    const LABEL: [f32; 3] = [0.92, 0.3, 0.22];
+    const PRINT: [f32; 3] = [0.98, 0.97, 0.94];
+    const FLANGE: [f32; 3] = [0.28, 0.3, 0.35];
+    const NUT: [f32; 3] = [0.56, 0.58, 0.63];
+    let inch = 0.0254;
+    let r = shape.radius;
+    // How much of a pixel is inside, from how far inside it is (negative outside).
+    let inside = |distance: f32| smoothstep(-0.5, 0.5, distance / pixel);
+    let mix = |color: [f32; 3], over: [f32; 3], amount: f32| {
+        [0, 1, 2].map(|channel| lerp(color[channel], over[channel], amount))
+    };
+    // How far around from `start` the point is, going the way the blade turns.
+    let past = |start: f32| (angle - start).rem_euclid(TAU);
+    // Faint rings, as the plate was ground.
+    let ground = 1.0 + 0.012 * (radius / r * 50.0).sin();
+    let mut color = STEEL.map(|channel| channel * ground);
+
+    // Four expansion slots, in from the gullets, each ending in a round hole.
+    let slot_end = 0.72 * r;
+    for k in 0..4 {
+        let slot = 0.4 + k as f32 * TAU / 4.0;
+        let (across, along) = ((angle - slot).sin() * radius, (angle - slot).cos() * radius);
+        let in_slot = inside(0.03 * inch - across.abs()) * inside(along - slot_end);
+        let hole = inside(0.09 * inch - Vec2::new(across, along - slot_end).length());
+        color = mix(color, SLOT, in_slot.max(hole));
+    }
+
+    // A mark printed near the rim, an arc a sixth of the way around with a point at its head.
+    color = mix(
+        color,
+        PRINT,
+        arrow(radius - 0.82 * r, past(2.2) * radius, 0.025 * r, 0.9 * r),
+    );
+
+    // Carbide brazed onto the front of each tooth, down from its tip.
+    let phase = shape.phase(angle);
+    let tip = inside((phase - 0.82) * shape.pitch() * radius) * inside(radius - (r - 0.16 * inch));
+    color = mix(color, CARBIDE, tip);
+
+    // The label, with an arrow around it the way the blade turns.
+    color = mix(color, LABEL, inside(0.4 * r - radius));
+    color = mix(
+        color,
+        PRINT,
+        arrow(radius - 0.27 * r, past(0.6) * radius, 0.06 * r, 0.6 * r),
+    );
+
+    // The flange, and the nut that holds the blade on, hexagonal.
+    color = mix(color, FLANGE, inside(0.15 * r - radius));
+    let (sin, cos) = angle.sin_cos();
+    let hex = (0..3)
+        .map(|k| {
+            let side = k as f32 * TAU / 6.0;
+            (radius * (cos * side.cos() + sin * side.sin())).abs()
+        })
+        .fold(0.0, f32::max);
+    color = mix(color, NUT, inside(0.075 * r - hex));
+    color
+}
+
+/// How much of a pixel an arrow along an arc covers: `across` is how far out the pixel is from
+/// the arrow's middle line, `along` how far around it from the arrow's tail, both in meters.
+/// It's `width` wide and `length` long, its head as long as it is wide.
+fn arrow(across: f32, along: f32, width: f32, length: f32) -> f32 {
+    let head = 2.0 * width;
+    let shaft = length - head;
+    let half = if along < shaft {
+        width / 2.0
+    } else {
+        // The head narrows from twice the shaft's width to a point.
+        width * (1.0 - (along - shaft) / head)
+    };
+    let soft = width / 6.0;
+    let inside_across = smoothstep(-soft, soft, half - across.abs());
+    let inside_along = smoothstep(-soft, soft, along.min(length - along));
+    inside_across * inside_along
+}
+
+/// A blade's texture, mipmapped and clamped at its edges.
+fn blade_texture(size: u32, pixels: Vec<u8>) -> Image {
+    let mut image = texture(size, size, pixels, TextureFormat::Rgba8UnormSrgb);
+    image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+        address_mode_u: ImageAddressMode::ClampToEdge,
+        address_mode_v: ImageAddressMode::ClampToEdge,
+        mag_filter: ImageFilterMode::Linear,
+        min_filter: ImageFilterMode::Linear,
+        mipmap_filter: ImageFilterMode::Linear,
+        anisotropy_clamp: 16,
+        ..default()
+    });
+    image
 }
 
 /// A repeating, mipmapped texture, so it stays crisp up close and doesn't shimmer far away.

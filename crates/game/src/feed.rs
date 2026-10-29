@@ -16,10 +16,11 @@ use woodsim::{
 };
 
 use crate::{
+    blades::{self, Rim},
     chop::MITER_STOPS,
     hand::Workpiece,
     inventory::Shelf,
-    shop::{Part, SawBoards, describe_kerf},
+    shop::{Part, Placed, SawBoards, describe_kerf},
     work::{self, Passed, Rest},
 };
 
@@ -36,6 +37,9 @@ pub const HEIGHT_MAX: Length = Length::from_inch_fraction(25, 8);
 const CLEAR: Length = Length::from_inches(5);
 /// Where a board waits: its leading end 1" short of where any blade could reach it.
 const START: Length = Length::from_inches(-6);
+/// Teeth that only cross wood this close to the table, in meters, are cutting a groove under
+/// it, and the dust comes out of the groove's end, this far out.
+const GROOVE_DUST: f32 = 0.002;
 
 #[derive(Resource)]
 pub struct TableSawStation {
@@ -61,6 +65,8 @@ pub struct TableSawStation {
     set_aside: Vec<(Shelf, Workpiece)>,
     /// Choosing what the board rests on, and against the fence.
     rest: Rest,
+    /// How many times the board has moved and the blade's taken more wood, for sawdust.
+    bites: u32,
 }
 
 struct Feeding {
@@ -95,6 +101,7 @@ impl Default for TableSawStation {
             gauge_stop: Length::from_inches(12),
             set_aside: Vec::new(),
             rest: Rest::default(),
+            bites: 0,
         }
     }
 }
@@ -410,13 +417,17 @@ impl TableSawStation {
             loose_set_aside: false,
         });
         pass.reached = (pass.reached.0.min(advance), pass.reached.1.max(advance));
-        pass.result = work::feed(
+        let result = work::feed(
             &pass.saw,
             &self.board,
             self.lie,
             pass.reached.0,
             pass.reached.1,
         );
+        if result != pass.result && matches!(result, Ok(Passed::Kerfed(_) | Passed::Cut(_))) {
+            self.bites += 1;
+        }
+        pass.result = result;
         self.advance = advance;
         // Pulled back clear of the blade, the board keeps whatever slot it got, and the fence
         // and blade are free to move for the next pass.
@@ -567,6 +578,48 @@ impl TableSawStation {
     /// Whether any of the board is over the blade, where the fence and blade can't move.
     pub fn at_blade(&self) -> bool {
         self.on_saw().is_some() && self.advance > -CLEAR && self.advance < self.reach() + CLEAR
+    }
+
+    /// How many times the board has moved and the blade's taken more wood: it's sawing
+    /// whenever this goes up.
+    pub fn bites(&self) -> u32 {
+        self.bites
+    }
+
+    /// Where the blade throws up sawdust, in table space, and which way: the highest place its
+    /// teeth cross the top of the wood, behind the blade once the board reaches there, where
+    /// they carry it up and throw it toward you. A blade under the top of the board, cutting a
+    /// groove, blows it out of the end of the groove.
+    pub fn sawdust(&self) -> Option<(Vec3, Vec3)> {
+        let saw = self.pass.as_ref().map_or(self.saw, |pass| pass.saw);
+        let boards = self.boards();
+        let wood: Vec<(Vec3, Vec3)> = [&boards.whole, &boards.piece, &boards.offcut]
+            .into_iter()
+            .flatten()
+            .map(Placed::bounds)
+            .collect();
+        // The blade as `table_saw::draw_blade` places it, tilted about where it meets the table.
+        let kerf = saw.blade.kerf.as_meters_f32();
+        let radius = saw.blade.radius().as_meters_f32();
+        let tilt = saw.tilt.radians() as f32;
+        let turn = Quat::from_rotation_z(tilt);
+        let top = (saw.height.as_meters_f32() + kerf / 2.0 * tilt.sin()) / tilt.cos();
+        let rim = Rim {
+            center: turn * Vec3::new(-kerf / 2.0, top - radius, 0.0),
+            up: turn * Vec3::Y,
+            along: Vec3::Z,
+            radius,
+        };
+        let chips = blades::chips(&rim, &wood);
+        if chips.is_some_and(|(at, _)| at.y > GROOVE_DUST) {
+            return chips;
+        }
+        let top = rim.center + rim.up * radius;
+        let (low, _) = wood
+            .iter()
+            .find(|(low, high)| top.cmpge(*low).all() && top.cmple(*high).all())?;
+        let end = Vec3::new(top.x, top.y / 2.0, low.z - GROOVE_DUST);
+        Some((end, Vec3::new(0.0, 0.5, -1.0).normalize()))
     }
 
     /// Whether the whole board is past the blade, on the outfeed side.
@@ -1658,5 +1711,38 @@ mod tests {
         );
         assert_close(piece.1.x, inches(5.0 / 16.0));
         assert_close(offcut.1.x, inches(-1.0 / 8.0));
+    }
+
+    #[test]
+    fn the_blade_bites_only_as_it_takes_wood_and_throws_the_dust_up_off_the_board() {
+        let mut station = TableSawStation::default();
+        // Coming up to the blade, it isn't cutting yet.
+        push_to(&mut station, -4);
+        assert_eq!(station.bites(), 0);
+        push_to(&mut station, 2);
+        let bitten = station.bites();
+        assert_eq!(bitten, 1);
+        // The teeth come up through the top of the 3/4" board behind the blade's center, and
+        // throw the dust up and back toward the operator.
+        let (at, toward) = station.sawdust().expect("sawing");
+        assert!((at.y - inches(0.75)).abs() < inches(0.06), "{at}");
+        assert!(at.z < 0.0, "{at}");
+        assert!(toward.y > 0.0 && toward.z > 0.0, "{toward}");
+        // Pulled back, it takes nothing more.
+        push_to(&mut station, 0);
+        assert_eq!(station.bites(), bitten);
+    }
+
+    #[test]
+    fn a_groove_blows_its_dust_out_of_the_end() {
+        let mut station = TableSawStation::default();
+        station.set_height(Length::from_inch_fraction(1, 4));
+        push_to(&mut station, 8);
+        // Under the top of the board, the dust comes out where the groove does, at the
+        // leading end, 8" past the blade.
+        let (at, toward) = station.sawdust().expect("sawing");
+        assert!((at.z + inches(8.0)).abs() < inches(0.1), "{at}");
+        assert!(at.y > 0.0 && at.y < inches(0.25), "{at}");
+        assert!(toward.y > 0.0 && toward.z < 0.0, "{toward}");
     }
 }

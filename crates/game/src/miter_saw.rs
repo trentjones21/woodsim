@@ -6,6 +6,7 @@ use bevy::{picking::pointer::PointerButton, prelude::*};
 use woodsim::{Angle, Length, MiterSaw};
 
 use crate::{
+    blades::{BladeSystems, Motor, Sawing, spawn_blade},
     chop::{MITER_STOPS, MiterSawStation, board_turn},
     controls::{Action, Actions, Step},
     hand::Hand,
@@ -37,6 +38,13 @@ const STOP_WIDTH: f32 = inches(1.5);
 /// Fractions of the blade's full travel per second.
 const LOWER_SPEED: f32 = 1.0 / 0.6;
 const RAISE_SPEED: f32 = 1.0 / 0.4;
+/// Seconds the blade takes to come up to speed once the trigger's pulled, and for the brake to
+/// stop it once it's let go.
+const SPIN_UP: f32 = 0.35;
+const BRAKE: f32 = 1.2;
+/// How hard a stroke throws sawdust, against the table saw's steady feed: it's through a board
+/// in a moment, all at once.
+const STROKE_DUST: f32 = 3.0;
 
 const STOP_STEP: Length = Length::from_inch_fraction(1, 16);
 const DEPTH_STEP: Length = Length::from_inch_fraction(1, 16);
@@ -77,6 +85,7 @@ impl Plugin for MiterSawPlugin {
                             .run_if(resource_equals(ShopView::MiterSaw)),
                         work_blade,
                     ),
+                    run_saw.before(BladeSystems),
                     (draw_stop, draw_table, draw_head, draw_board),
                 )
                     .chain(),
@@ -99,6 +108,10 @@ struct Turntable;
 #[derive(Component)]
 struct Head;
 
+/// The blade, on the head.
+#[derive(Component)]
+struct Blade;
+
 #[derive(Component)]
 pub(crate) struct AtMiterSaw;
 
@@ -106,6 +119,7 @@ fn spawn_miter_saw(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut images: ResMut<Assets<Image>>,
     shop: Res<ShopAssets>,
     station: Res<MiterSawStation>,
 ) {
@@ -309,59 +323,60 @@ fn spawn_miter_saw(
     };
     let arm = centered(Vec3::new(inches(1.5), inches(1.8), arm_length));
     let handle = centered(Vec3::new(inches(1.3), inches(1.3), inches(4.5)));
-    commands
+    // The blade turns about x, its front teeth coming down onto the board.
+    let blade = spawn_blade(
+        &mut commands,
+        &mut meshes,
+        &mut materials,
+        &mut images,
+        saw.blade,
+        Motor::new(SPIN_UP, BRAKE, 0.0),
+    );
+    let head = commands
         .spawn((
             Transform::from_translation(pivot(&saw)),
             Visibility::default(),
             Head,
             ChildOf(turntable),
         ))
-        .with_children(|head| {
-            head.spawn((
-                Mesh3d(meshes.add(Cylinder::new(saw.blade.radius().as_meters_f32(), kerf))),
-                MeshMaterial3d(materials.add(StandardMaterial {
-                    base_color: Color::srgb(0.88, 0.89, 0.92),
-                    perceptual_roughness: 0.3,
-                    ..default()
-                })),
-                // A cylinder's axis starts along Y; turn it to X so the blade cuts across the board.
-                Transform::from_translation(down - Vec3::X * kerf / 2.0)
-                    .with_rotation(Quat::from_rotation_z(FRAC_PI_2)),
-                Pickable::IGNORE,
-            ));
-            head.spawn((
-                Mesh3d(arm),
-                MeshMaterial3d(body.clone()),
-                Transform::from_translation(down / 2.0 + Vec3::X * inches(1.0))
-                    .with_rotation(Quat::from_rotation_x(arm_tilt)),
-                Pickable::IGNORE,
-            ));
-            // The motor, a drum beside the blade on the stop side, with a dark end cap.
-            head.spawn((
-                Mesh3d(motor.clone()),
-                MeshMaterial3d(body.clone()),
-                Transform::from_translation(down + Vec3::new(inches(2.6), inches(2.0), 0.0))
-                    .with_rotation(Quat::from_rotation_z(FRAC_PI_2)),
-                Pickable::IGNORE,
-            ));
-            head.spawn((
-                Mesh3d(motor),
-                MeshMaterial3d(dark.clone()),
-                Transform::from_translation(down + Vec3::new(inches(5.0), inches(2.0), 0.0))
-                    .with_rotation(Quat::from_rotation_z(FRAC_PI_2))
-                    .with_scale(Vec3::new(0.85, 0.15, 0.85)),
-                Pickable::IGNORE,
-            ));
-            // The handle, out front where a hand pulls the blade down.
-            head.spawn((
-                Mesh3d(handle),
-                MeshMaterial3d(dark.clone()),
-                Transform::from_translation(
-                    down + Vec3::new(inches(0.5), inches(4.5), inches(4.0)),
-                ),
-                Pickable::IGNORE,
-            ));
-        });
+        .id();
+    commands.entity(blade).insert((
+        Transform::from_translation(down - Vec3::X * kerf / 2.0),
+        Blade,
+        ChildOf(head),
+    ));
+    commands.entity(head).with_children(|head| {
+        head.spawn((
+            Mesh3d(arm),
+            MeshMaterial3d(body.clone()),
+            Transform::from_translation(down / 2.0 + Vec3::X * inches(1.0))
+                .with_rotation(Quat::from_rotation_x(arm_tilt)),
+            Pickable::IGNORE,
+        ));
+        // The motor, a drum beside the blade on the stop side, with a dark end cap.
+        head.spawn((
+            Mesh3d(motor.clone()),
+            MeshMaterial3d(body.clone()),
+            Transform::from_translation(down + Vec3::new(inches(2.6), inches(2.0), 0.0))
+                .with_rotation(Quat::from_rotation_z(FRAC_PI_2)),
+            Pickable::IGNORE,
+        ));
+        head.spawn((
+            Mesh3d(motor),
+            MeshMaterial3d(dark.clone()),
+            Transform::from_translation(down + Vec3::new(inches(5.0), inches(2.0), 0.0))
+                .with_rotation(Quat::from_rotation_z(FRAC_PI_2))
+                .with_scale(Vec3::new(0.85, 0.15, 0.85)),
+            Pickable::IGNORE,
+        ));
+        // The handle, out front where a hand pulls the blade down.
+        head.spawn((
+            Mesh3d(handle),
+            MeshMaterial3d(dark.clone()),
+            Transform::from_translation(down + Vec3::new(inches(0.5), inches(4.5), inches(4.0))),
+            Pickable::IGNORE,
+        ));
+    });
 
     let stop_color = materials.add(StandardMaterial {
         base_color: Color::srgb(1.0, 0.78, 0.15),
@@ -471,6 +486,31 @@ fn move_stop(actions: Res<Actions>, mut station: ResMut<MiterSawStation>) {
         let stop = station.stop;
         station.set_stop(if more { stop + step } else { stop - step });
     }
+}
+
+/// Runs the blade while the trigger's held, which is holding it down, and throws sawdust up
+/// wherever the blade took wood this frame.
+fn run_saw(
+    station: Res<MiterSawStation>,
+    actions: Res<Actions>,
+    view: Res<ShopView>,
+    mut motor: Single<&mut Motor, With<Blade>>,
+    mut sawing: MessageWriter<Sawing>,
+    mut last: Local<u32>,
+) {
+    if *view == ShopView::MiterSaw && actions.held(Action::Lower) {
+        motor.run();
+    }
+    if station.bites() != *last
+        && let Some((at, toward)) = station.sawdust()
+    {
+        sawing.write(Sawing {
+            at: ORIGIN + at,
+            toward,
+            amount: STROKE_DUST,
+        });
+    }
+    *last = station.bites();
 }
 
 /// Holding the blade down at this station brings it down; letting go lets it spring back up.
