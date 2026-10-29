@@ -5,7 +5,10 @@ mod common;
 
 use common::CutApart;
 
-use woodsim::{Axis, Blade, Board, CutError, Length, MiterSaw, Orientation, Pass, TableSaw};
+use woodsim::{
+    Angle, Assembly, Axis, Blade, Board, CutError, Fastener, Length, Mating, MiterSaw, Orientation,
+    Pass, Surface, TableSaw,
+};
 
 fn inches(n: i64) -> Length {
     Length::from_inches(n)
@@ -95,4 +98,48 @@ fn on_end_the_miter_saw_chops_down_through_its_length() {
     let offcut = cut.offcut.unwrap().board;
     assert_eq!(offcut.width(), inches(1) - Blade::FULL_KERF);
     assert_eq!(cut.piece.board.origin().replay(), cut.piece.board);
+}
+
+/// A board with a scarf cut on its end: stood on end against the fence, the blade tilted 15° and
+/// set just off the fence, so the cut slopes up across its whole thickness.
+fn scarfed() -> Board {
+    let saw = TableSaw {
+        tilt: Angle::from_degrees(15),
+        ..table_saw(fraction(1, 64), inches(3))
+    };
+    let board = Board::new(inches(24), inches(3), fraction(3, 4));
+    saw.rip(&board, on_end()).cut_apart().piece.board
+}
+
+#[test]
+fn a_scarf_cut_on_end_glues_slope_to_slope_into_one_long_board() {
+    let board = scarfed();
+    // Its end slopes off 15° from its faces, a taper rather than a bevel.
+    let [(slope, angle)] = board.tapers()[..] else {
+        panic!("expected one sloping face, got {:?}", board.tapers());
+    };
+    assert_eq!(angle, Angle::from_degrees(15));
+    assert!(board.bevels().is_empty());
+    let mut scarf = Assembly::of(board.clone());
+    assert!(scarf.attach(
+        (0, Surface::Side(slope)),
+        &Assembly::of(board.clone()),
+        (0, Surface::Side(slope)),
+        Mating::default(),
+        Fastener::Glue,
+    ));
+    // End to end, the second turned over, glued flush all across the slope.
+    let [a, b] = [0, 1].map(|k| scarf.members()[k].axes());
+    let dot = |x: [f64; 3], y: [f64; 3]| (0..3).map(|k| x[k] * y[k]).sum::<f64>();
+    assert!(dot(a[0], b[0]) < -0.999);
+    assert!(dot(a[2], b[2]) < -0.999);
+    assert_eq!(scarf.joints().len(), 1);
+    assert!(scarf.fit().iter().all(|contact| contact.is_tight()));
+    // They overlap by the slope, 3/4" up at 15°, about 2.74" (less the 1/64" tips), and lie
+    // as thick as one board and a tip.
+    let [(start, end), _, (bottom, top)] = scarf.bounds();
+    let overlap = 48.0 - (end - start).as_nm() as f64 / 25_400_000.0;
+    let slope_length = (0.75 - 1.0 / 64.0) / 15f64.to_radians().tan();
+    assert!((overlap - slope_length).abs() < 1e-3, "{overlap}");
+    assert_eq!(top - bottom, fraction(49, 64));
 }

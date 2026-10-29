@@ -280,8 +280,10 @@ impl BenchStation {
         }
     }
 
-    /// Puts the picked surface against `onto`: turned the way that leaves its part most
-    /// nearly as it lies now, keeping whichever side is up, and slid to whichever end of
+    /// Puts the picked surface against `onto`: turned a way that leaves its part lying square
+    /// on the bench, if any does (two scarfs, sloped alike, go together end to end with one
+    /// turned over, not tipped up off the bench), and of those the one that leaves it most
+    /// nearly as it lies now, keeping whichever side is up; and slid to whichever end of
     /// `onto` the click at `at` was nearest, or the middle; or where it was, if `at` is `None`.
     fn line_up(&mut self, onto: Spot, at: Option<[f64; 3]>) {
         let Some(picked) = self.picked else {
@@ -301,9 +303,19 @@ impl BenchStation {
                 },
             )?;
             let lies = motion.rotation.then(target.turn);
+            // Lying square on the bench, each of its axes along one of the bench's.
+            let square = lies
+                .columns()
+                .iter()
+                .flatten()
+                .all(|v| v.abs() < 1e-9 || (v.abs() - 1.0).abs() < 1e-9);
             let up = lies.apply(up_now)[2];
             let turned = moving.turn.inverse().then(lies).degrees();
-            Some(((-up * 1e3).round() as i64, (turned * 1e2).round() as i64))
+            Some((
+                !square,
+                (-up * 1e3).round() as i64,
+                (turned * 1e2).round() as i64,
+            ))
         };
         let Some(turn) = (0..4)
             .filter_map(|turn| Some((rank(turn)?, turn)))
@@ -795,33 +807,43 @@ fn measured(length: Length) -> Length {
 }
 
 /// The surface of `board` at `point`, with the surface facing `normal` there, both in the
-/// board's mesh axes (`w`, `t`, `l` along x, y, z, in meters).
+/// board's mesh axes (`w`, `t`, `l` along x, y, z, in meters): of the surfaces facing about the
+/// same way, the one whose plane the point is on. Every surface is a plane, the faces like any
+/// side, so a side that leans, even one sloping nearly as flat as a face, as a scarf does, is
+/// found the same way.
 pub fn surface_at(board: &Board, point: Vec3, normal: Vec3) -> Option<Surface> {
-    let normal = normal.normalize_or_zero();
-    if normal.y.abs() > 0.9 {
-        return Some(if normal.y > 0.0 {
-            Surface::Top
-        } else {
-            Surface::Bottom
-        });
-    }
-    // The side facing the same way whose plane the point is nearest. A beveled side leans,
-    // facing up or down some.
-    surfaces(board)
+    let normal = normal.normalize_or_zero().as_dvec3();
+    let point = point.as_dvec3();
+    let thickness = board.thickness().as_meters_f32() as f64;
+    let mut found: Vec<(Surface, f64, f64)> = surfaces(board)
         .into_iter()
         .filter_map(|surface| {
-            let Surface::Side(edge) = surface else {
-                return None;
+            // Facing out of the wood, and where its plane is that way, in meters.
+            let (out, at) = match surface {
+                Surface::Top => (DVec3::Y, thickness),
+                Surface::Bottom => (DVec3::NEG_Y, 0.0),
+                Surface::Side(edge) => {
+                    let out = DVec3::new(edge.out.w as f64, edge.lean as f64, edge.out.l as f64);
+                    let scale = out.length();
+                    (out / scale, edge.at as f64 / scale / 1e9)
+                }
             };
-            let out = DVec3::new(edge.out.w as f64, edge.lean as f64, edge.out.l as f64);
-            let scale = out.length();
-            let facing = out.dot(normal.as_dvec3()) / scale;
-            let plane = edge.at as f64 / scale / 1e9;
-            let off = out.dot(point.as_dvec3()) / scale - plane;
-            (facing > 0.95 && off.abs() < 0.002).then_some((surface, off.abs()))
+            let facing = out.dot(normal);
+            let off = (out.dot(point) - at).abs();
+            (facing > 0.9 && off < 0.002).then_some((surface, facing, off))
         })
-        .min_by(|a, b| a.1.total_cmp(&b.1))
-        .map(|(surface, _)| surface)
+        .collect();
+    // On a plane, to well within a mesh's float precision, the one facing most nearly the way
+    // the point does; where two meet, the one it's nearest otherwise.
+    let on = |off: f64| off < 1e-5;
+    found.sort_by(|a, b| {
+        on(b.2).cmp(&on(a.2)).then(if on(a.2) && on(b.2) {
+            b.1.total_cmp(&a.1)
+        } else {
+            a.2.total_cmp(&b.2)
+        })
+    });
+    found.first().map(|&(surface, ..)| surface)
 }
 
 /// How a joint is held: "glue", "brads", "screws".
@@ -1303,6 +1325,157 @@ mod tests {
         );
         click(&mut bench, spot(0, 0, Surface::Top));
         assert!(bench.status(false).starts_with("Moving its top face."));
+    }
+
+    #[test]
+    fn a_click_anywhere_on_a_cut_board_picks_the_surface_it_lands_on() {
+        use bevy::mesh::VertexAttributeValues;
+        let saw = |fence: Length, tilt: i32, gauge: Option<i32>| woodsim::TableSaw {
+            blade: woodsim::Blade {
+                diameter: Length::from_inches(10),
+                kerf: woodsim::Blade::FULL_KERF,
+            },
+            fence,
+            height: Length::from_inches(3),
+            miter_gauge: gauge.map(|_| Length::from_inches(10)),
+            gauge_angle: Angle::from_degrees(gauge.unwrap_or(0)),
+            tilt: Angle::from_degrees(tilt),
+        };
+        let (two, sixty_fourth) = (Length::from_inches(2), Length::from_inch_fraction(1, 64));
+        let flat = Orientation::default();
+        // Bevels along an edge and across an end, face up and face down, a compound miter, a
+        // face a tilted resaw slopes, and a scarf: a board stood on end, cut with the blade
+        // tilted 15°, its end sloping off as flat as 15° from its face.
+        for (saw, lie) in [
+            (saw(two, 15, None), flat),
+            (saw(two, 45, None), flat.flipped()),
+            (saw(two, 15, Some(0)), flat.turned_left()),
+            (saw(two, 15, Some(0)), flat.turned_left().flipped()),
+            (saw(two, 15, Some(20)), flat.turned_left()),
+            (
+                saw(Length::from_inch_fraction(1, 4), 15, None),
+                flat.tipped(),
+            ),
+            (saw(sixty_fourth, 15, None), flat.stood()),
+        ] {
+            let board = Board::new(
+                Length::from_inches(24),
+                Length::from_inches(3),
+                Length::from_inch_fraction(3, 4),
+            );
+            let Ok(Pass::Cut(cut)) = saw.rip(&board, lie) else {
+                panic!("expected {lie:?} cut");
+            };
+            for piece in [cut.piece.board, cut.offcut.expect("both sides").board] {
+                let mesh = crate::meshes::lumber_mesh(&piece, Vec3::ZERO);
+                let (
+                    Some(VertexAttributeValues::Float32x3(points)),
+                    Some(VertexAttributeValues::Float32x3(normals)),
+                    Some(Indices::U32(indices)),
+                ) = (
+                    mesh.attribute(Mesh::ATTRIBUTE_POSITION),
+                    mesh.attribute(Mesh::ATTRIBUTE_NORMAL),
+                    mesh.indices(),
+                )
+                else {
+                    panic!("lumber meshes have positions, normals, and indices");
+                };
+                let thickness = piece.thickness().as_meters_f32();
+                let mut picked = Vec::new();
+                for triangle in indices.chunks(3) {
+                    let corners = [0, 1, 2].map(|k| Vec3::from(points[triangle[k] as usize]));
+                    let normal = Vec3::from(normals[triangle[0] as usize]);
+                    // The surface whose plane the triangle lies in, facing the way it does.
+                    let Some(surface) = surfaces(&piece).into_iter().find(|&surface| {
+                        let (out, at) = match surface {
+                            Surface::Top => (Vec3::Y, thickness),
+                            Surface::Bottom => (Vec3::NEG_Y, 0.0),
+                            Surface::Side(edge) => {
+                                let out = Vec3::new(
+                                    edge.out.w as f32,
+                                    edge.lean as f32,
+                                    edge.out.l as f32,
+                                );
+                                let scale = out.length();
+                                (out / scale, (edge.at as f64 / scale as f64 / 1e9) as f32)
+                            }
+                        };
+                        out.dot(normal) > 0.999
+                            && corners.iter().all(|&p| (out.dot(p) - at).abs() < 1e-5)
+                    }) else {
+                        continue;
+                    };
+                    let middle = corners.iter().sum::<Vec3>() / 3.0;
+                    assert_eq!(
+                        surface_at(&piece, middle, normal),
+                        Some(surface),
+                        "{lie:?} at {middle}"
+                    );
+                    picked.push(surface);
+                }
+                // Each of its leaning sides was there to click, and was picked.
+                for surface in surfaces(&piece) {
+                    if matches!(surface, Surface::Side(edge) if edge.leans()) {
+                        assert!(picked.contains(&surface), "{lie:?}: {}", name(surface));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn two_scarfs_glue_end_to_end_lying_flat_on_the_bench() {
+        let saw = woodsim::TableSaw {
+            blade: woodsim::Blade {
+                diameter: Length::from_inches(10),
+                kerf: woodsim::Blade::FULL_KERF,
+            },
+            fence: Length::from_inch_fraction(1, 64),
+            height: Length::from_inches(3),
+            miter_gauge: None,
+            gauge_angle: Angle::ZERO,
+            tilt: Angle::from_degrees(15),
+        };
+        let Ok(Pass::Cut(cut)) = saw.rip(&plain(), Orientation::default().stood()) else {
+            panic!("expected the end scarfed");
+        };
+        let scarfed = cut.piece.board;
+        let slope = Surface::Side(scarfed.tapers()[0].0);
+        assert_eq!(name(slope), "tapered face");
+        let mut station = BenchStation::default();
+        station.set_down(Workpiece::Board(scarfed.clone()), None);
+        station.set_down(Workpiece::Board(scarfed.clone()), None);
+        let spot = |group| Spot {
+            group,
+            member: 0,
+            surface: slope,
+        };
+        station.pick(spot(0), [0.0; 3]);
+        station.pick(spot(1), [0.0; 3]);
+        assert!(station.glue());
+        // Set down alike, slope up, one goes on turned over, end to end, flat on the bench,
+        // not tipped up off it with its slope against the other's.
+        let [group] = &station.groups[..] else {
+            panic!("expected one glue-up");
+        };
+        let axes = group
+            .assembly
+            .members()
+            .iter()
+            .map(|member| member.rotation.then(group.turn).columns())
+            .collect::<Vec<_>>();
+        for [_, _, thickness] in &axes {
+            assert!((thickness[2].abs() - 1.0).abs() < 1e-9, "{thickness:?}");
+        }
+        let along: f64 = (0..3).map(|k| axes[0][0][k] * axes[1][0][k]).sum();
+        assert!(along < -0.999);
+        assert!(
+            group
+                .assembly
+                .fit()
+                .iter()
+                .all(|contact| contact.is_tight())
+        );
     }
 
     #[test]
