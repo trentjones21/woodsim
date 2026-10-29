@@ -117,6 +117,12 @@ impl Board {
     }
 
     /// Notes which side of the cut that made it the board was on.
+    /// The same board, made as `origin` says it was.
+    pub(crate) fn with_origin(mut self, origin: Origin) -> Board {
+        self.origin = origin;
+        self
+    }
+
     pub(crate) fn set_side(&mut self, side: Side) {
         self.origin = self.origin.on_side(side);
     }

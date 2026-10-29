@@ -3,6 +3,7 @@
 mod bench;
 mod chop;
 mod controls;
+mod copy;
 mod cutting;
 mod feed;
 mod flights;
@@ -39,6 +40,7 @@ use bevy::{
 
 use bench::BenchPlugin;
 use controls::ControlsPlugin;
+use copy::CopyPlugin;
 use flights::FlightsPlugin;
 use hand::HandPlugin;
 use hud::HudPlugin;
@@ -109,6 +111,7 @@ fn main() {
         HudPlugin,
         FlightsPlugin,
         RestPlugin,
+        CopyPlugin,
     ));
 
     if let Some(path) = screenshot {

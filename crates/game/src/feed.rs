@@ -11,8 +11,8 @@
 
 use bevy::prelude::*;
 use woodsim::{
-    Angle, Axis, Blade, Board, CutError, Length, MAX_GAUGE, MAX_TILT, Orientation, Surface,
-    TableSaw,
+    Angle, Axis, Blade, Board, CutError, Length, MAX_GAUGE, MAX_TILT, Orientation, Recipe, Surface,
+    TableSaw, Tool,
 };
 
 use crate::{
@@ -294,6 +294,24 @@ impl TableSawStation {
         }
         self.lie = lie;
         true
+    }
+
+    /// What's on the saw, written out: as it was before the pass under way, with the saw as it
+    /// was set for the pass, how it lies, and how far the pass has gone, so it can be made again.
+    pub fn recipe(&self) -> Option<Recipe> {
+        self.on_saw()?;
+        let (saw, travel) = match &self.pass {
+            Some(pass) => (pass.saw, pass.reached),
+            None => (self.saw, (self.advance, self.advance)),
+        };
+        Some(Recipe {
+            wood: work::wood(&self.board),
+            saw: Some(Tool::TableSaw {
+                saw,
+                lie: work::lying(&self.board, self.lie),
+                travel,
+            }),
+        })
     }
 
     /// Starts choosing what the board rests on and what goes against the fence, each with a

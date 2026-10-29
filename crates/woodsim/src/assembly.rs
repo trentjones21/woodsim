@@ -77,6 +77,16 @@ impl Rotation {
         }
     }
 
+    /// Its whole numbers over 2^40: where it turns `x`, `y`, and `z`.
+    pub(crate) fn raw(self) -> [[i64; 3]; 3] {
+        self.columns
+    }
+
+    /// The turn whose whole numbers over 2^40 are `columns`.
+    pub(crate) fn from_raw(columns: [[i64; 3]; 3]) -> Rotation {
+        Rotation { columns }
+    }
+
     /// Whether it turns each axis exactly onto another, one way or the other: a square turn.
     pub(crate) fn is_square(self) -> bool {
         self.columns

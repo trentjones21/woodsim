@@ -57,6 +57,8 @@ pub enum Icon {
     /// A solid arrowhead, for sliding a part across a joint or panning.
     Point(Arrow),
     Inventory,
+    /// Two sheets, one over the other: a copy.
+    Copy,
     /// Into the inventory, out of it to where you are, cut again, and throw away.
     Store,
     Place,
@@ -65,12 +67,13 @@ pub enum Icon {
 }
 
 impl Icon {
-    const ALL: [Icon; 35] = [
+    const ALL: [Icon; 36] = [
         Icon::TurnLeft,
         Icon::TurnRight,
         Icon::Flip,
         Icon::StandUp,
         Icon::Rest,
+        Icon::Copy,
         Icon::SwitchGuide,
         Icon::Push,
         Icon::BringBack,
@@ -137,6 +140,19 @@ impl Icon {
                 shapes.extend(arrow_arc(p(0.6, 0.84), 0.4, 182.0, 62.0, 0.09));
                 shapes
             }
+            Icon::Copy => vec![
+                Line(
+                    vec![
+                        p(0.34, 0.24),
+                        p(0.34, 0.1),
+                        p(0.9, 0.1),
+                        p(0.9, 0.66),
+                        p(0.76, 0.66),
+                    ],
+                    0.08,
+                ),
+                Rounded(p(0.1, 0.34), p(0.66, 0.9), 0.07),
+            ],
             Icon::Rest => {
                 let mut shapes = vec![
                     Fill(vec![

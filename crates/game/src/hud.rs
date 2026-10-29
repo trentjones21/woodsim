@@ -27,6 +27,7 @@ use crate::{
     bench,
     chop::MiterSawStation,
     controls::{Action, Actions, Arrow, Step, key_for},
+    copy::{Notice, to_copy},
     feed::TableSawStation,
     flights::{HandPicture, InventoryButton, LastPress, ListArea, RowOf},
     hand::{self, Hand},
@@ -318,6 +319,7 @@ struct Game<'w> {
     hand: Res<'w, Hand>,
     showing: Res<'w, Showing>,
     inventory: Res<'w, Inventory>,
+    notice: Res<'w, Notice>,
 }
 
 impl Game<'_> {
@@ -330,11 +332,13 @@ impl Game<'_> {
             hand: &self.hand,
             showing: &self.showing,
             inventory: &self.inventory,
+            notice: self.notice.0.as_ref().map(|(notice, _)| notice.as_str()),
         }
     }
 
     fn is_changed(&self) -> bool {
-        self.view.is_changed()
+        self.notice.is_changed()
+            || self.view.is_changed()
             || self.table_saw.is_changed()
             || self.miter_saw.is_changed()
             || self.bench.is_changed()
@@ -353,6 +357,8 @@ struct Shop<'a> {
     hand: &'a Hand,
     showing: &'a Showing,
     inventory: &'a Inventory,
+    /// A line in place of the status for now, like where a copy went.
+    notice: Option<&'a str>,
 }
 
 impl Shop<'_> {
@@ -428,6 +434,7 @@ impl Shop<'_> {
             }
             CutAgain => "Put the piece away and cut another from the offcut".to_string(),
             PutAway => "Put it away".to_string(),
+            Copy => "Copy what's in hand, or what's here, for Claude".to_string(),
             Take(_) => self.use_here().to_string(),
             NewLumber(index) => {
                 let name = LUMBER
@@ -462,6 +469,7 @@ impl Shop<'_> {
         match (self.view, action) {
             (view, Take(_) | NewLumber(_)) => inventory::can_use_at(view, table, miter),
             (_, PutAway) => self.hand.0.is_some(),
+            (view, Copy) => to_copy(view, self.hand, table, miter, bench).is_some(),
             (ShopView::TableSaw, Store) => table.can_put_away(),
             (ShopView::TableSaw, CutAgain) => table.can_cut_again(),
             (ShopView::MiterSaw, Store) => miter.can_put_away(),
@@ -552,6 +560,9 @@ impl Shop<'_> {
 
     /// The line on what's going on.
     fn status(&self, hovered: Option<ShopView>) -> String {
+        if let Some(notice) = self.notice {
+            return notice.to_string();
+        }
         let holding = self.hand.0.is_some();
         match self.view {
             ShopView::Overview => match (hovered, holding) {
@@ -771,6 +782,7 @@ fn spawn_hud(mut commands: Commands, icons: Res<Icons>) {
         children![(text("", 13.0, INK.with_alpha(0.7)), Readout::Fps)],
     ));
     for (action, icon) in [
+        (Action::Copy, Icon::Copy),
         (Action::Inventory, Icon::Inventory),
         (Action::Help, Icon::Help),
     ] {
@@ -1668,6 +1680,7 @@ mod tests {
             hand,
             showing,
             inventory: &INVENTORY,
+            notice: None,
         }
     }
 

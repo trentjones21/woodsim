@@ -12,7 +12,7 @@
 use std::f32::consts::FRAC_PI_2;
 
 use bevy::prelude::*;
-use woodsim::{Angle, CutError, Length, MiterSaw, Orientation, Surface};
+use woodsim::{Angle, CutError, Length, MiterSaw, Orientation, Recipe, Surface, Tool};
 
 use crate::{
     feed::shelf,
@@ -143,6 +143,31 @@ impl MiterSawStation {
     /// blade up.
     pub fn can_turn(&self) -> bool {
         self.blade_up() && matches!(self.work, Work::Ready { .. })
+    }
+
+    /// What's on the saw, written out: as it was before the stroke that cut it, with the saw,
+    /// how it lies, the stop, and how low the blade came, so the stroke can be made again. A
+    /// cut once the blade's back up is written as having gone as low as the depth stop or the
+    /// stroke lets it.
+    pub fn recipe(&self) -> Option<Recipe> {
+        let (board, length) = match &self.work {
+            Work::Empty => return None,
+            Work::Ready { board, .. } => (board, self.stop),
+            Work::Cut { board, stop, .. } => (board, *stop),
+        };
+        let bottom = match &self.work {
+            Work::Cut { .. } if self.lowered == 0.0 => self.depth_stop.unwrap_or(self.saw.stroke.1),
+            _ => self.bottom(),
+        };
+        Some(Recipe {
+            wood: work::wood(board),
+            saw: Some(Tool::MiterSaw {
+                saw: self.saw,
+                lie: work::lying(board, self.lie),
+                length,
+                bottom,
+            }),
+        })
     }
 
     /// Starts choosing what the board rests on and what goes against the fence, each with a

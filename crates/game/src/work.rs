@@ -10,8 +10,8 @@ use bevy::{
     prelude::*,
 };
 use woodsim::{
-    Assembly, Cut, CutError, GlueUpCut, GlueUpPass, Length, MiterSaw, Motion, Orientation, Pass,
-    Surface, TableSaw, Unsteady, outline, surfaces,
+    Assembly, Cut, CutError, GlueUpCut, GlueUpPass, Length, Lie, MiterSaw, Motion, Orientation,
+    Pass, Surface, TableSaw, Unsteady, Wood, outline, surfaces,
 };
 
 use crate::{
@@ -85,6 +85,22 @@ pub fn chop(
         Workpiece::GlueUp(glue_up) => saw
             .chop_glue_up(glue_up, lie.rotation(), length, bottom)
             .map(Passed::of_glue_up),
+    }
+}
+
+/// `work` as woodsim writes it out (`woodsim::Recipe`).
+pub fn wood(work: &Workpiece) -> Wood {
+    match work {
+        Workpiece::Board(board) => Wood::Board(board.clone()),
+        Workpiece::GlueUp(glue_up) => Wood::GlueUp(glue_up.clone()),
+    }
+}
+
+/// How `work`, lying as `lie` says, lies on a saw, as a pass records it.
+pub fn lying(work: &Workpiece, lie: Orientation) -> Lie {
+    match work {
+        Workpiece::Board(_) => Lie::Board(lie),
+        Workpiece::GlueUp(_) => Lie::GlueUp(lie.rotation()),
     }
 }
 

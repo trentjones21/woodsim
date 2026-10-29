@@ -59,6 +59,8 @@ pub enum Action {
     CutAgain,
     /// Put away what's in hand.
     PutAway,
+    /// Copy what's in hand, or at the station you're at, for Claude.
+    Copy,
     /// From the inventory: use a piece, or a new board of the `n`th size of lumber, at the
     /// station you're at; move a piece to the other shelf; or throw it away.
     Take(u64),
@@ -117,6 +119,7 @@ pub fn bound(view: ShopView, key: KeyCode, shift: bool) -> Option<Action> {
         (_, KeyH) => Action::Help,
         (_, KeyI) => Inventory,
         (_, KeyX) => PutAway,
+        (_, KeyY) => Action::Copy,
         (TableSaw | MiterSaw | Bench, KeyC) => Store,
         (TableSaw | MiterSaw, KeyA) => CutAgain,
         (Overview, KeyW | ArrowUp) => Pan(Arrow::Up),
@@ -156,12 +159,13 @@ pub fn bound(view: ShopView, key: KeyCode, shift: bool) -> Option<Action> {
 }
 
 /// Every key some action is bound to, in the order they're named on buttons.
-const KEYS: [KeyCode; 36] = [
+const KEYS: [KeyCode; 37] = [
     KeyCode::KeyQ,
     KeyCode::KeyE,
     KeyCode::KeyF,
     KeyCode::KeyV,
     KeyCode::KeyR,
+    KeyCode::KeyY,
     KeyCode::KeyG,
     KeyCode::KeyB,
     KeyCode::KeyU,
@@ -228,6 +232,7 @@ fn key_name(key: KeyCode) -> (&'static str, Option<&'static str>) {
         KeyCode::KeyF => ("F", Some("F")),
         KeyCode::KeyV => ("V", Some("V")),
         KeyCode::KeyR => ("R", Some("R")),
+        KeyCode::KeyY => ("Y", Some("Y")),
         KeyCode::KeyG => ("G", Some("G")),
         KeyCode::KeyB => ("B", Some("B")),
         KeyCode::KeyU => ("U", Some("U")),
