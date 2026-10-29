@@ -622,21 +622,38 @@ impl Board {
             .reduce(|a, b| (a.0.min(b.0), a.1.max(b.1)))
     }
 
-    /// The board's leaning sides, each with how far it leans from square to the faces: what
-    /// a tilted blade cut it at. In order by `Edge`'s ordering.
+    /// The board's beveled sides, leaning 45° or less from square to its faces, each with how
+    /// far it leans: what a tilted blade cut it at. In order by `Edge`'s ordering.
     pub fn bevels(&self) -> Vec<(Edge, Angle)> {
+        self.leaning()
+            .into_iter()
+            .filter(|edge| !edge.tapers())
+            .map(|edge| (edge, edge.lean_angle()))
+            .collect()
+    }
+
+    /// The board's faces that slope: sides leaning more than 45° from square to its faces
+    /// (`Edge::tapers`), each with how far it slopes from them, what resawing it on edge with
+    /// the blade tilted leaves. In order by `Edge`'s ordering.
+    pub fn tapers(&self) -> Vec<(Edge, Angle)> {
+        self.leaning()
+            .into_iter()
+            .filter(|edge| edge.tapers())
+            .map(|edge| (edge, Angle::from_degrees(90) - edge.lean_angle()))
+            .collect()
+    }
+
+    /// The board's leaning sides, in order by `Edge`'s ordering.
+    fn leaning(&self) -> Vec<Edge> {
         let edges: Vec<Edge> = self.face.iter().flat_map(Region::edges).copied().collect();
-        let mut bevels: Vec<(Edge, Angle)> = edges
+        let mut leaning: Vec<Edge> = edges
             .iter()
             .filter(|edge| edge.leans() && !edges.contains(&edge.flipped()))
-            .map(|&edge| {
-                let lean = (edge.lean.abs() as f64).atan2(edge.out.scale());
-                (edge, Angle::nearest(lean))
-            })
+            .copied()
             .collect();
-        bevels.sort();
-        bevels.dedup();
-        bevels
+        leaning.sort();
+        leaning.dedup();
+        leaning
     }
 
     /// The angles of the board's slanted ends, from square: what a miter saw cut them at. The

@@ -1252,10 +1252,21 @@ mod tests {
         let Some(Ok(Passed::Cut(crate::work::Parted::Board(cut)))) = station.result() else {
             panic!("expected the board resawn, got {:?}", station.result());
         };
-        // Each layer is thicker along one edge than the other: a face of each leans.
-        assert!(!cut.piece.board.bevels().is_empty());
+        // Each layer is thicker along one edge than the other: a face of each slopes, the way
+        // bevel siding is made.
         let offcut = cut.offcut.as_ref().expect("the other layer");
-        assert!(!offcut.board.bevels().is_empty());
+        for layer in [&cut.piece.board, &offcut.board] {
+            assert_eq!(layer.tapers().len(), 1);
+            assert_eq!(layer.tapers()[0].1, Angle::from_degrees(3));
+            assert!(layer.bevels().is_empty());
+        }
+        assert!(
+            station
+                .status()
+                .ends_with("The piece is tapered 3° across its width."),
+            "{}",
+            station.status()
+        );
     }
 
     #[test]

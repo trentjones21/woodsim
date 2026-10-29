@@ -313,6 +313,12 @@ fn tilted_through_a_board_on_edge_the_resaw_leans_across_its_width() {
     let thick = 0.375 + rise;
     assert!((piece.thickness().as_nm() as f64 / 25_400_000.0 - thick).abs() < 1e-6);
     assert!(piece.face().iter().all(|region| region.leans()));
+    // Its face slopes 3°, a taper across its width, not a bevel along an edge.
+    let tapers = piece.tapers();
+    assert_eq!(tapers.len(), 1);
+    assert_eq!(tapers[0].1, Angle::from_degrees(3));
+    assert_eq!(tapers[0].0.out.l, 0);
+    assert!(piece.bevels().is_empty());
     for part in parts(&cut) {
         assert_eq!(part.board.origin().replay(), part.board);
     }

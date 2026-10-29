@@ -834,11 +834,12 @@ pub fn fastened(fastener: Fastener) -> &'static str {
 }
 
 /// What a board's surface is called: a face, an edge, an end, or a mitered end, any of the
-/// sides beveled.
+/// sides beveled, or a face that tapers.
 pub fn name(surface: Surface) -> &'static str {
     match surface {
         Surface::Bottom => "bottom face",
         Surface::Top => "top face",
+        Surface::Side(edge) if edge.tapers() => "tapered face",
         Surface::Side(edge) if edge.leans() && edge.out.l != 0 && edge.out.w != 0 => {
             "beveled miter"
         }

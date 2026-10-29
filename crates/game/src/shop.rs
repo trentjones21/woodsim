@@ -605,6 +605,7 @@ pub fn describe_cut(verb: &str, cut: &Cut) -> String {
     let shaped: Vec<String> = [
         describe_miters(&cut.piece.board),
         describe_bevels(&cut.piece.board),
+        describe_tapers(&cut.piece.board),
     ]
     .into_iter()
     .flatten()
@@ -707,6 +708,23 @@ pub fn describe_bevels(board: &Board) -> Option<String> {
     (!described.is_empty()).then(|| format!("beveled {}", described.join(" and ")))
 }
 
+/// How a board's faces taper, if any do: "tapered 5° across its width", or along its length.
+pub fn describe_tapers(board: &Board) -> Option<String> {
+    let tapers = board.tapers();
+    let described: Vec<String> = [("across its width", true), ("along its length", false)]
+        .into_iter()
+        .filter_map(|(way, across)| {
+            let angles: Vec<String> = tapers
+                .iter()
+                .filter(|(edge, _)| (edge.out.l == 0) == across)
+                .map(|(_, angle)| angle.to_string())
+                .collect();
+            (!angles.is_empty()).then(|| format!("{} {way}", angles.join(" and ")))
+        })
+        .collect();
+    (!described.is_empty()).then(|| format!("tapered {}", described.join(" and ")))
+}
+
 /// Describes a board, its mitered ends, and the slots sawn into it, e.g. "3/4" x 7-1/4" x 24",
 /// with a stopped cut 11-9/16" long on top and 13" on the bottom". Slots that match once
 /// measured are counted rather than listed: "with three 3/4"-wide, 1/4"-deep dados all the way
@@ -731,8 +749,11 @@ pub fn describe_board(board: &Board) -> String {
     if let Some(mitered) = describe_miters(board) {
         description.push_str(&format!(", {mitered}"));
     }
-    if let Some(beveled) = describe_bevels(board) {
-        description.push_str(&format!(", {beveled}"));
+    for shaped in [describe_bevels(board), describe_tapers(board)]
+        .into_iter()
+        .flatten()
+    {
+        description.push_str(&format!(", {shaped}"));
     }
     if !slots.is_empty() {
         description.push_str(&format!(", with {}", slots.join(" and ")));

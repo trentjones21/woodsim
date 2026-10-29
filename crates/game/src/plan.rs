@@ -491,10 +491,12 @@ fn notes(board: &Board) -> String {
         .to_string()
 }
 
-/// What a surface is called in a plan's steps: a face, an edge, an end, a miter, or a bevel.
+/// What a surface is called in a plan's steps: a face, an edge, an end, a miter, a bevel, or a
+/// tapered face.
 fn called(surface: Surface) -> &'static str {
     match surface {
         Surface::Bottom | Surface::Top => "face",
+        Surface::Side(edge) if edge.tapers() => "tapered face",
         Surface::Side(edge) if edge.leans() => "bevel",
         Surface::Side(edge) if edge.out.l != 0 && edge.out.w != 0 => "miter",
         Surface::Side(edge) if edge.out.l != 0 => "end",
@@ -870,9 +872,9 @@ struct Sketch {
     slots: Vec<(Vec<Vec2>, Seen)>,
     /// Where each slanted end's middle is, which way it faces, and its angle from square.
     miters: Vec<(Vec2, Vec2, Angle)>,
-    /// Each beveled side as seen from above, whether it faces up into view or down away from
-    /// it, and its angle from square to the faces.
-    bevels: Vec<(Vec<Vec2>, Seen, Angle)>,
+    /// Each beveled side or tapered face as seen from above, whether it faces up into view or
+    /// down away from it, and what it's labeled: "45° bevel", "5° taper".
+    bevels: Vec<(Vec<Vec2>, Seen, String)>,
     /// What tells it apart from other parts: its thickness and its drawing, to a 64th.
     key: String,
 }
@@ -908,7 +910,14 @@ impl Sketch {
         let bevels = board
             .bevels()
             .into_iter()
-            .flat_map(|(edge, angle)| {
+            .map(|(edge, angle)| (edge, format!("{angle} bevel")))
+            .chain(
+                board
+                    .tapers()
+                    .into_iter()
+                    .map(|(edge, angle)| (edge, format!("{angle} taper"))),
+            )
+            .flat_map(|(edge, label)| {
                 // Leaning in going up, a bevel faces up into view.
                 let seen = if edge.lean > 0 {
                     Seen::Above
@@ -919,7 +928,7 @@ impl Sketch {
                     .into_iter()
                     .map(move |polygon| {
                         let from_above = polygon.iter().map(|&[l, w, _]| point((l, w))).collect();
-                        (from_above, seen, angle)
+                        (from_above, seen, label.clone())
                     })
             })
             .collect();
@@ -1037,13 +1046,13 @@ impl Sketch {
             bevels: self
                 .bevels
                 .iter()
-                .map(|(points, seen, angle)| {
+                .map(|(points, seen, label)| {
                     let seen = match (seen, over) {
                         (Seen::Above, true) => Seen::Below,
                         (Seen::Below, true) => Seen::Above,
                         (seen, _) => *seen,
                     };
-                    (points.iter().map(|&p| at(p)).collect(), seen, *angle)
+                    (points.iter().map(|&p| at(p)).collect(), seen, label.clone())
                 })
                 .collect(),
             key: String::new(),
@@ -1080,10 +1089,10 @@ impl Sketch {
         let mut bevels: Vec<_> = self
             .bevels
             .iter()
-            .map(|(points, seen, angle)| {
+            .map(|(points, seen, label)| {
                 let mut points: Vec<_> = points.iter().map(|&p| round(p)).collect();
                 points.sort();
-                (*seen, angle.hundredths(), points)
+                (*seen, label, points)
             })
             .collect();
         bevels.sort();
@@ -1186,7 +1195,7 @@ impl Sketch {
             text_x = up + 8.0,
             middle_y = TOP + wide / 2.0,
         );
-        for (points, _, angle) in &self.bevels {
+        for (points, _, label) in &self.bevels {
             // In the middle of the bevel, along it.
             let middle = points
                 .iter()
@@ -1196,7 +1205,7 @@ impl Sketch {
             let _ = write!(
                 svg,
                 "<text class=\"angle\" x=\"{x:.1}\" y=\"{y:.1}\" text-anchor=\"middle\" \
-                 dominant-baseline=\"middle\">{angle} bevel</text>"
+                 dominant-baseline=\"middle\">{label}</text>"
             );
         }
         for &(middle, out, angle) in &self.miters {

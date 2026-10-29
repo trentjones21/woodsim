@@ -284,6 +284,17 @@ impl Edge {
         self.lean != 0
     }
 
+    /// How far the side leans from square to the board's faces.
+    pub fn lean_angle(self) -> Angle {
+        Angle::nearest((self.lean.abs() as f64).atan2(self.out.scale()))
+    }
+
+    /// Whether it leans more than 45°, so it's more a face that slopes than a side that leans:
+    /// what resawing a board on edge with the blade tilted leaves.
+    pub fn tapers(self) -> bool {
+        self.lean_angle() > Angle::from_degrees(45)
+    }
+
     /// The same line with the wood on its other side.
     pub(crate) fn flipped(self) -> Edge {
         Edge {
