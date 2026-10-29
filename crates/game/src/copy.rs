@@ -84,7 +84,7 @@ pub fn to_copy(
                 },
             ))
         }
-        ShopView::Overview => None,
+        ShopView::Overview | ShopView::Studio => None,
     }
 }
 

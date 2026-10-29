@@ -7,6 +7,7 @@ mod copy;
 mod cutting;
 mod feed;
 mod flights;
+mod grain;
 mod hand;
 mod hud;
 mod icons;
@@ -18,9 +19,12 @@ mod plan;
 mod rest;
 mod saved;
 mod scenery;
+mod shoot;
 mod shop;
+mod studio;
 mod table_saw;
 mod textures;
+mod trace;
 mod work;
 
 use std::{path::PathBuf, time::Duration};
@@ -51,6 +55,7 @@ use rest::RestPlugin;
 use saved::SavedPlugin;
 use scenery::ScenePlugin;
 use shop::ShopPlugin;
+use studio::StudioPlugin;
 use table_saw::TableSawPlugin;
 
 fn main() {
@@ -115,6 +120,7 @@ fn main() {
         RestPlugin,
         CopyPlugin,
         SavedPlugin,
+        StudioPlugin,
     ));
 
     if let Some(path) = screenshot {

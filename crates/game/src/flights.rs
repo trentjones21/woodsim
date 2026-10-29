@@ -210,7 +210,7 @@ impl Screen<'_, '_> {
                     .map_or(Vec2::ZERO, |group| group.footprint().center());
                 crate::bench::ORIGIN + Vec3::new(middle.x, 0.03, middle.y)
             }
-            ShopView::Overview => return None,
+            ShopView::Overview | ShopView::Studio => return None,
         })
     }
 

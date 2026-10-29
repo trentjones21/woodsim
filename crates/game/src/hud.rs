@@ -35,6 +35,7 @@ use crate::{
     inventory::{self, Inventory, LUMBER, Shelf},
     join::BenchStation,
     saved::Saved,
+    shoot::Studio,
     shop::{HoveredStation, ShopView, describe_miter},
 };
 
@@ -90,6 +91,7 @@ impl Plugin for HudPlugin {
             .init_resource::<Icons>()
             .init_resource::<Showing>()
             .init_resource::<OnHud>()
+            .init_resource::<Viewfinder>()
             .add_systems(Startup, spawn_hud)
             .add_observer(activate)
             .add_systems(
@@ -106,6 +108,7 @@ impl Plugin for HudPlugin {
                     update_controls,
                     update_text,
                     show_tip,
+                    measure_viewfinder,
                 )
                     .chain(),
             )
@@ -193,6 +196,13 @@ enum Setting {
     Miter,
     Depth,
     OnBench,
+    /// In the studio: the picked light's place around the piece, its height, and its power;
+    /// the camera's height; and the lens.
+    LightAround,
+    LightHeight,
+    LightPower,
+    CameraHeight,
+    Lens,
 }
 
 /// The panel a readout sits in, to hide it when there's nothing to show.
@@ -266,6 +276,43 @@ fn dock(view: ShopView) -> Vec<Vec<Tool>> {
                 tool(Store, Icon::Store),
                 tool(TakeApart, Icon::TakeApart),
                 tool(Plans, Icon::Plans),
+                tool(Studio, Icon::Camera),
+            ],
+        ],
+        ShopView::Studio => vec![
+            vec![
+                tool(TurnLeft, Icon::TurnLeft),
+                tool(TurnRight, Icon::TurnRight),
+                tool(Flip, Icon::Flip),
+            ],
+            vec![tool(ZoomIn, Icon::ZoomIn), tool(ZoomOut, Icon::ZoomOut)],
+            vec![
+                tool(Light(0), Icon::Key),
+                tool(Light(1), Icon::Fill),
+                tool(Light(2), Icon::Rim),
+            ],
+            vec![
+                tool(
+                    Backdrop(Step {
+                        more: true,
+                        big: false,
+                    }),
+                    Icon::Backdrop,
+                ),
+                tool(
+                    Quality(Step {
+                        more: true,
+                        big: false,
+                    }),
+                    Icon::Quality,
+                ),
+            ],
+            vec![
+                Tool {
+                    look: Look::Go,
+                    ..tool(Render, Icon::Shutter)
+                },
+                tool(StopRender, Icon::LetGo),
             ],
         ],
     }
@@ -288,6 +335,13 @@ fn cards(view: ShopView) -> Vec<(Setting, Icon, Option<bool>)> {
             (Setting::Depth, Icon::Depth, Some(false)),
         ],
         ShopView::Bench => vec![(Setting::OnBench, Icon::Bench, None)],
+        ShopView::Studio => vec![
+            (Setting::LightAround, Icon::Around, Some(true)),
+            (Setting::LightHeight, Icon::Raise, Some(false)),
+            (Setting::LightPower, Icon::Bright, Some(true)),
+            (Setting::CameraHeight, Icon::Camera, Some(false)),
+            (Setting::Lens, Icon::Camera, Some(true)),
+        ],
     }
 }
 
@@ -306,6 +360,11 @@ fn stepping(setting: Setting, step: Step) -> Option<Action> {
         Setting::Miter => Action::Miter(step),
         Setting::Depth => Action::Depth(step),
         Setting::OnBench => return None,
+        Setting::LightAround => Action::Swing(step),
+        Setting::LightHeight => Action::Raise(step),
+        Setting::LightPower => Action::Brighten(step),
+        Setting::CameraHeight => Action::Tip(step),
+        Setting::Lens => Action::Lens(step),
     })
 }
 
@@ -321,6 +380,7 @@ struct Game<'w> {
     showing: Res<'w, Showing>,
     inventory: Res<'w, Inventory>,
     notice: Res<'w, Notice>,
+    studio: Res<'w, Studio>,
 }
 
 impl Game<'_> {
@@ -334,6 +394,7 @@ impl Game<'_> {
             showing: &self.showing,
             inventory: &self.inventory,
             notice: self.notice.0.as_ref().map(|(notice, _)| notice.as_str()),
+            studio: &self.studio,
         }
     }
 
@@ -346,6 +407,7 @@ impl Game<'_> {
             || self.hand.is_changed()
             || self.showing.is_changed()
             || self.inventory.is_changed()
+            || self.studio.is_changed()
     }
 }
 
@@ -360,6 +422,7 @@ struct Shop<'a> {
     inventory: &'a Inventory,
     /// A line in place of the status for now, like where a copy went.
     notice: Option<&'a str>,
+    studio: &'a Studio,
 }
 
 impl Shop<'_> {
@@ -378,12 +441,16 @@ impl Shop<'_> {
             GoTo(ShopView::TableSaw) => "Table saw".to_string(),
             GoTo(ShopView::MiterSaw) => "Miter saw".to_string(),
             GoTo(ShopView::Bench) => "Workbench".to_string(),
+            GoTo(ShopView::Studio) => "Photo studio".to_string(),
             NextStation => "Next station".to_string(),
             Pan(_) => "Look around".to_string(),
             RotateLeft => "Turn the view left".to_string(),
             RotateRight => "Turn the view right".to_string(),
             ZoomIn => "Zoom in".to_string(),
             ZoomOut => "Zoom out".to_string(),
+            TurnLeft if self.view == ShopView::Studio => "Turn the piece left".to_string(),
+            TurnRight if self.view == ShopView::Studio => "Turn the piece right".to_string(),
+            Flip if self.view == ShopView::Studio => "Flip the piece over".to_string(),
             TurnLeft if self.view == ShopView::Bench => "Turn the picked part left".to_string(),
             TurnRight if self.view == ShopView::Bench => "Turn the picked part right".to_string(),
             Flip if self.view == ShopView::Bench => "Flip the picked part over".to_string(),
@@ -428,6 +495,42 @@ impl Shop<'_> {
             TakeApart => "Take the last joint apart".to_string(),
             PickUp => "Pick it up".to_string(),
             Plans => "Plans to print".to_string(),
+            Studio => "Render it in the studio".to_string(),
+            Light(index) => format!(
+                "Move the {}",
+                crate::shoot::Studio::light_name(index).to_lowercase()
+            ),
+            Swing(s) => step(
+                s,
+                "Swing the light left",
+                "Swing the light right",
+                "5°",
+                "45°",
+            ),
+            Raise(s) => step(s, "Lower the light", "Raise the light", "5°", "15°"),
+            Brighten(s) => step(s, "Dim the light", "Brighten the light", "10%", "50%"),
+            Tip(s) => step(s, "Camera lower", "Camera higher", "1°", "5°"),
+            Lens(s) => step(s, "Shorter lens", "Longer lens", "5 mm", "to the next lens"),
+            Backdrop(s) => {
+                let setup = &self.studio.setup;
+                format!(
+                    "Backdrop: {}. Change it to {}",
+                    setup.backdrop.name().to_lowercase(),
+                    setup.backdrop.next(s.more).name().to_lowercase()
+                )
+            }
+            Quality(s) => {
+                let setup = &self.studio.setup;
+                format!(
+                    "Render quality: {}. Change it to {}",
+                    setup.quality.name().to_lowercase(),
+                    setup.quality.next(s.more).name().to_lowercase()
+                )
+            }
+            Render if self.studio.rendering() => "Finish now, and save it as it is".to_string(),
+            Render => "Render it".to_string(),
+            StopRender if self.studio.rendering() => "Stop rendering".to_string(),
+            StopRender => "Back to setting up".to_string(),
             Store if self.view == ShopView::Bench => "Put it away".to_string(),
             Store => "Put it all away".to_string(),
             CutAgain if self.view == ShopView::TableSaw => {
@@ -462,7 +565,7 @@ impl Shop<'_> {
             ShopView::TableSaw => "Put it on the table saw",
             ShopView::MiterSaw => "Put it on the miter saw",
             ShopView::Bench => "Set it on the bench",
-            ShopView::Overview => "Pick it up",
+            ShopView::Overview | ShopView::Studio => "Pick it up",
         }
     }
 
@@ -473,6 +576,8 @@ impl Shop<'_> {
         match (self.view, action) {
             (view, Take(_) | NewLumber(_) | Load(_)) => inventory::can_use_at(view, table, miter),
             (_, PutAway) => self.hand.0.is_some(),
+            // Nothing in the studio comes from the inventory or goes into it.
+            (ShopView::Studio, Inventory) => false,
             (view, Copy) => to_copy(view, self.hand, table, miter, bench).is_some(),
             (ShopView::TableSaw, Store) => table.can_put_away(),
             (ShopView::TableSaw, CutAgain) => table.can_cut_again(),
@@ -497,7 +602,17 @@ impl Shop<'_> {
             (ShopView::Bench, LetGo) => bench.picked.is_some(),
             (ShopView::Bench, PickUp) => bench.picked.is_some() && self.hand.0.is_none(),
             (ShopView::Bench, TakeApart) => bench.can_take_apart(),
-            (ShopView::Bench, Plans) => !bench.groups.is_empty(),
+            (ShopView::Bench, Plans | Studio) => !bench.groups.is_empty(),
+            (ShopView::Studio, Render) => {
+                self.studio.shoot().is_some()
+                    && (!self.studio.rendering() || self.studio.can_finish_now())
+            }
+            (ShopView::Studio, StopRender) => self.studio.rendering() || self.studio.done(),
+            (
+                ShopView::Studio,
+                TurnLeft | TurnRight | Flip | ZoomIn | ZoomOut | Light(_) | Swing(_) | Raise(_)
+                | Brighten(_) | Tip(_) | Lens(_) | Backdrop(_) | Quality(_),
+            ) => self.studio.shoot().is_some() && !self.studio.rendering(),
             _ => true,
         }
     }
@@ -514,6 +629,7 @@ impl Shop<'_> {
                 ShopView::MiterSaw => self.miter_saw.choosing_rest(),
                 _ => false,
             },
+            Action::Light(index) => self.studio.setup.picked == index,
             Action::Help => self.showing.help,
             Action::Inventory => self.showing.inventory,
             _ => false,
@@ -559,6 +675,20 @@ impl Shop<'_> {
                 },
             ),
             Setting::OnBench => ("On the bench".to_string(), bench::reading(self.bench)),
+            Setting::LightAround | Setting::LightHeight | Setting::LightPower => {
+                let (name, light) = self.studio.picked();
+                let (around, height) = Studio::where_light(light);
+                match setting {
+                    Setting::LightAround => (name.to_string(), around),
+                    Setting::LightHeight => (format!("{name} height"), height),
+                    _ => (format!("{name} power"), Studio::power_reading(light)),
+                }
+            }
+            Setting::CameraHeight => (
+                "Camera".to_string(),
+                format!("{:.0}° down", self.studio.setup.pitch.to_degrees()),
+            ),
+            Setting::Lens => ("Lens".to_string(), format!("{} mm", self.studio.setup.lens)),
         }
     }
 
@@ -586,6 +716,7 @@ impl Shop<'_> {
             ShopView::TableSaw => self.table_saw.status(),
             ShopView::MiterSaw => self.miter_saw.status(),
             ShopView::Bench => self.bench.status(holding),
+            ShopView::Studio => self.studio.status(),
         }
     }
 }
@@ -614,6 +745,10 @@ fn mouse_help(view: ShopView) -> &'static [&'static str] {
             "Click a surface of a part, then the surface it goes against",
             "Drag: look around   Scroll: zoom",
         ],
+        ShopView::Studio => &[
+            "Drag sideways: turn the piece   Drag up or down: look from higher or lower",
+            "Scroll: zoom",
+        ],
     }
 }
 
@@ -633,6 +768,11 @@ fn setting_help(setting: Setting) -> Option<&'static str> {
              table, it's off"
         }
         Setting::OnBench => return None,
+        Setting::LightAround => "Left/Right arrows: swing the light around 5° (Shift: 45°)",
+        Setting::LightHeight => "Up/Down arrows: raise or lower the light 5° (Shift: 15°)",
+        Setting::LightPower => "[ and ]: dim or brighten the light 10% (Shift: 50%)",
+        Setting::CameraHeight => "W/S: look from higher or lower 1° (Shift: 5°)",
+        Setting::Lens => ", and .: a shorter or longer lens 5 mm (Shift: to the next lens)",
     })
 }
 
@@ -1680,7 +1820,7 @@ fn update_text(
     for (panel, mut node) in &mut panels {
         let shown = match panel.0 {
             Readout::Hand => hand.0.is_some(),
-            Readout::Inventory => showing.inventory,
+            Readout::Inventory => showing.inventory && shop.view != ShopView::Studio,
             Readout::Help => showing.help,
             _ => true,
         };
@@ -1724,6 +1864,7 @@ mod tests {
     ) -> Shop<'a> {
         static INVENTORY: std::sync::LazyLock<Inventory> =
             std::sync::LazyLock::new(Inventory::default);
+        static STUDIO: std::sync::LazyLock<Studio> = std::sync::LazyLock::new(Studio::default);
         Shop {
             view,
             table_saw,
@@ -1733,6 +1874,7 @@ mod tests {
             showing,
             inventory: &INVENTORY,
             notice: None,
+            studio: &STUDIO,
         }
     }
 
@@ -1750,14 +1892,26 @@ mod tests {
             ShopView::TableSaw,
             ShopView::MiterSaw,
             ShopView::Bench,
+            ShopView::Studio,
         ] {
             let shop = shop(view, &table_saw, &miter_saw, &bench, &hand, &showing);
-            for tool in dock(view).into_iter().flatten() {
-                assert!(!shop.describe(tool.action).is_empty());
+            let steps = cards(view).into_iter().flat_map(|(setting, ..)| {
+                [false, true].into_iter().flat_map(move |more| {
+                    [false, true]
+                        .into_iter()
+                        .filter_map(move |big| stepping(setting, Step { more, big }))
+                })
+            });
+            for action in dock(view)
+                .into_iter()
+                .flatten()
+                .map(|tool| tool.action)
+                .chain(steps)
+            {
+                assert!(!shop.describe(action).is_empty());
                 assert!(
-                    key_for(view, tool.action).is_some(),
-                    "{:?} has no key at {view:?}",
-                    tool.action
+                    key_for(view, action).is_some(),
+                    "{action:?} has no key at {view:?}"
                 );
             }
             let help = help(&shop);
@@ -1828,5 +1982,69 @@ mod tests {
             })),
             "Swing right to the next stop"
         );
+    }
+}
+
+/// The part of the window the HUD leaves clear in the studio, in logical pixels: right of the
+/// settings, below the tabs, and above the line on what's going on. It's the camera's picture,
+/// so the piece is framed there and the render shows there. It's measured while setting up,
+/// and kept while a render's under way.
+#[derive(Resource, Default, Clone, Copy, Debug, PartialEq)]
+pub struct Viewfinder {
+    pub area: Option<Rect>,
+    pub window: Vec2,
+}
+
+impl Viewfinder {
+    /// How many times wider than high the picture is.
+    pub fn aspect(&self) -> Option<f32> {
+        let area = self.area?;
+        (area.height() > 0.0).then(|| area.width() / area.height())
+    }
+}
+
+/// How far the picture stays from the HUD and the window's edges, and below the top.
+const VIEWFINDER_MARGIN: f32 = 14.0;
+const VIEWFINDER_TOP: f32 = 72.0;
+
+fn measure_viewfinder(
+    game: Game,
+    camera: Single<&Camera, With<crate::shop::ShopCamera>>,
+    cards: Single<(&ComputedNode, &UiGlobalTransform), With<Cards>>,
+    panels: Query<(&PanelOf, &ComputedNode, &UiGlobalTransform)>,
+    mut viewfinder: ResMut<Viewfinder>,
+) {
+    if *game.view != ShopView::Studio || game.showing.built_for != Some(ShopView::Studio) {
+        if viewfinder.area.is_some() {
+            viewfinder.area = None;
+        }
+        return;
+    }
+    if game.studio.rendering() || game.studio.done() {
+        return;
+    }
+    let Some(window) = camera.logical_viewport_size() else {
+        return;
+    };
+    // Each node's edges, in logical pixels.
+    let edges = |node: &ComputedNode, transform: &UiGlobalTransform| {
+        let scale = node.inverse_scale_factor;
+        let center = transform.affine().translation * scale;
+        Rect::from_center_size(center, node.size * scale)
+    };
+    let (node, transform) = *cards;
+    let left = edges(node, transform).max.x + VIEWFINDER_MARGIN;
+    let bottom = panels
+        .iter()
+        .filter(|(panel, ..)| panel.0 == Readout::Status)
+        .map(|(_, node, transform)| edges(node, transform).min.y - VIEWFINDER_MARGIN)
+        .fold(window.y - VIEWFINDER_MARGIN, f32::min);
+    let area = Rect::new(left, VIEWFINDER_TOP, window.x - VIEWFINDER_MARGIN, bottom);
+    let measured = Viewfinder {
+        area: (area.width() > 50.0 && area.height() > 50.0).then_some(area),
+        window,
+    };
+    if *viewfinder != measured {
+        *viewfinder = measured;
     }
 }

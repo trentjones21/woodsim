@@ -25,9 +25,11 @@ use crate::{
     join::{BenchStation, HALF_TOP, Spot, assembly_point, surface_at},
     meshes::{Grain, board_mesh, lumber_mesh},
     plan::{self, Plan},
+    shoot::Studio,
     shop::{
         Block, Placed, Shape, ShopAssets, ShopCamera, ShopView, inches, rounded_block, station_part,
     },
+    studio,
 };
 
 /// Where the station's coordinates start in the shop: the middle of the bench top. It stands in
@@ -304,15 +306,19 @@ fn arrow_slides(directions: [Vec3; 2], right: Vec3, up: Vec3) -> [(usize, bool);
 /// Does what's asked at the bench: picks the fastener; turns or flips the part under the
 /// pointer, or else the picked one (or the only one), or the part being lined up around the
 /// joint; slides it across the joint; fastens it or lets go; takes the last joint apart; picks
-/// a part up; or draws up plans.
+/// a part up; draws up plans; or takes a glue-up into the studio.
+#[allow(clippy::too_many_arguments)]
 fn work_at_bench(
     actions: Res<Actions>,
-    camera: Single<&GlobalTransform, With<ShopCamera>>,
+    camera: Single<(&GlobalTransform, &Camera), With<ShopCamera>>,
     pointing: Res<Pointing>,
     parts: Query<&BenchPart>,
     mut bench: ResMut<BenchStation>,
     mut hand: ResMut<Hand>,
+    mut studio: ResMut<Studio>,
+    mut view: ResMut<ShopView>,
 ) {
+    let (camera, picture) = *camera;
     let under_pointer = pointing
         .part
         .and_then(|entity| parts.get(entity).ok())
@@ -366,6 +372,12 @@ fn work_at_bench(
                 }
             }
             Action::Plans => draw_up_plans(&mut bench, under_pointer),
+            Action::Studio => {
+                if let Some(piece) = bench.to_plan(under_pointer) {
+                    studio::open(&mut studio, &piece, picture);
+                    *view = ShopView::Studio;
+                }
+            }
             _ => {}
         }
     }

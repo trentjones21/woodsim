@@ -30,7 +30,8 @@ use crate::{
     meshes::{lumber_mesh, rounded_box},
     miter_saw,
     scenery::SKY,
-    table_saw,
+    shoot::Studio,
+    studio, table_saw,
     textures::{self, FLOOR_TILE, MAPLE, PINE},
 };
 
@@ -180,6 +181,8 @@ pub enum ShopView {
     TableSaw,
     MiterSaw,
     Bench,
+    /// The photo studio, where a part from the bench is set up and rendered.
+    Studio,
 }
 
 /// The floor runs this far from the middle of the shop in each direction, in meters.
@@ -453,12 +456,14 @@ impl Stations<'_> {
 fn switch_view(actions: Res<Actions>, mut view: ResMut<ShopView>) {
     for action in actions.started() {
         let next = match action {
+            // The studio is entered from the bench, and backs out to it.
+            Action::Back if *view == ShopView::Studio => ShopView::Bench,
             Action::Back => ShopView::Overview,
             Action::GoTo(station) => station,
             Action::NextStation => match *view {
                 ShopView::TableSaw => ShopView::MiterSaw,
                 ShopView::MiterSaw => ShopView::Bench,
-                ShopView::Overview | ShopView::Bench => ShopView::TableSaw,
+                ShopView::Overview | ShopView::Bench | ShopView::Studio => ShopView::TableSaw,
             },
             _ => continue,
         };
@@ -555,7 +560,7 @@ fn station_pose(station: ShopView, using_gauge: bool) -> Option<Transform> {
             Vec3::new(0.0, 0.7, 1.2),
             Vec3::new(0.0, 0.12, 0.0),
         ),
-        ShopView::Bench => return None,
+        ShopView::Bench | ShopView::Studio => return None,
     };
     Some(Transform::from_translation(origin + eye).looking_at(origin + target, Vec3::Y))
 }
@@ -566,13 +571,22 @@ fn follow_view(
     overview: Res<OverviewCamera>,
     bench_view: Res<BenchView>,
     table: Res<TableSawStation>,
+    studio: Res<Studio>,
     time: Res<Time>,
     mut camera: Single<&mut Transform, With<ShopCamera>>,
 ) {
     let goal = match *view {
         ShopView::Bench => bench_view.pose(),
+        ShopView::Studio => studio::camera_pose(&studio).unwrap_or_else(|| bench_view.pose()),
         _ => station_pose(*view, table.using_gauge()).unwrap_or_else(|| overview.pose()),
     };
+    // The studio is far from the shop: going there or back is a cut, not a flight. In it, the
+    // camera follows the setup exactly, so what's seen is what renders.
+    let far = camera.translation.distance(goal.translation) > 10.0;
+    if far || *view == ShopView::Studio {
+        **camera = goal;
+        return;
+    }
     let t = 1.0 - (-6.0 * time.delta_secs()).exp();
     camera.translation = camera.translation.lerp(goal.translation, t);
     camera.rotation = camera.rotation.slerp(goal.rotation, t);

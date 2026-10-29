@@ -107,7 +107,7 @@ pub fn set_down(
             bench.set_down(work, near.map(|point| (point - crate::bench::ORIGIN).xz()));
             true
         }
-        ShopView::Overview => {
+        ShopView::Overview | ShopView::Studio => {
             hand.0 = Some(work);
             false
         }

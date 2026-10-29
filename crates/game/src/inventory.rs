@@ -277,6 +277,7 @@ pub fn can_use_at(
         ShopView::TableSaw => table_saw.can_load(),
         ShopView::MiterSaw => miter_saw.can_load(),
         ShopView::Bench | ShopView::Overview => true,
+        ShopView::Studio => false,
     }
 }
 
@@ -325,7 +326,7 @@ fn use_inventory(
                     ShopView::TableSaw => at.table_saw.load(work),
                     ShopView::MiterSaw => at.miter_saw.load(work),
                     ShopView::Bench => at.bench.set_down(work, None),
-                    ShopView::Overview => {
+                    ShopView::Overview | ShopView::Studio => {
                         if let Some(held) = at.hand.0.replace(work) {
                             inventory.put(Shelf::Parts, held, Spot::Hand, &mut moved);
                         }
@@ -366,7 +367,7 @@ fn use_inventory(
                         inventory.put(Shelf::Parts, work, from, &mut moved);
                     }
                 }
-                ShopView::Overview => {}
+                ShopView::Overview | ShopView::Studio => {}
             },
             Action::CutAgain => match view {
                 ShopView::TableSaw => at.table_saw.cut_again(),

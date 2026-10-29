@@ -66,10 +66,26 @@ pub enum Icon {
     Place,
     Again,
     Scrap,
+    /// A camera: the studio, and its lens.
+    Camera,
+    /// A lens's iris: render.
+    Shutter,
+    /// The studio's lights: a soft box with rays, a big soft box, and a tall strip.
+    Key,
+    Fill,
+    Rim,
+    /// A light swinging around the piece, rising over it, and getting brighter.
+    Around,
+    Raise,
+    Bright,
+    /// A seamless backdrop sweeping up behind a block.
+    Backdrop,
+    /// Sparkles: how fine a render.
+    Quality,
 }
 
 impl Icon {
-    const ALL: [Icon; 37] = [
+    const ALL: [Icon; 47] = [
         Icon::TurnLeft,
         Icon::TurnRight,
         Icon::Flip,
@@ -107,6 +123,16 @@ impl Icon {
         Icon::Place,
         Icon::Again,
         Icon::Scrap,
+        Icon::Camera,
+        Icon::Shutter,
+        Icon::Key,
+        Icon::Fill,
+        Icon::Rim,
+        Icon::Around,
+        Icon::Raise,
+        Icon::Bright,
+        Icon::Backdrop,
+        Icon::Quality,
     ];
 
     /// Every icon there is.
@@ -348,6 +374,88 @@ impl Icon {
                 }
                 shapes
             }
+            Icon::Camera => vec![
+                Cut(
+                    Box::new(Rounded(p(0.08, 0.3), p(0.92, 0.84), 0.08)),
+                    Box::new(Disc(p(0.5, 0.57), 0.2)),
+                ),
+                Fill(vec![
+                    p(0.32, 0.31),
+                    p(0.4, 0.17),
+                    p(0.6, 0.17),
+                    p(0.68, 0.31),
+                ]),
+                Disc(p(0.5, 0.57), 0.11),
+            ],
+            Icon::Shutter => {
+                let center = p(0.5, 0.5);
+                let mut shapes = vec![Ring(center, 0.36, 0.09)];
+                for k in 0..6 {
+                    let angle = (k as f32 * 60.0).to_radians();
+                    let corner = center + 0.13 * Vec2::from_angle(angle);
+                    let out = center + 0.36 * Vec2::from_angle(angle + 1.1);
+                    shapes.push(Line(vec![corner, out], 0.06));
+                }
+                shapes
+            }
+            Icon::Key => {
+                let mut shapes = vec![Rounded(p(0.32, 0.32), p(0.68, 0.68), 0.05)];
+                shapes.extend(rays(p(0.5, 0.5), 0.3, 0.44, 8));
+                shapes
+            }
+            Icon::Fill => {
+                let mut shapes = vec![Cut(
+                    Box::new(Rounded(p(0.1, 0.18), p(0.9, 0.82), 0.07)),
+                    Box::new(Rounded(p(0.2, 0.28), p(0.8, 0.72), 0.03)),
+                )];
+                for x in [0.35, 0.5, 0.65] {
+                    shapes.push(Line(vec![p(x, 0.36), p(x, 0.64)], 0.05));
+                }
+                shapes
+            }
+            Icon::Rim => vec![
+                Rounded(p(0.4, 0.1), p(0.6, 0.9), 0.05),
+                Line(vec![p(0.18, 0.3), p(0.28, 0.3)], 0.07),
+                Line(vec![p(0.14, 0.5), p(0.28, 0.5)], 0.07),
+                Line(vec![p(0.18, 0.7), p(0.28, 0.7)], 0.07),
+                Line(vec![p(0.72, 0.3), p(0.82, 0.3)], 0.07),
+                Line(vec![p(0.72, 0.5), p(0.86, 0.5)], 0.07),
+                Line(vec![p(0.72, 0.7), p(0.82, 0.7)], 0.07),
+            ],
+            Icon::Around => {
+                let mut shapes = vec![Rounded(p(0.38, 0.38), p(0.62, 0.62), 0.03)];
+                shapes.extend(arrow_arc(p(0.5, 0.5), 0.34, 120.0, 270.0, 0.08));
+                shapes
+            }
+            Icon::Raise => {
+                let mut shapes = vec![
+                    Line(vec![p(0.08, 0.84), p(0.92, 0.84)], 0.07),
+                    Rounded(p(0.16, 0.7), p(0.36, 0.84), 0.02),
+                ];
+                shapes.extend(arrow_arc(p(0.26, 0.84), 0.58, 0.0, -75.0, 0.08));
+                shapes
+            }
+            Icon::Bright => {
+                let mut shapes = vec![Disc(p(0.5, 0.5), 0.17)];
+                shapes.extend(rays(p(0.5, 0.5), 0.27, 0.42, 8));
+                shapes
+            }
+            Icon::Backdrop => vec![
+                Line(
+                    [
+                        vec![p(0.08, 0.82)],
+                        arc(p(0.52, 0.5), 0.32, 90.0, 0.0),
+                        vec![p(0.84, 0.1)],
+                    ]
+                    .concat(),
+                    0.08,
+                ),
+                Rounded(p(0.2, 0.6), p(0.44, 0.78), 0.03),
+            ],
+            Icon::Quality => vec![
+                Fill(sparkle(p(0.42, 0.56), 0.34)),
+                Fill(sparkle(p(0.76, 0.22), 0.16)),
+            ],
             Icon::Help => vec![
                 Line(
                     [arc(p(0.5, 0.34), 0.18, 200.0, 450.0), vec![p(0.5, 0.64)]].concat(),
@@ -541,6 +649,27 @@ fn arrow_arc(center: Vec2, radius: f32, from: f32, sweep: f32, width: f32) -> Ve
         Shape::Line(arc(center, radius, from, to - short), width),
         head(tip, tangent, width),
     ]
+}
+
+/// Short strokes radiating from `center`, from `inner` to `outer`, `count` of them.
+fn rays(center: Vec2, inner: f32, outer: f32, count: usize) -> Vec<Shape> {
+    (0..count)
+        .map(|k| {
+            let toward = Vec2::from_angle(std::f32::consts::TAU * k as f32 / count as f32);
+            Shape::Line(vec![center + toward * inner, center + toward * outer], 0.07)
+        })
+        .collect()
+}
+
+/// A four-pointed star about `center`, `radius` to its points.
+fn sparkle(center: Vec2, radius: f32) -> Vec<Vec2> {
+    (0..8)
+        .map(|k| {
+            let angle = std::f32::consts::PI * k as f32 / 4.0 - std::f32::consts::FRAC_PI_2;
+            let reach = if k % 2 == 0 { radius } else { radius * 0.28 };
+            center + reach * Vec2::from_angle(angle)
+        })
+        .collect()
 }
 
 /// The teeth of a saw blade: a star of `count` points about `center`.

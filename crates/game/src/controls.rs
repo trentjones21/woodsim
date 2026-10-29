@@ -53,6 +53,22 @@ pub enum Action {
     TakeApart,
     PickUp,
     Plans,
+    /// At the bench, take a glue-up into the photo studio to render it.
+    Studio,
+    /// In the studio: pick the `n`th light (key, fill, rim) to move; swing it around the
+    /// piece, raise or lower it, or brighten or dim it; tip the camera up or down; a longer or
+    /// shorter lens; the next backdrop; more or less time over the render; render it (or, while
+    /// it renders, finish it now and save it); and stop the render.
+    Light(usize),
+    Swing(Step),
+    Raise(Step),
+    Brighten(Step),
+    Tip(Step),
+    Lens(Step),
+    Backdrop(Step),
+    Quality(Step),
+    Render,
+    StopRender,
     /// At a saw: put away what's on it, or put the measured piece away and the offcut back to
     /// cut again. At the bench, put away the picked part or glue-up.
     Store,
@@ -109,7 +125,7 @@ impl Action {
 pub fn bound(view: ShopView, key: KeyCode, shift: bool) -> Option<Action> {
     use Action::*;
     use KeyCode::*;
-    use ShopView::{Bench, MiterSaw, Overview, TableSaw};
+    use ShopView::{Bench, MiterSaw, Overview, Studio, TableSaw};
     let step = |more| Step { more, big: shift };
     let arrow = match key {
         ArrowLeft => Some(Arrow::Left),
@@ -120,7 +136,7 @@ pub fn bound(view: ShopView, key: KeyCode, shift: bool) -> Option<Action> {
     };
     Some(match (view, key) {
         (_, Tab) => NextStation,
-        (TableSaw | MiterSaw | Bench, Escape) => Back,
+        (TableSaw | MiterSaw | Bench | Studio, Escape) => Back,
         (_, KeyH) => Action::Help,
         (_, KeyI) => Inventory,
         (_, KeyX) => PutAway,
@@ -135,6 +151,26 @@ pub fn bound(view: ShopView, key: KeyCode, shift: bool) -> Option<Action> {
         (Overview, KeyE) => RotateRight,
         (Overview, Equal | NumpadAdd) => ZoomIn,
         (Overview, Minus | NumpadSubtract) => ZoomOut,
+        (Studio, Equal | NumpadAdd) => ZoomIn,
+        (Studio, Minus | NumpadSubtract) => ZoomOut,
+        (Studio, Digit1) => Light(0),
+        (Studio, Digit2) => Light(1),
+        (Studio, Digit3) => Light(2),
+        (Studio, ArrowLeft | ArrowRight) => Swing(step(key == ArrowRight)),
+        (Studio, ArrowUp | ArrowDown) => Raise(step(key == ArrowUp)),
+        (Studio, BracketLeft | BracketRight) => Brighten(step(key == BracketRight)),
+        (Studio, KeyW | KeyS) => Tip(step(key == KeyW)),
+        (Studio, Comma | Period) => Lens(step(key == Period)),
+        (Studio, KeyB) => Backdrop(Step {
+            more: !shift,
+            big: false,
+        }),
+        (Studio, KeyN | KeyM) => Quality(Step {
+            more: key == KeyM,
+            big: false,
+        }),
+        (Studio, Enter | NumpadEnter) => Render,
+        (Studio, Backspace | Delete) => StopRender,
         (_, KeyQ) => TurnLeft,
         (_, KeyE) => TurnRight,
         (_, KeyF) => Flip,
@@ -159,12 +195,13 @@ pub fn bound(view: ShopView, key: KeyCode, shift: bool) -> Option<Action> {
         (Bench, KeyU) => TakeApart,
         (Bench, Space) => PickUp,
         (Bench, KeyP) => Plans,
+        (Bench, KeyR) => Action::Studio,
         _ => return None,
     })
 }
 
 /// Every key some action is bound to, in the order they're named on buttons.
-const KEYS: [KeyCode; 37] = [
+const KEYS: [KeyCode; 39] = [
     KeyCode::KeyQ,
     KeyCode::KeyE,
     KeyCode::KeyF,
@@ -175,6 +212,8 @@ const KEYS: [KeyCode; 37] = [
     KeyCode::KeyB,
     KeyCode::KeyU,
     KeyCode::KeyP,
+    KeyCode::KeyN,
+    KeyCode::KeyM,
     KeyCode::KeyH,
     KeyCode::KeyI,
     KeyCode::KeyX,
@@ -242,6 +281,8 @@ fn key_name(key: KeyCode) -> (&'static str, Option<&'static str>) {
         KeyCode::KeyB => ("B", Some("B")),
         KeyCode::KeyU => ("U", Some("U")),
         KeyCode::KeyP => ("P", Some("P")),
+        KeyCode::KeyN => ("N", Some("N")),
+        KeyCode::KeyM => ("M", Some("M")),
         KeyCode::KeyH => ("H", Some("H")),
         KeyCode::KeyI => ("I", Some("I")),
         KeyCode::KeyX => ("X", Some("X")),
@@ -371,6 +412,21 @@ mod tests {
         );
         assert_eq!(bound(ShopView::Overview, KeyCode::Escape, false), None);
         assert_eq!(bound(ShopView::Bench, KeyCode::KeyV, false), None);
+        assert_eq!(
+            bound(ShopView::Studio, KeyCode::ArrowLeft, true),
+            Some(Action::Swing(Step {
+                more: false,
+                big: true
+            }))
+        );
+        assert_eq!(
+            bound(ShopView::Studio, KeyCode::Escape, false),
+            Some(Action::Back)
+        );
+        assert_eq!(
+            bound(ShopView::Bench, KeyCode::KeyR, false),
+            Some(Action::Studio)
+        );
     }
 
     #[test]
