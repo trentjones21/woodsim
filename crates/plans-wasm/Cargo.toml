@@ -1,0 +1,14 @@
+[package]
+name = "plans-wasm"
+version = "0.1.0"
+description = "Plans drawn up in WebAssembly, for the marketplace's Worker: a recipe in, its plan page out."
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+# The Worker loads the `cdylib` as a `.wasm` module; the `rlib` is for the tests.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+plans.workspace = true
+woodsim.workspace = true

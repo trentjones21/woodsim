@@ -1,0 +1,42 @@
+// The marketplace: plans uploaded from the game, drawn up by the same Rust the game draws them
+// up with (crates/plans-wasm), and shared at a link.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "woodshop-marketplace",
+  // Trent's account; it's served at woodshop-marketplace.<its subdomain>.workers.dev.
+  "account_id": "3acf8cb4bac45d2327611010d7aaf405",
+  "main": "src/index.ts",
+  // The newest date the pinned wrangler's runtime knows, so `wrangler dev` runs what deploys.
+  "compatibility_date": "2026-10-12",
+  // The plans module is built from the workspace before every dev and deploy.
+  "build": {
+    "command": "npm run wasm",
+    "watch_dir": ["src", "../crates/plans/src", "../crates/plans-wasm/src", "../crates/woodsim/src"]
+  },
+  "d1_databases": [
+    {
+      // One row a plan: its title, when it went up, and the hash of the token that takes it down.
+      "binding": "DB",
+      "database_name": "woodshop-marketplace",
+      "database_id": "a371eced-bd51-46fa-bdf8-de8bda747814",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "r2_buckets": [
+    {
+      // Each plan's recipe and the page drawn up from it, under plans/<id>/.
+      "binding": "PLANS",
+      "bucket_name": "woodshop-marketplace-plans"
+    }
+  ],
+  // Uploads need this until there are accounts: set it with `wrangler secret put UPLOAD_TOKEN`,
+  // and in .dev.vars for `wrangler dev`.
+  "secrets": {
+    "required": ["UPLOAD_TOKEN"]
+  },
+  "observability": {
+    "enabled": true,
+    "logs": { "enabled": true, "head_sampling_rate": 1 },
+    "traces": { "enabled": true, "head_sampling_rate": 0.1 }
+  }
+}

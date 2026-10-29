@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "marketplace",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["--prefix", "marketplace", "run", "dev"],
+      "port": 8787
+    }
+  ]
+}

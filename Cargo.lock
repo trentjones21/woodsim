@@ -4521,6 +4521,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "plans-wasm"
+version = "0.1.0"
+dependencies = [
+ "plans",
+ "woodsim",
+]
+
+[[package]]
 name = "png"
 version = "0.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
