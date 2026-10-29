@@ -25,6 +25,8 @@ pub enum Action {
     RotateRight,
     ZoomIn,
     ZoomOut,
+    /// At a station, the view back where you'd stand to work there, however it's been turned.
+    ResetView,
     /// A board waiting on a saw, or a part on the bench: a quarter turn each way, over, or up
     /// onto an edge or an end.
     TurnLeft,
@@ -172,6 +174,7 @@ pub fn bound(view: ShopView, key: KeyCode, shift: bool) -> Option<Action> {
         (_, KeyX) => PutAway,
         (_, KeyY) => Action::Copy,
         (TableSaw | MiterSaw | Jointer | Bench, KeyC) => Store,
+        (TableSaw | MiterSaw | Jointer | Bench, KeyZ) => ResetView,
         (TableSaw | MiterSaw, KeyA) => CutAgain,
         (Overview, KeyW | ArrowUp) => Pan(Arrow::Up),
         (Overview, KeyS | ArrowDown) => Pan(Arrow::Down),
@@ -238,7 +241,7 @@ pub fn bound(view: ShopView, key: KeyCode, shift: bool) -> Option<Action> {
 }
 
 /// Every key some action is bound to, in the order they're named on buttons.
-const KEYS: [KeyCode; 40] = [
+const KEYS: [KeyCode; 41] = [
     KeyCode::KeyQ,
     KeyCode::KeyE,
     KeyCode::KeyF,
@@ -260,6 +263,7 @@ const KEYS: [KeyCode; 40] = [
     KeyCode::KeyA,
     KeyCode::KeyS,
     KeyCode::KeyD,
+    KeyCode::KeyZ,
     KeyCode::Digit1,
     KeyCode::Digit2,
     KeyCode::Digit3,
@@ -330,6 +334,7 @@ fn key_name(key: KeyCode) -> (&'static str, Option<&'static str>) {
         KeyCode::KeyA => ("A", Some("A")),
         KeyCode::KeyS => ("S", Some("S")),
         KeyCode::KeyD => ("D", Some("D")),
+        KeyCode::KeyZ => ("Z", Some("Z")),
         KeyCode::Digit1 => ("1", Some("1")),
         KeyCode::Digit2 => ("2", Some("2")),
         KeyCode::Digit3 => ("3", Some("3")),
@@ -466,6 +471,10 @@ mod tests {
             bound(ShopView::Bench, KeyCode::KeyR, false),
             Some(Action::Studio)
         );
+        for view in [ShopView::TableSaw, ShopView::MiterSaw, ShopView::Jointer] {
+            assert_eq!(bound(view, KeyCode::KeyZ, false), Some(Action::ResetView));
+        }
+        assert_eq!(bound(ShopView::Overview, KeyCode::KeyZ, false), None);
     }
 
     #[test]

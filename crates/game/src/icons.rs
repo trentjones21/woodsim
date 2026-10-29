@@ -53,6 +53,8 @@ pub enum Icon {
     Bench,
     ZoomIn,
     ZoomOut,
+    /// An eye: the view back where you stand.
+    View,
     Help,
     /// A small step a setting moves, or a big one, the way an arrow points.
     Step(Arrow, bool),
@@ -97,7 +99,7 @@ pub enum Icon {
 }
 
 impl Icon {
-    const ALL: [Icon; 53] = [
+    const ALL: [Icon; 54] = [
         Icon::TurnLeft,
         Icon::TurnRight,
         Icon::Flip,
@@ -133,6 +135,7 @@ impl Icon {
         Icon::Bench,
         Icon::ZoomIn,
         Icon::ZoomOut,
+        Icon::View,
         Icon::Help,
         Icon::Inventory,
         Icon::Store,
@@ -435,6 +438,26 @@ impl Icon {
                     shapes.push(Line(vec![p(0.42, 0.31), p(0.42, 0.53)], 0.07));
                 }
                 shapes
+            }
+            Icon::View => {
+                // Lids meeting at the corners, the iris a ring around the pupil.
+                let steps = 16;
+                let lid = |below: f32| {
+                    (0..=steps).map(move |k| {
+                        let t = k as f32 / steps as f32;
+                        p(
+                            0.06 + 0.88 * t,
+                            0.5 + below * 0.3 * (std::f32::consts::PI * t).sin(),
+                        )
+                    })
+                };
+                let around: Vec<Vec2> = lid(-1.0)
+                    .chain(lid(1.0).collect::<Vec<_>>().into_iter().rev())
+                    .collect();
+                vec![
+                    Cut(Box::new(Fill(around)), Box::new(Disc(p(0.5, 0.5), 0.19))),
+                    Disc(p(0.5, 0.5), 0.1),
+                ]
             }
             Icon::Camera => vec![
                 Cut(

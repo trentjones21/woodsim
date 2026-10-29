@@ -3,7 +3,11 @@
 //! together, Space picks up a part or a glue-up. Then click where it goes to set it down: a saw,
 //! the workbench, or the scrap bin to throw it away; or put it away in the inventory.
 
-use bevy::prelude::*;
+use bevy::{
+    input::InputSystems,
+    picking::{PickingSystems, pointer::PointerButton},
+    prelude::*,
+};
 use woodsim::{Assembly, Board, Length};
 
 use crate::{
@@ -51,19 +55,33 @@ pub struct Hand(pub Option<Workpiece>);
 
 /// Whether the pointer press that's ending moved far enough to be a drag rather than a click: a
 /// drag slides a board along the table saw or a stop along its fence; a click picks a board up.
+/// And whether it started on something a drag moves (`Grabbable`), rather than one that turns
+/// the view.
 #[derive(Resource, Default)]
 pub struct Gesture {
     dragged: bool,
+    grabbed: bool,
 }
 
 impl Gesture {
     pub fn dragged(&self) -> bool {
         self.dragged
     }
+
+    /// Whether the press started on something a drag moves: a board fed along a table, a fence,
+    /// or a stop.
+    pub fn grabbed(&self) -> bool {
+        self.grabbed
+    }
 }
 
+/// Something a drag with the left button moves, rather than turning the view: a board fed
+/// along the table saw or the jointer, a fence, or a stop.
+#[derive(Component)]
+pub struct Grabbable;
+
 /// How far the pointer moves while pressed, in pixels, before it's a drag.
-const DRAG_THRESHOLD: f32 = 6.0;
+pub const DRAG_THRESHOLD: f32 = 6.0;
 
 pub struct HandPlugin;
 
@@ -71,13 +89,36 @@ impl Plugin for HandPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Hand>()
             .init_resource::<Gesture>()
+            .add_systems(
+                PreUpdate,
+                // Before the press reaches what's under the pointer, if anything is.
+                forget_press
+                    .after(InputSystems)
+                    .before(PickingSystems::ProcessInput),
+            )
             .add_observer(start_press)
             .add_observer(track_drag);
     }
 }
 
-fn start_press(_: On<PointerPress>, mut gesture: ResMut<Gesture>) {
+/// A new press starts afresh: not a drag yet, and not on anything, until it's found to be.
+fn forget_press(mouse: Res<ButtonInput<MouseButton>>, mut gesture: ResMut<Gesture>) {
+    if mouse.any_just_pressed([MouseButton::Left, MouseButton::Right]) {
+        *gesture = Gesture::default();
+    }
+}
+
+/// A press reaches what's under the pointer, and on up through what holds it: it's grabbed if
+/// any of them is `Grabbable`.
+fn start_press(
+    press: On<PointerPress>,
+    grabbable: Query<(), With<Grabbable>>,
+    mut gesture: ResMut<Gesture>,
+) {
     gesture.dragged = false;
+    if press.button == PointerButton::Primary && grabbable.contains(press.entity) {
+        gesture.grabbed = true;
+    }
 }
 
 fn track_drag(drag: On<PointerDrag>, mut gesture: ResMut<Gesture>) {

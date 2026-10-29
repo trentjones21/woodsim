@@ -9,7 +9,7 @@ use crate::{
     blades::{BladeSystems, Motor, Sawing, spawn_blade},
     controls::{Action, Actions, Step},
     feed::TableSawStation,
-    hand::Hand,
+    hand::{Grabbable, Hand},
     meshes::{Grain, board_mesh, lumber_mesh, rounded_box},
     rest,
     shop::{
@@ -311,6 +311,7 @@ fn spawn_saw(
             MeshMaterial3d(fence_color.clone()),
             Transform::default(),
             Fence { grab_offset: 0.0 },
+            Grabbable,
         ))
         .observe(set_material_on::<PointerOver>(fence_hover))
         .observe(set_material_on::<PointerOut>(fence_color))
@@ -384,6 +385,7 @@ fn spawn_saw(
             MeshMaterial3d(stop_color.clone()),
             Transform::default(),
             GaugeStop { grab_offset: 0.0 },
+            Grabbable,
             ChildOf(head),
         ))
         .observe(set_material_on::<PointerOver>(stop_hover))
@@ -800,6 +802,7 @@ fn draw_board(
                 slot,
                 AtTableSaw,
                 Shape::built(&placed),
+                Grabbable,
             ))
             .observe(highlight_carryable)
             .observe(set_material_on::<PointerOut>(shop.wood.clone()))

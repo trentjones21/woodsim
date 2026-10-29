@@ -241,15 +241,21 @@ fn spawn_marks(
     }
 }
 
-/// Comes to the bench looking from the front, however the view was turned last time.
-fn look_from_the_front(shop_view: Res<ShopView>, mut view: ResMut<BenchView>) {
-    if shop_view.is_changed() && *shop_view == ShopView::Bench {
+/// Comes to the bench looking from the front, however the view was turned last time, and looks
+/// from there again when asked.
+fn look_from_the_front(
+    shop_view: Res<ShopView>,
+    actions: Res<Actions>,
+    mut view: ResMut<BenchView>,
+) {
+    let asked = *shop_view == ShopView::Bench && actions.just(Action::ResetView);
+    if shop_view.is_changed() && *shop_view == ShopView::Bench || asked {
         *view = BenchView::default();
     }
 }
 
-/// Dragging turns the view around the bench and tips it up or down; scrolling or pinching
-/// zooms.
+/// Dragging, with either button, turns the view around the bench and tips it up or down;
+/// scrolling or pinching zooms.
 fn look_around(
     mouse: Res<ButtonInput<MouseButton>>,
     motion: Res<AccumulatedMouseMotion>,
@@ -260,7 +266,7 @@ fn look_around(
     mut view: ResMut<BenchView>,
 ) {
     // A drag that starts on a button isn't one to look around with.
-    if mouse.pressed(MouseButton::Left)
+    if mouse.any_pressed([MouseButton::Left, MouseButton::Right])
         && !on_hud.pressed()
         && gesture.dragged()
         && motion.delta != Vec2::ZERO

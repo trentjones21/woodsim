@@ -659,11 +659,12 @@ impl Board {
             .or_else(|| faces.iter().max_by(facing))
             .expect("a board has surfaces");
         // Square to the surface it came in through, as far as the slot goes into the wood:
-        // where it's deepest on the plane midway between its faces, either as far as the blade
-        // reached, or where the slot meets the board's outside.
+        // where it's deepest on the plane midway between its faces, as far as they're in the
+        // wood (a jointer's reach on past the fence), either as far as the blade reached, or
+        // where the slot meets the board's outside.
         let into = entry.1.map(|c| -c);
         let along = |point: [f64; 3]| dot(point, into);
-        let middle = (near + far) / 2.0;
+        let middle = (near.max(least) + far.min(most)) / 2.0;
         let furthest = kerf.furthest(into);
         let reached = self
             .outside()

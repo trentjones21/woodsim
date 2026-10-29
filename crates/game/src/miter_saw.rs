@@ -9,7 +9,7 @@ use crate::{
     blades::{BladeSystems, Motor, Sawing, spawn_blade},
     chop::{MITER_STOPS, MiterSawStation, board_turn},
     controls::{Action, Actions, Step},
-    hand::Hand,
+    hand::{Grabbable, Hand},
     meshes::{Grain, board_mesh, lumber_mesh, rounded_box},
     rest,
     shop::{
@@ -398,6 +398,7 @@ fn spawn_miter_saw(
             MeshMaterial3d(stop_color.clone()),
             Transform::default(),
             StopBlock { grab_offset: 0.0 },
+            Grabbable,
         ))
         .observe(set_material_on::<PointerOver>(stop_hover))
         .observe(set_material_on::<PointerOut>(stop_color))

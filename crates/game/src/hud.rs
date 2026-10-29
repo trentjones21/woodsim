@@ -25,7 +25,7 @@ use std::time::Duration;
 use woodsim::Fastener;
 
 use crate::{
-    bench,
+    bench::{self, BenchView},
     chop::MiterSawStation,
     controls::{Action, Actions, Arrow, Step, key_for},
     copy::{Notice, to_copy},
@@ -41,7 +41,7 @@ use crate::{
     plan,
     saved::Saved,
     shoot::Studio,
-    shop::{HoveredStation, ShopView, describe_miter},
+    shop::{HoveredStation, SawView, ShopView, describe_miter},
 };
 
 const INK: Color = Color::srgb(0.17, 0.2, 0.27);
@@ -249,6 +249,7 @@ fn dock(view: ShopView) -> Vec<Vec<Tool>> {
     ];
     let stand_up = tool(StandUp, Icon::StandUp);
     let rest = tool(Rest, Icon::Rest);
+    let look = vec![tool(ResetView, Icon::View)];
     match view {
         ShopView::Overview => vec![
             vec![
@@ -262,16 +263,19 @@ fn dock(view: ShopView) -> Vec<Vec<Tool>> {
             [turning.clone(), vec![stand_up, rest]].concat(),
             vec![tool(Push, Icon::Push), tool(BringBack, Icon::BringBack)],
             vec![tool(CutAgain, Icon::Again), tool(Store, Icon::Store)],
+            look.clone(),
         ],
         ShopView::MiterSaw => vec![
             [turning.clone(), vec![stand_up, rest]].concat(),
             vec![tool(Lower, Icon::Lower)],
             vec![tool(CutAgain, Icon::Again), tool(Store, Icon::Store)],
+            look.clone(),
         ],
         ShopView::Jointer => vec![
             [turning.clone(), vec![stand_up, rest]].concat(),
             vec![tool(Push, Icon::Push), tool(BringBack, Icon::BringBack)],
             vec![tool(Store, Icon::Store)],
+            look.clone(),
         ],
         ShopView::Bench => vec![
             turning,
@@ -298,6 +302,7 @@ fn dock(view: ShopView) -> Vec<Vec<Tool>> {
                 tool(History, Icon::Pencil),
             ],
             vec![tool(Plans, Icon::Plans), tool(Studio, Icon::Camera)],
+            look,
         ],
         ShopView::Studio => vec![
             vec![
@@ -419,6 +424,7 @@ struct Game<'w> {
     editor: Res<'w, Editor>,
     notice: Res<'w, Notice>,
     studio: Res<'w, Studio>,
+    views: (Res<'w, SawView>, Res<'w, BenchView>),
 }
 
 impl Game<'_> {
@@ -437,6 +443,8 @@ impl Game<'_> {
             editor: &self.editor,
             notice: self.notice.0.as_ref().map(|(notice, _)| notice.as_str()),
             studio: &self.studio,
+            saw_view: &self.views.0,
+            bench_view: &self.views.1,
         }
     }
 
@@ -454,6 +462,8 @@ impl Game<'_> {
             || self.tree.is_changed()
             || self.editor.is_changed()
             || self.studio.is_changed()
+            || self.views.0.is_changed()
+            || self.views.1.is_changed()
     }
 }
 
@@ -473,6 +483,9 @@ struct Shop<'a> {
     /// A line in place of the status for now, like where a copy went.
     notice: Option<&'a str>,
     studio: &'a Studio,
+    /// How the view's been turned at the saw you're at, or the bench.
+    saw_view: &'a SawView,
+    bench_view: &'a BenchView,
 }
 
 impl Shop<'_> {
@@ -512,6 +525,10 @@ impl Shop<'_> {
             RotateRight => "Turn the view right".to_string(),
             ZoomIn => "Zoom in".to_string(),
             ZoomOut => "Zoom out".to_string(),
+            ResetView if self.view == ShopView::Bench => {
+                "Look from in front of the bench again".to_string()
+            }
+            ResetView => "Look from where you stand again".to_string(),
             TurnLeft if self.view == ShopView::Studio => "Turn the piece left".to_string(),
             TurnRight if self.view == ShopView::Studio => "Turn the piece right".to_string(),
             Flip if self.view == ShopView::Studio => "Flip the piece over".to_string(),
@@ -739,6 +756,8 @@ impl Shop<'_> {
                 .editing
                 .as_ref()
                 .is_some_and(|editing| editing.changed() && editing.preview.is_ok()),
+            (ShopView::Bench, ResetView) => *self.bench_view != BenchView::default(),
+            (_, ResetView) => *self.saw_view != SawView::default(),
             (ShopView::Bench, History) => bench.picked.is_some(),
             (ShopView::Bench, Loosen) => !bench.picked_joints().is_empty(),
             // Nothing in the studio comes from the inventory or goes into it.
@@ -928,17 +947,20 @@ fn mouse_help(view: ShopView) -> &'static [&'static str] {
             "Drag the board forward to push it through, back to back it out",
             "Click a board clear of the blade: pick it up",
             "Holding one: click the saw to set it here",
+            "Drag anything else, or right-drag anywhere: look around   Scroll: zoom",
         ],
         ShopView::MiterSaw => &[
             "Drag the stop block to move it",
             "Click a board: pick it up",
             "Holding one: click the saw to set it against the stop",
+            "Drag anything else, or right-drag anywhere: look around   Scroll: zoom",
         ],
         ShopView::Jointer => &[
             "Drag the fence to move it",
             "Drag the board forward to feed it across, back to back it out",
             "Click a board clear of the cutterhead: pick it up",
             "Holding one: click the jointer to set it against the fence",
+            "Drag anything else, or right-drag anywhere: look around   Scroll: zoom",
         ],
         ShopView::Bench => &[
             "Click a surface of a part, then the surface it goes against",
@@ -2794,6 +2816,9 @@ mod tests {
         static TREE: std::sync::LazyLock<Tree> = std::sync::LazyLock::new(Tree::default);
         static EDITOR: std::sync::LazyLock<Editor> = std::sync::LazyLock::new(Editor::default);
         static STUDIO: std::sync::LazyLock<Studio> = std::sync::LazyLock::new(Studio::default);
+        static SAW_VIEW: std::sync::LazyLock<SawView> = std::sync::LazyLock::new(SawView::default);
+        static BENCH_VIEW: std::sync::LazyLock<BenchView> =
+            std::sync::LazyLock::new(BenchView::default);
         Shop {
             view,
             table_saw,
@@ -2808,6 +2833,8 @@ mod tests {
             editor: &EDITOR,
             notice: None,
             studio: &STUDIO,
+            saw_view: &SAW_VIEW,
+            bench_view: &BENCH_VIEW,
         }
     }
 

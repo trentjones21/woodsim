@@ -158,6 +158,15 @@ fn stopped_partway_it_leaves_a_step_curved_as_the_cutterhead() {
     assert!(!at(inches(10) + fraction(1, 4)));
     assert!(at(inches(10) + fraction(1, 2)));
     assert!(at(inches(20)));
+
+    // On edge, the step's measured from the edge it lay on, the board's thickness wide.
+    let Ok(Pass::Kerfed(stepped)) =
+        jointer.feed(&board, Orientation::default().tipped(), -radius, inches(10))
+    else {
+        panic!("stopped partway, it stays in one piece");
+    };
+    let slot = stepped.slot(&stepped.kerfs()[0]);
+    assert_eq!((slot.width, slot.depth), (fraction(3, 4), fraction(1, 16)));
 }
 
 #[test]

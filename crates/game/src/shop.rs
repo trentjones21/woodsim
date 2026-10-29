@@ -9,7 +9,7 @@ use bevy::{
     ecs::system::{EntityCommands, SystemParam},
     input::{
         gestures::PinchGesture,
-        mouse::{AccumulatedMouseScroll, MouseScrollUnit},
+        mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll, MouseScrollUnit},
     },
     math::Affine2,
     pbr::{DistanceFog, FogFalloff},
@@ -25,7 +25,7 @@ use crate::{
     controls::{Action, Actions, Arrow},
     dress::JointerStation,
     feed::TableSawStation,
-    hand::{Gesture, Hand, set_down},
+    hand::{DRAG_THRESHOLD, Gesture, Hand, set_down},
     hud::OnHud,
     join::BenchStation,
     jointer,
@@ -258,6 +258,77 @@ impl OverviewCamera {
     }
 }
 
+/// How far the view at a saw is turned from where you'd stand to work there: around the work
+/// and up over it, in radians, and how much nearer or further, as a factor. Coming to a saw puts
+/// it back where you'd stand, as asking to does.
+#[derive(Resource, Clone, Copy, Debug, PartialEq)]
+pub struct SawView {
+    turn: f32,
+    tip: f32,
+    zoom: f32,
+}
+
+impl Default for SawView {
+    fn default() -> SawView {
+        SawView {
+            turn: 0.0,
+            tip: 0.0,
+            zoom: 1.0,
+        }
+    }
+}
+
+/// How far down a saw's view looks, at least and at most, and how near and far it comes.
+const SAW_LEAST_PITCH: f32 = 8.0 * PI / 180.0;
+const SAW_MOST_PITCH: f32 = 85.0 * PI / 180.0;
+const SAW_NEAREST: f32 = 0.3;
+const SAW_FARTHEST: f32 = 2.5;
+/// How far a saw's view turns per pixel dragged, in radians, as the bench's does.
+const SAW_TURN_PER_PIXEL: f32 = 0.006;
+
+impl SawView {
+    /// Turned around the work by `yaw` and up over it by `pitch`, in radians, from looking
+    /// from `toward` it, as far as it turns up or down.
+    fn turned(&mut self, toward: Vec3, yaw: f32, pitch: f32) {
+        let (_, standing, _) = around(toward);
+        self.turn += yaw;
+        self.tip = (standing + self.tip + pitch).clamp(SAW_LEAST_PITCH, SAW_MOST_PITCH) - standing;
+    }
+
+    /// Nearer by `factor`, from `distance` away, as near or far as it comes.
+    fn zoomed(&mut self, distance: f32, factor: f32) {
+        self.zoom = (distance * self.zoom * factor).clamp(SAW_NEAREST, SAW_FARTHEST) / distance;
+    }
+
+    /// Where to look from at `target`, turned as it's been from looking from `toward` it (the
+    /// way, and how far): around it, up over it, and nearer or further.
+    fn from(&self, target: Vec3, toward: Vec3) -> Transform {
+        let (yaw, pitch, distance) = around(toward);
+        let (yaw, pitch) = (
+            yaw + self.turn,
+            (pitch + self.tip).clamp(SAW_LEAST_PITCH, SAW_MOST_PITCH),
+        );
+        let distance = (distance * self.zoom).clamp(SAW_NEAREST, SAW_FARTHEST);
+        let toward = Vec3::new(
+            yaw.sin() * pitch.cos(),
+            pitch.sin(),
+            yaw.cos() * pitch.cos(),
+        );
+        Transform::from_translation(target + toward * distance).looking_at(target, Vec3::Y)
+    }
+}
+
+/// `toward`, a way to look from and how far, as how far it's turned around from +z toward +x,
+/// how far up it looks from, and how far it is.
+fn around(toward: Vec3) -> (f32, f32, f32) {
+    let distance = toward.length();
+    (
+        toward.x.atan2(toward.z),
+        (toward.y / distance).asin(),
+        distance,
+    )
+}
+
 /// The station under the pointer, and how many of its parts are, so moving from one part to
 /// the next doesn't flicker.
 #[derive(Resource, Default)]
@@ -325,6 +396,7 @@ impl Plugin for ShopPlugin {
         app.init_resource::<ShopView>()
             .init_resource::<ShopAssets>()
             .init_resource::<OverviewCamera>()
+            .init_resource::<SawView>()
             .init_resource::<HoveredStation>()
             .add_systems(Startup, spawn_shop)
             .add_systems(
@@ -332,6 +404,7 @@ impl Plugin for ShopPlugin {
                 (
                     switch_view,
                     move_overview.run_if(resource_equals(ShopView::Overview)),
+                    look_around_saw,
                     follow_view,
                     outline_hovered_station,
                 )
@@ -545,8 +618,9 @@ fn drag_floor(drag: On<PointerDrag>, view: Res<ShopView>, mut overview: ResMut<O
 }
 
 /// Where the operator stands at each saw (in front, a little to the side, looking down), and
-/// how far away the work they're looking at is. At the bench, the view turns; see `BenchView`.
-fn station_pose(station: ShopView, using_gauge: bool) -> Option<Transform> {
+/// the work they're looking at, as where the station starts, the eye from there, and what it
+/// looks at. At the bench, the view turns; see `BenchView`.
+fn standing_at(station: ShopView, using_gauge: bool) -> Option<(Vec3, Vec3, Vec3)> {
     let (origin, eye, target) = match station {
         ShopView::Overview => return None,
         // The miter gauge's head and a board held across the table stand between a low eye and
@@ -577,14 +651,77 @@ fn station_pose(station: ShopView, using_gauge: bool) -> Option<Transform> {
         ),
         ShopView::Bench | ShopView::Studio => return None,
     };
-    Some(Transform::from_translation(origin + eye).looking_at(origin + target, Vec3::Y))
+    Some((origin, eye, target))
+}
+
+/// Where the camera looks from at a saw: where the operator stands, turned around the work,
+/// up or down, and nearer or further as `view` says.
+fn station_pose(station: ShopView, using_gauge: bool, view: &SawView) -> Option<Transform> {
+    let (origin, eye, target) = standing_at(station, using_gauge)?;
+    Some(view.from(origin + target, eye - target))
+}
+
+/// At a saw, dragging the shop around it, or right-dragging anywhere, turns the view around the
+/// work and tips it up or down; scrolling or pinching zooms; and the view comes back to where
+/// you'd stand when asked, and on coming to the saw. A left drag that starts on a board, a
+/// fence, or a stop moves that instead.
+#[allow(clippy::too_many_arguments)]
+fn look_around_saw(
+    view: Res<ShopView>,
+    actions: Res<Actions>,
+    table: Res<TableSawStation>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    motion: Res<AccumulatedMouseMotion>,
+    scroll: Res<AccumulatedMouseScroll>,
+    mut pinches: MessageReader<PinchGesture>,
+    (gesture, on_hud): (Res<Gesture>, Res<OnHud>),
+    mut moved: Local<f32>,
+    mut saw_view: ResMut<SawView>,
+) {
+    if view.is_changed() || actions.just(Action::ResetView) {
+        *saw_view = SawView::default();
+    }
+    let Some((_, eye, target)) = standing_at(*view, table.using_gauge()) else {
+        return;
+    };
+    let toward = eye - target;
+    // How far the pointer's moved since a button went down, to tell a drag from a click.
+    let buttons = [MouseButton::Left, MouseButton::Right];
+    if mouse.any_just_pressed(buttons) {
+        *moved = 0.0;
+    }
+    if mouse.any_pressed(buttons) {
+        *moved += motion.delta.length();
+    }
+    let turning =
+        mouse.pressed(MouseButton::Right) || mouse.pressed(MouseButton::Left) && !gesture.grabbed();
+    if turning && !on_hud.pressed() && *moved > DRAG_THRESHOLD && motion.delta != Vec2::ZERO {
+        saw_view.turned(
+            toward,
+            -motion.delta.x * SAW_TURN_PER_PIXEL,
+            motion.delta.y * SAW_TURN_PER_PIXEL,
+        );
+    }
+    // Scrolling over the HUD scrolls the inventory, not the view.
+    let lines = match scroll.unit {
+        _ if on_hud.over() => 0.0,
+        MouseScrollUnit::Line => scroll.delta.y,
+        MouseScrollUnit::Pixel => scroll.delta.y / PIXELS_PER_LINE,
+    };
+    let pinch: f32 = pinches.read().map(|pinch| pinch.0).sum();
+    if lines != 0.0 || pinch != 0.0 {
+        saw_view.zoomed(
+            toward.length(),
+            (1.0 - ZOOM_PER_LINE).powf(lines) * (1.0 - pinch),
+        );
+    }
 }
 
 /// Eases the camera toward the overview or the station being worked at.
 fn follow_view(
     view: Res<ShopView>,
     overview: Res<OverviewCamera>,
-    bench_view: Res<BenchView>,
+    (bench_view, saw_view): (Res<BenchView>, Res<SawView>),
     table: Res<TableSawStation>,
     studio: Res<Studio>,
     time: Res<Time>,
@@ -593,7 +730,7 @@ fn follow_view(
     let goal = match *view {
         ShopView::Bench => bench_view.pose(),
         ShopView::Studio => studio::camera_pose(&studio).unwrap_or_else(|| bench_view.pose()),
-        _ => station_pose(*view, table.using_gauge()).unwrap_or_else(|| overview.pose()),
+        _ => station_pose(*view, table.using_gauge(), &saw_view).unwrap_or_else(|| overview.pose()),
     };
     // The studio is far from the shop: going there or back is a cut, not a flight. In it, the
     // camera follows the setup exactly, so what's seen is what renders.
@@ -1067,6 +1204,52 @@ pub fn set_material_on<E: EntityEvent>(
 mod tests {
     use super::*;
     use woodsim::{MiterSaw, Pass};
+
+    #[test]
+    fn a_saws_view_turns_around_the_work_and_comes_back_to_where_you_stand() {
+        for (station, gauge) in [
+            (ShopView::TableSaw, false),
+            (ShopView::TableSaw, true),
+            (ShopView::MiterSaw, false),
+            (ShopView::Jointer, false),
+        ] {
+            let (origin, eye, target) = standing_at(station, gauge).unwrap();
+            let (work, toward) = (origin + target, eye - target);
+            let standing = station_pose(station, gauge, &SawView::default()).unwrap();
+            assert!(
+                standing.translation.distance(origin + eye) < 1e-5,
+                "{station:?}"
+            );
+
+            // Turned halfway around, it looks at the same work from as far away, from behind.
+            let mut view = SawView::default();
+            view.turned(toward, PI, 0.0);
+            let behind = station_pose(station, gauge, &view).unwrap();
+            let seen = work - behind.translation;
+            assert!((seen.length() - toward.length()).abs() < 1e-5);
+            assert!(behind.forward().dot(seen.normalize()) > 1.0 - 1e-5);
+            assert!(seen.z * toward.z > 0.0 && seen.x * toward.x >= 0.0);
+
+            // Tipped up as far as it goes, and no further: a little back down comes right
+            // down, not from wherever the drag went past.
+            let pitch = |view: &SawView| {
+                let pose = station_pose(station, gauge, view).unwrap();
+                ((pose.translation - work).y / toward.length()).asin()
+            };
+            view.turned(toward, 0.0, 10.0);
+            assert!((pitch(&view) - SAW_MOST_PITCH).abs() < 1e-5);
+            view.turned(toward, 0.0, -0.1);
+            assert!((pitch(&view) - (SAW_MOST_PITCH - 0.1)).abs() < 1e-5);
+
+            // Zoomed in as near as it comes, and back out from there.
+            view.zoomed(toward.length(), 0.01);
+            let near = station_pose(station, gauge, &view).unwrap();
+            assert!((near.translation.distance(work) - SAW_NEAREST).abs() < 1e-5);
+            view.zoomed(toward.length(), 2.0);
+            let out = station_pose(station, gauge, &view).unwrap();
+            assert!((out.translation.distance(work) - 2.0 * SAW_NEAREST).abs() < 1e-5);
+        }
+    }
 
     #[test]
     fn every_way_a_board_lies_it_fills_its_space_from_the_near_corner_as_woodsim_says() {
