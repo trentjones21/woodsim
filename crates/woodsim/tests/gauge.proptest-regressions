@@ -6,3 +6,4 @@
 # everyone who runs the test benefits from these saved cases.
 cc adb29896ec27c5ec22594a5250d58225ae5b66edc1a353ceca1cc94baef71dc9 # shrinks to hundredths = 1, stop = 1
 cc 265791b81b9281a9166e70287d8af7c590df54f0c99832678d8bfaf72f4dff5e # shrinks to hundredths = -2110, stop = 1441
+cc 2fe62b2393c16acaf2c2652fc20fb8cfbfa5c58176a0d80b32776de00cefc1cb # shrinks to first = 0, hundredths = 26, lie = 0, stop = 896

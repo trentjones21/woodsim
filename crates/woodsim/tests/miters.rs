@@ -6,7 +6,9 @@ mod common;
 use common::CutApart;
 
 use proptest::prelude::*;
-use woodsim::{Angle, Blade, Board, Length, MiterSaw, Orientation, Pass, Piece, TableSaw};
+use woodsim::{
+    Angle, Blade, Board, CutError, Length, MiterSaw, Orientation, Pass, Piece, TableSaw,
+};
 
 fn inches(n: i64) -> Length {
     Length::from_inches(n)
@@ -120,6 +122,33 @@ fn a_frame_piece_is_mitered_at_both_ends_long_point_to_long_point() {
     assert_eq!(frame.miters(), [Angle::from_degrees(45); 2]);
     assert_near(wood_along(&frame, frame.width()), inches(10), 0.0);
     assert_near(wood_along(&frame, Length::ZERO), inches(3), 0.0);
+}
+
+#[test]
+fn with_the_stop_at_the_boards_length_a_miter_still_takes_the_corner_off() {
+    let square = MiterSaw::twelve_inch()
+        .crosscut(&one_by_four(), Orientation::default(), inches(10))
+        .cut_apart()
+        .piece
+        .board;
+    // Swung toward the stop, the blade comes in at the corner on the fence and slants back
+    // across the board, taking the front corner off.
+    let cut = mitered(45)
+        .crosscut(&square, Orientation::default(), inches(10))
+        .cut_apart();
+    let piece = &cut.piece.board;
+    assert_eq!(piece.length(), inches(10));
+    assert_eq!(piece.miters(), [Angle::from_degrees(45)]);
+    assert_near(wood_along(piece, piece.width()), inches(10), 0.0);
+    assert_near(wood_along(piece, Length::ZERO), fraction(13, 2), 0.0);
+    // Swung away from it, the blade runs off the end without touching it.
+    assert_eq!(
+        mitered(-45).crosscut(&square, Orientation::default(), inches(10)),
+        Err(CutError::MissesBoard {
+            setting: inches(10),
+            available: inches(10),
+        })
+    );
 }
 
 #[test]

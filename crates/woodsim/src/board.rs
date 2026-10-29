@@ -152,6 +152,14 @@ impl Board {
         board
     }
 
+    /// Whether any of the face lies short of `at` along `direction` (times its scale), exactly.
+    pub(crate) fn reaches_below(&self, direction: Direction, at: Length) -> bool {
+        self.face.iter().flat_map(Region::points).any(|point| {
+            let (along, z) = point.along_exactly(direction);
+            along < at.as_nm() as i128 * z
+        })
+    }
+
     /// Whether any of `kerf` is inside the board's wood.
     pub(crate) fn touched_by(&self, kerf: &Kerf) -> bool {
         self.face

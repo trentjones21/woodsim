@@ -1120,6 +1120,28 @@ mod tests {
     }
 
     #[test]
+    fn a_mitered_piece_turned_over_and_end_for_end_is_mitered_again_at_the_same_stop() {
+        let mut station = TableSawStation::default();
+        assert!(station.switch_guide());
+        assert!(station.turn_left());
+        station.set_gauge_angle(Angle::from_degrees(30));
+        station.set_gauge_stop(Length::from_inches(14));
+        station.push(10.0);
+        let piece = station.take(Part::Piece).expect("the mitered piece");
+        // Set back on the saw across it and turned over, end for end, the miter's long point goes
+        // against the stop and the blade comes in at the far end's corner.
+        station.load(piece);
+        assert!(station.turn_left());
+        assert!(station.flip());
+        station.push(10.0);
+        let Some(Ok(Passed::Cut(crate::work::Parted::Board(cut)))) = station.result() else {
+            panic!("expected the second miter cut, got {:?}", station.result());
+        };
+        assert_eq!(cut.piece.board.miters(), [Angle::from_degrees(30); 2]);
+        assert_eq!(cut.piece.board.length(), Length::from_inches(14));
+    }
+
+    #[test]
     fn the_gauge_clicks_from_stop_to_stop_and_turns_only_clear_of_the_blade() {
         let mut station = TableSawStation::default();
         station.swing_gauge_to_next_stop(true);

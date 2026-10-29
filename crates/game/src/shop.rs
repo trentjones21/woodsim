@@ -531,9 +531,16 @@ fn drag_floor(drag: On<PointerDrag>, view: Res<ShopView>, mut overview: ResMut<O
 
 /// Where the operator stands at each saw (in front, a little to the side, looking down), and
 /// how far away the work they're looking at is. At the bench, the view turns; see `BenchView`.
-fn station_pose(station: ShopView) -> Option<Transform> {
+fn station_pose(station: ShopView, using_gauge: bool) -> Option<Transform> {
     let (origin, eye, target) = match station {
         ShopView::Overview => return None,
+        // The miter gauge's head and a board held across the table stand between a low eye and
+        // the blade, so with the gauge in use the view rises to look down over them.
+        ShopView::TableSaw if using_gauge => (
+            table_saw::ORIGIN,
+            Vec3::new(-0.1, 1.3, 1.0),
+            Vec3::new(-0.02, 0.0, 0.12),
+        ),
         ShopView::TableSaw => (
             table_saw::ORIGIN,
             Vec3::new(-0.3, 0.79, 1.35),
@@ -554,12 +561,13 @@ fn follow_view(
     view: Res<ShopView>,
     overview: Res<OverviewCamera>,
     bench_view: Res<BenchView>,
+    table: Res<TableSawStation>,
     time: Res<Time>,
     mut camera: Single<&mut Transform, With<ShopCamera>>,
 ) {
     let goal = match *view {
         ShopView::Bench => bench_view.pose(),
-        _ => station_pose(*view).unwrap_or_else(|| overview.pose()),
+        _ => station_pose(*view, table.using_gauge()).unwrap_or_else(|| overview.pose()),
     };
     let t = 1.0 - (-6.0 * time.delta_secs()).exp();
     camera.translation = camera.translation.lerp(goal.translation, t);

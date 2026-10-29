@@ -124,6 +124,24 @@ impl<'a> Laid<'a> {
         })
     }
 
+    /// Each board, with the face of `path`'s slot that `across` points out through, in its own
+    /// coordinates: the way out, and where the face is along it.
+    pub(crate) fn slot_faces<'b>(
+        &'b self,
+        path: &'b Path,
+    ) -> impl Iterator<Item = (&'b crate::Board, Direction, Length)> {
+        self.glue_up.members().iter().map(|member| {
+            let (across, face) = Laid::slot_face(&self.frame(member), path);
+            (&member.board, across, face)
+        })
+    }
+
+    fn slot_face(frame: &Frame, path: &Path) -> (Direction, Length) {
+        let across = frame.direction(path.across);
+        let (l, w) = frame.point(path.face);
+        (across, Length::from_nm(across.dot(l, w) as i64))
+    }
+
     fn frame(&self, member: &Member) -> Frame {
         let turn = member.rotation.then(self.lie);
         let at = self
@@ -138,7 +156,7 @@ impl<'a> Laid<'a> {
 
     /// The slot `path` cuts in the board `frame` places.
     fn kerf(&self, frame: &Frame, path: &Path) -> Kerf {
-        let across = frame.direction(path.across);
+        let (across, face) = Laid::slot_face(frame, path);
         let (along_l, along_w) =
             frame.onto_face([path.across.1 as f64, -(path.across.0 as f64), 0.0]);
         let square = across.square();
@@ -150,7 +168,6 @@ impl<'a> Laid<'a> {
         let at = |direction: Direction, (l, w): (Length, Length)| {
             Length::from_nm(direction.dot(l, w) as i64)
         };
-        let face = at(across, frame.point(path.face));
         let middle = at(along, frame.point(path.through));
         // Lying face up, its `t = 0` face is on the table; flipped, it's on top.
         let bottom = Length::from_nm(frame.origin[2].round() as i64);
