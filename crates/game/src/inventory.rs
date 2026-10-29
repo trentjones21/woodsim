@@ -6,7 +6,7 @@
 //! Wood a station sets aside comes here: whatever a board set down on a saw displaces, what a
 //! cut leaves when you take one side, strips a cut sets loose, and what you put away.
 
-use bevy::prelude::*;
+use bevy::{ecs::system::SystemParam, prelude::*};
 use woodsim::Length;
 
 use crate::{
@@ -94,8 +94,33 @@ pub struct Item {
 pub struct Row<'a> {
     /// The first of them stored, which is the one taken.
     pub id: u64,
+    /// All of them, first to last.
+    pub ids: Vec<u64>,
     pub count: usize,
     pub work: &'a Workpiece,
+}
+
+/// Wood going into the inventory or out of it, for the HUD to show it going.
+#[derive(Message, Clone, Debug)]
+pub struct Moved {
+    pub work: Workpiece,
+    pub from: Spot,
+    pub to: Spot,
+}
+
+/// Where wood moves from or to, as the HUD shows it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Spot {
+    /// Where the wood is at a station.
+    Station(ShopView),
+    /// Its line in the inventory.
+    Item(u64),
+    /// The button just clicked.
+    Pressed,
+    /// The pointer, where what's in hand is.
+    Hand,
+    /// Nowhere: thrown away.
+    Gone,
 }
 
 #[derive(Resource, Default, Debug)]
@@ -114,12 +139,6 @@ impl Inventory {
             work,
         });
         self.next
-    }
-
-    pub fn store_all(&mut self, wood: impl IntoIterator<Item = (Shelf, Workpiece)>) {
-        for (shelf, work) in wood {
-            self.store(shelf, work);
-        }
     }
 
     /// Takes the piece `id` out, to use.
@@ -154,9 +173,13 @@ impl Inventory {
         let mut rows: Vec<Row> = Vec::new();
         for item in self.items.iter().filter(|item| item.shelf == shelf) {
             match rows.iter_mut().find(|row| *row.work == item.work) {
-                Some(row) => row.count += 1,
+                Some(row) => {
+                    row.count += 1;
+                    row.ids.push(item.id);
+                }
                 None => rows.push(Row {
                     id: item.id,
+                    ids: vec![item.id],
                     count: 1,
                     work: &item.work,
                 }),
@@ -191,10 +214,32 @@ pub fn describe(work: &Workpiece) -> (String, String) {
 
 pub struct InventoryPlugin;
 
+/// When wood goes into the inventory and out of it, so the HUD can show it after.
+#[derive(SystemSet, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct InventorySystems;
+
+impl Inventory {
+    /// Puts `work` on `shelf`, and says it came from `from`.
+    fn put(&mut self, shelf: Shelf, work: Workpiece, from: Spot, moved: &mut MessageWriter<Moved>) {
+        let id = self.store(shelf, work.clone());
+        moved.write(Moved {
+            work,
+            from,
+            to: Spot::Item(id),
+        });
+    }
+}
+
 impl Plugin for InventoryPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Inventory>()
-            .add_systems(Update, (collect_set_aside, use_inventory).chain());
+            .add_message::<Moved>()
+            .add_systems(
+                Update,
+                (collect_set_aside, use_inventory)
+                    .chain()
+                    .in_set(InventorySystems),
+            );
     }
 }
 
@@ -204,12 +249,19 @@ fn collect_set_aside(
     mut table_saw: ResMut<TableSawStation>,
     mut miter_saw: ResMut<MiterSawStation>,
     mut inventory: ResMut<Inventory>,
+    mut moved: MessageWriter<Moved>,
 ) {
     if table_saw.has_set_aside() {
-        inventory.store_all(table_saw.take_set_aside());
+        for (shelf, work) in table_saw.take_set_aside() {
+            let from = Spot::Station(ShopView::TableSaw);
+            inventory.put(shelf, work, from, &mut moved);
+        }
     }
     if miter_saw.has_set_aside() {
-        inventory.store_all(miter_saw.take_set_aside());
+        for (shelf, work) in miter_saw.take_set_aside() {
+            let from = Spot::Station(ShopView::MiterSaw);
+            inventory.put(shelf, work, from, &mut moved);
+        }
     }
 }
 
@@ -227,62 +279,95 @@ pub fn can_use_at(
     }
 }
 
+/// Where the stations are, and what's in hand: everything the inventory gives wood to or takes
+/// it from.
+#[derive(SystemParam)]
+struct Stations<'w> {
+    view: Res<'w, ShopView>,
+    hand: ResMut<'w, Hand>,
+    table_saw: ResMut<'w, TableSawStation>,
+    miter_saw: ResMut<'w, MiterSawStation>,
+    bench: ResMut<'w, BenchStation>,
+}
+
 /// Uses the inventory as asked: a piece or new lumber to wherever you are, a piece to the other
 /// shelf or the scrap bin, or what's in hand, on the saw, or picked at the bench, put away.
 fn use_inventory(
     actions: Res<Actions>,
-    view: Res<ShopView>,
     mut inventory: ResMut<Inventory>,
-    mut hand: ResMut<Hand>,
-    mut table_saw: ResMut<TableSawStation>,
-    mut miter_saw: ResMut<MiterSawStation>,
-    mut bench: ResMut<BenchStation>,
+    mut moved: MessageWriter<Moved>,
+    mut at: Stations,
 ) {
+    let view = *at.view;
     for action in actions.started() {
         match action {
             Action::Take(id) | Action::NewLumber(id)
-                if can_use_at(*view, &table_saw, &miter_saw) =>
+                if can_use_at(view, &at.table_saw, &at.miter_saw) =>
             {
                 let work = match action {
                     Action::Take(id) => inventory.take(id),
                     _ => lumber(id as usize),
                 };
                 let Some(work) = work else { continue };
-                match *view {
-                    ShopView::TableSaw => table_saw.load(work),
-                    ShopView::MiterSaw => miter_saw.load(work),
-                    ShopView::Bench => bench.set_down(work, None),
+                let to = match view {
+                    ShopView::Overview => Spot::Hand,
+                    station => Spot::Station(station),
+                };
+                moved.write(Moved {
+                    work: work.clone(),
+                    from: Spot::Pressed,
+                    to,
+                });
+                match view {
+                    ShopView::TableSaw => at.table_saw.load(work),
+                    ShopView::MiterSaw => at.miter_saw.load(work),
+                    ShopView::Bench => at.bench.set_down(work, None),
                     ShopView::Overview => {
-                        if let Some(held) = hand.0.replace(work) {
-                            inventory.store(Shelf::Parts, held);
+                        if let Some(held) = at.hand.0.replace(work) {
+                            inventory.put(Shelf::Parts, held, Spot::Hand, &mut moved);
                         }
                     }
                 }
             }
             Action::MoveShelf(id) => {
-                inventory.move_to_other_shelf(id);
-            }
-            Action::Scrap(id) => {
-                inventory.take(id);
-            }
-            Action::PutAway => {
-                if let Some(work) = hand.0.take() {
-                    inventory.store(Shelf::Parts, work);
+                if let Some(work) = inventory.get(id).map(|item| item.work.clone())
+                    && inventory.move_to_other_shelf(id)
+                {
+                    moved.write(Moved {
+                        work,
+                        from: Spot::Pressed,
+                        to: Spot::Item(id),
+                    });
                 }
             }
-            Action::Store => match *view {
-                ShopView::TableSaw => table_saw.put_away(),
-                ShopView::MiterSaw => miter_saw.put_away(),
+            Action::Scrap(id) => {
+                if let Some(work) = inventory.take(id) {
+                    moved.write(Moved {
+                        work,
+                        from: Spot::Pressed,
+                        to: Spot::Gone,
+                    });
+                }
+            }
+            Action::PutAway => {
+                if let Some(work) = at.hand.0.take() {
+                    inventory.put(Shelf::Parts, work, Spot::Hand, &mut moved);
+                }
+            }
+            Action::Store => match view {
+                ShopView::TableSaw => at.table_saw.put_away(),
+                ShopView::MiterSaw => at.miter_saw.put_away(),
                 ShopView::Bench => {
-                    if let Some(work) = bench.take_picked() {
-                        inventory.store(Shelf::Parts, work);
+                    if let Some(work) = at.bench.take_picked() {
+                        let from = Spot::Station(ShopView::Bench);
+                        inventory.put(Shelf::Parts, work, from, &mut moved);
                     }
                 }
                 ShopView::Overview => {}
             },
-            Action::CutAgain => match *view {
-                ShopView::TableSaw => table_saw.cut_again(),
-                ShopView::MiterSaw => miter_saw.cut_again(),
+            Action::CutAgain => match view {
+                ShopView::TableSaw => at.table_saw.cut_again(),
+                ShopView::MiterSaw => at.miter_saw.cut_again(),
                 _ => {}
             },
             _ => {}
@@ -312,6 +397,9 @@ mod tests {
 
     /// Does `action`, and puts away what it set aside.
     fn act(world: &mut World, action: Action) {
+        if !world.contains_resource::<Messages<Moved>>() {
+            world.init_resource::<Messages<Moved>>();
+        }
         world.resource_mut::<Actions>().start(action);
         world.run_system_once(use_inventory).unwrap();
         world.run_system_once(collect_set_aside).unwrap();

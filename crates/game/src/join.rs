@@ -639,7 +639,8 @@ impl BenchStation {
             return "Click the bench to set it down.".to_string();
         }
         if self.groups.is_empty() {
-            return "Nothing on the bench. Pick up a part and click the bench to set it down."
+            return "Nothing on the bench. Set parts on it from the inventory, or set down the one \
+                    in hand."
                 .to_string();
         }
         if self.missed {

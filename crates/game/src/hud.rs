@@ -28,6 +28,7 @@ use crate::{
     chop::MiterSawStation,
     controls::{Action, Actions, Arrow, Step, key_for},
     feed::TableSawStation,
+    flights::{HandPicture, InventoryButton, LastPress, ListArea, RowOf},
     hand::{self, Hand},
     icons::{Icon, Icons},
     inventory::{self, Inventory, LUMBER, Shelf},
@@ -725,7 +726,7 @@ fn spawn_hud(mut commands: Commands, icons: Res<Icons>) {
         (Action::Inventory, Icon::Inventory),
         (Action::Help, Icon::Help),
     ] {
-        spawn_button(
+        let button = spawn_button(
             &mut commands,
             &icons,
             top_right,
@@ -734,6 +735,9 @@ fn spawn_hud(mut commands: Commands, icons: Res<Icons>) {
             Look::Round,
             TipAt::BelowRight,
         );
+        if action == Action::Inventory {
+            commands.entity(button).insert(InventoryButton);
+        }
     }
     // The inventory hangs below its button, its list scrolling if it's long, and the controls
     // go in the middle of the screen.
@@ -758,6 +762,7 @@ fn spawn_hud(mut commands: Commands, icons: Res<Icons>) {
             },
             ScrollPosition::default(),
             InventoryList,
+            ListArea,
         )],
     ));
     // The one tooltip, over everything.
@@ -836,7 +841,19 @@ fn spawn_hud(mut commands: Commands, icons: Res<Icons>) {
                         ..default()
                     }),
                     PanelOf(Readout::Hand),
-                    children![(bold("", 17.0, ACCENT), Readout::Hand)],
+                    children![
+                        (
+                            ImageNode::default(),
+                            Node {
+                                width: px(40),
+                                height: px(40),
+                                ..default()
+                            },
+                            HandPicture,
+                            Pickable::IGNORE,
+                        ),
+                        (bold("", 17.0, ACCENT), Readout::Hand)
+                    ],
                 ))
                 .id();
             bottom.spawn((
@@ -972,13 +989,15 @@ enum TipAt {
 /// 16th at a time.
 fn activate(
     activate: On<Activate>,
-    controls: Query<&Control>,
+    controls: Query<(&Control, &UiGlobalTransform, &ComputedNode)>,
     keys: Res<ButtonInput<KeyCode>>,
     mut actions: ResMut<Actions>,
+    mut last_press: ResMut<LastPress>,
 ) {
-    let Ok(control) = controls.get(activate.entity) else {
+    let Ok((control, at, size)) = controls.get(activate.entity) else {
         return;
     };
+    last_press.0 = at.affine().translation * size.inverse_scale_factor;
     let shift = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
     let action = match control.action {
         Action::Slide(arrow, _) => Action::Slide(arrow, shift),
@@ -1381,6 +1400,7 @@ fn build_inventory(
         for row in rows {
             let (size, notes) = inventory::describe(row.work);
             let line = line(&mut commands, list, &size, &notes, row.count);
+            commands.entity(line).insert(RowOf(row.ids.clone()));
             for (action, icon) in [
                 (Action::Take(row.id), use_icon),
                 (Action::MoveShelf(row.id), move_icon),

@@ -1,6 +1,8 @@
 //! The icons on the buttons, painted in code at startup like every other texture: white shapes
 //! on clear, which the button tints. Each is a few strokes and filled shapes in a unit square,
-//! `x` right and `y` down, drawn with soft edges from their distance to each pixel.
+//! `x` right and `y` down, drawn with soft edges from their distance to each pixel. Pictures of
+//! wood, for the HUD to show what's in hand or moving to and from the inventory, are painted the
+//! same way, in pine with each board outlined.
 
 use std::collections::HashMap;
 
@@ -11,7 +13,7 @@ use bevy::{
     render::render_resource::{Extent3d, TextureDimension, TextureFormat},
 };
 
-use crate::{controls::Arrow, textures::with_mipmaps};
+use crate::{controls::Arrow, hand::Workpiece, textures::with_mipmaps};
 
 /// How many pixels across an icon is painted, before it's scaled down to fit its button.
 const SIZE: u32 = 128;
@@ -539,6 +541,11 @@ fn paint(shapes: &[Shape]) -> Image {
             pixels.extend_from_slice(&[255, 255, 255, (cover * 255.0).round() as u8]);
         }
     }
+    image(pixels)
+}
+
+/// An icon-sized image of `pixels`, RGBA, with mipmaps.
+fn image(pixels: Vec<u8>) -> Image {
     let (data, levels) = with_mipmaps(SIZE, SIZE, pixels);
     let mut image = Image::new_fill(
         Extent3d {
@@ -560,6 +567,140 @@ fn paint(shapes: &[Shape]) -> Image {
         ..default()
     });
     image
+}
+
+/// The colors of a picture of wood: pine, outlined in a darker brown.
+const PINE: [f32; 3] = [0.96, 0.82, 0.58];
+const GRAIN: [f32; 3] = [0.56, 0.36, 0.17];
+
+/// A picture of `work` from above, as it lies: each board's outline, filled in pine and edged in
+/// brown, fitted into a square. A board too thin to see at that size is drawn thick enough to.
+pub fn picture(work: &Workpiece) -> Image {
+    // Each board's outline from above, as polygons in meters along x and y.
+    let boards: Vec<Vec<Vec<Vec2>>> = match work {
+        Workpiece::Board(board) => vec![
+            board
+                .face()
+                .iter()
+                .map(|region| {
+                    region
+                        .corners()
+                        .into_iter()
+                        .map(|(l, w)| Vec2::new(l.as_meters_f32(), w.as_meters_f32()))
+                        .collect()
+                })
+                .collect(),
+        ],
+        Workpiece::GlueUp(assembly) => assembly
+            .members()
+            .iter()
+            .map(|member| {
+                member
+                    .board
+                    .face()
+                    .iter()
+                    .map(|region| {
+                        // The region through the board's thickness, seen from above.
+                        let corners: Vec<Vec2> = region
+                            .corners()
+                            .into_iter()
+                            .flat_map(|(l, w)| {
+                                [woodsim::Length::ZERO, member.board.thickness()]
+                                    .map(|t| member.point(l, w, t))
+                            })
+                            .map(|[x, y, _]| Vec2::new(x.as_meters_f32(), y.as_meters_f32()))
+                            .collect();
+                        hull(corners)
+                    })
+                    .collect()
+            })
+            .collect(),
+    };
+    let (low, high) = boards
+        .iter()
+        .flatten()
+        .flatten()
+        .fold((Vec2::MAX, Vec2::MIN), |(low, high), &point| {
+            (low.min(point), high.max(point))
+        });
+    // Fit the longer side across the square; the shorter, at least a tenth of it.
+    const MARGIN: f32 = 0.1;
+    let size = (high - low).max(Vec2::splat(1e-6));
+    let scale = (1.0 - 2.0 * MARGIN) / size.max_element();
+    let shown = (size * scale).max(Vec2::splat(0.1));
+    let stretch = shown / (size * scale);
+    let at = |point: Vec2| {
+        let fitted = (point - low) * scale * stretch;
+        // `y` down on the picture, centered in the square.
+        let offset = (Vec2::ONE - shown) / 2.0;
+        Vec2::new(offset.x + fitted.x, 1.0 - offset.y - fitted.y)
+    };
+    let boards: Vec<Vec<Shape>> = boards
+        .iter()
+        .map(|regions| {
+            regions
+                .iter()
+                .map(|corners| Shape::Fill(corners.iter().map(|&p| at(p)).collect()))
+                .collect()
+        })
+        .collect();
+    let pixel = 1.0 / SIZE as f32;
+    let edge = 2.5 * pixel;
+    let mut pixels = Vec::with_capacity((SIZE * SIZE * 4) as usize);
+    for y in 0..SIZE {
+        for x in 0..SIZE {
+            let point = Vec2::new(x as f32 + 0.5, y as f32 + 0.5) * pixel;
+            // How far outside each board, and outside them all.
+            let each: Vec<f32> = boards
+                .iter()
+                .map(|regions| {
+                    regions
+                        .iter()
+                        .map(|shape| shape.distance(point))
+                        .fold(f32::MAX, f32::min)
+                })
+                .collect();
+            let outside = each.iter().copied().fold(f32::MAX, f32::min);
+            let to_edge = each.iter().map(|d| d.abs()).fold(f32::MAX, f32::min);
+            let cover = (0.5 - outside / pixel).clamp(0.0, 1.0);
+            let inked = (0.5 - (to_edge - edge) / pixel).clamp(0.0, 1.0);
+            for (pine, grain) in PINE.into_iter().zip(GRAIN) {
+                pixels.push(((pine + (grain - pine) * inked) * 255.0).round() as u8);
+            }
+            pixels.push((cover * 255.0).round() as u8);
+        }
+    }
+    image(pixels)
+}
+
+/// The smallest convex polygon around `points`, counterclockwise.
+fn hull(mut points: Vec<Vec2>) -> Vec<Vec2> {
+    points.sort_by(|a, b| a.x.total_cmp(&b.x).then(a.y.total_cmp(&b.y)));
+    points.dedup();
+    if points.len() < 3 {
+        return points;
+    }
+    let turn = |o: Vec2, a: Vec2, b: Vec2| (a - o).perp_dot(b - o);
+    let mut lower: Vec<Vec2> = Vec::new();
+    for &point in &points {
+        while lower.len() >= 2 && turn(lower[lower.len() - 2], lower[lower.len() - 1], point) <= 0.0
+        {
+            lower.pop();
+        }
+        lower.push(point);
+    }
+    let mut upper: Vec<Vec2> = Vec::new();
+    for &point in points.iter().rev() {
+        while upper.len() >= 2 && turn(upper[upper.len() - 2], upper[upper.len() - 1], point) <= 0.0
+        {
+            upper.pop();
+        }
+        upper.push(point);
+    }
+    lower.pop();
+    upper.pop();
+    lower.extend(upper);
+    lower
 }
 
 /// Every icon's image.
@@ -613,6 +754,30 @@ mod tests {
         assert!(
             (coverage(Icon::Point(Arrow::Up)) - coverage(Icon::Point(Arrow::Left))).abs() < 0.002
         );
+    }
+
+    #[test]
+    fn a_board_is_pictured_in_pine_edged_in_brown_and_a_thin_one_still_shows() {
+        let board = |width: i64| {
+            Workpiece::Board(woodsim::Board::new(
+                woodsim::Length::from_inches(24),
+                woodsim::Length::from_inch_fraction(width, 4),
+                woodsim::Length::from_inch_fraction(3, 4),
+            ))
+        };
+        for width in [1, 14, 96] {
+            let image = picture(&board(width));
+            let data = image.data.unwrap();
+            let pixel = |x: u32, y: u32| {
+                let at = ((y * SIZE + x) * 4) as usize;
+                [data[at], data[at + 1], data[at + 2], data[at + 3]]
+            };
+            // Clear in the corner; solid pine in the middle.
+            assert_eq!(pixel(0, 0)[3], 0);
+            let middle = pixel(SIZE / 2, SIZE / 2);
+            assert_eq!(middle[3], 255, "{width}");
+            assert_eq!(middle[0], (PINE[0] * 255.0).round() as u8);
+        }
     }
 
     #[test]

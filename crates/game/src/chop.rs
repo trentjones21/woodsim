@@ -478,7 +478,8 @@ impl MiterSawStation {
     pub fn status(&self) -> String {
         match &self.work {
             Work::Empty => {
-                "Nothing on the saw. Pick up a board and click the saw to set it against the stop."
+                "Nothing on the saw. Put a board against the stop from the inventory, or set down \
+                 the one in hand."
                     .to_string()
             }
             Work::Ready {

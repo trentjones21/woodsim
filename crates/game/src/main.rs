@@ -4,6 +4,7 @@ mod bench;
 mod chop;
 mod controls;
 mod feed;
+mod flights;
 mod hand;
 mod hud;
 mod icons;
@@ -36,6 +37,7 @@ use bevy::{
 
 use bench::BenchPlugin;
 use controls::ControlsPlugin;
+use flights::FlightsPlugin;
 use hand::HandPlugin;
 use hud::HudPlugin;
 use inventory::InventoryPlugin;
@@ -102,6 +104,7 @@ fn main() {
         ControlsPlugin,
         InventoryPlugin,
         HudPlugin,
+        FlightsPlugin,
     ));
 
     if let Some(path) = screenshot {

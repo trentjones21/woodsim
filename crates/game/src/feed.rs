@@ -512,8 +512,8 @@ impl TableSawStation {
     /// One line describing what's on the saw.
     pub fn status(&self) -> String {
         if self.on_saw().is_none() {
-            return "Nothing on the saw. Take a board off the lumber rack and click the saw to set \
-                    it here."
+            return "Nothing on the saw. Put a board on it from the inventory, or set down the one \
+                    in hand."
                 .to_string();
         }
         let verb = match self.lie.across().0 {
@@ -783,7 +783,7 @@ mod tests {
         assert_eq!(station.boards(), SawBoards::default());
         assert_eq!(
             station.status(),
-            "Nothing on the saw. Take a board off the lumber rack and click the saw to set it here."
+            "Nothing on the saw. Put a board on it from the inventory, or set down the one in hand."
         );
     }
 
