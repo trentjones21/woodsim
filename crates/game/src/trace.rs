@@ -26,23 +26,23 @@ use crate::grain::{self, Log, PINE, mix};
 
 /// How many times a path may bounce. Past the third, paths that carry little light are cut
 /// short at random (and those that go on count for more), so this is rarely reached.
-const MAX_BOUNCES: u32 = 10;
+pub(crate) const MAX_BOUNCES: u32 = 10;
 /// How far a bounced ray starts off the surface it left, in meters, so it doesn't hit it again.
-const OFFSET: f32 = 2e-5;
+pub(crate) const OFFSET: f32 = 2e-5;
 /// The most light one sample can bring after bouncing, so a rare bright path doesn't leave a
 /// lone white pixel.
-const BRIGHTEST_BOUNCE: f32 = 12.0;
+pub(crate) const BRIGHTEST_BOUNCE: f32 = 12.0;
 /// Pixels are rendered in squares this many across.
 const TILE: u32 = 32;
 /// How much of an end grain's color a finish leaves: end grain soaks it up and reads darker.
-const END_GRAIN: f32 = 0.62;
+pub(crate) const END_GRAIN: f32 = 0.62;
 /// How rough a satin finish is (perceptually, 0 to 1), on faces and on end grain.
-const SATIN: f32 = 0.3;
-const SATIN_ON_END_GRAIN: f32 = 0.55;
+pub(crate) const SATIN: f32 = 0.3;
+pub(crate) const SATIN_ON_END_GRAIN: f32 = 0.55;
 /// A clear finish warms the wood under it.
-const FINISH_TINT: Vec3 = Vec3::new(1.0, 0.94, 0.82);
+pub(crate) const FINISH_TINT: Vec3 = Vec3::new(1.0, 0.94, 0.82);
 /// How much light a finish reflects looking straight at it (a refractive index of 1.5).
-const FINISH_REFLECTANCE: f32 = 0.04;
+pub(crate) const FINISH_REFLECTANCE: f32 = 0.04;
 
 /// A ray: where it starts and which way it goes (a unit vector).
 #[derive(Clone, Copy, Debug)]
@@ -185,12 +185,12 @@ impl Camera {
 /// Everything a render needs: what's there, how it's lit, the camera, and how bright the
 /// picture comes out (light is multiplied by `exposure` before it's turned into colors).
 pub struct Scene {
-    bvh: Bvh,
-    materials: Vec<Material>,
-    lamps: Vec<Lamp>,
-    environment: Environment,
-    camera: Camera,
-    exposure: f32,
+    pub(crate) bvh: Bvh,
+    pub(crate) materials: Vec<Material>,
+    pub(crate) lamps: Vec<Lamp>,
+    pub(crate) environment: Environment,
+    pub(crate) camera: Camera,
+    pub(crate) exposure: f32,
 }
 
 impl Scene {
@@ -550,7 +550,7 @@ impl Rng {
 /// The direction numbers of the first four dimensions of the Sobol sequence, from their
 /// primitive polynomials (degree `s`, middle coefficients `a`) and first numbers `m`, as Joe
 /// and Kuo list them; the first dimension is the van der Corput sequence.
-const SOBOL: [[u32; 32]; 4] = [
+pub(crate) const SOBOL: [[u32; 32]; 4] = [
     directions(0, 0, [0; 3]),
     directions(1, 0, [1, 0, 0]),
     directions(2, 1, [1, 3, 0]),
@@ -632,36 +632,36 @@ struct Hit {
 
 /// A triangle as the ray test wants it: a corner and the edges from it.
 #[derive(Clone, Copy)]
-struct Packed {
-    corner: Vec3,
-    edge1: Vec3,
-    edge2: Vec3,
+pub(crate) struct Packed {
+    pub(crate) corner: Vec3,
+    pub(crate) edge1: Vec3,
+    pub(crate) edge2: Vec3,
 }
 
 /// What shading needs of a triangle.
 #[derive(Clone, Copy)]
-struct Shading {
-    geometric: Vec3,
-    normals: [Vec3; 3],
-    material: u32,
+pub(crate) struct Shading {
+    pub(crate) geometric: Vec3,
+    pub(crate) normals: [Vec3; 3],
+    pub(crate) material: u32,
 }
 
 /// A box in the hierarchy: what it bounds, and either its first child (the second follows it)
 /// or, if `count` isn't zero, the first of its triangles.
 #[derive(Clone, Copy, Debug)]
-struct Node {
-    min: Vec3,
-    max: Vec3,
-    first: u32,
-    count: u32,
+pub(crate) struct Node {
+    pub(crate) min: Vec3,
+    pub(crate) max: Vec3,
+    pub(crate) first: u32,
+    pub(crate) count: u32,
 }
 
 /// A bounding volume hierarchy: boxes in boxes around the triangles, so a ray only tests the
 /// few triangles near its path.
-struct Bvh {
-    nodes: Vec<Node>,
-    packed: Vec<Packed>,
-    shading: Vec<Shading>,
+pub(crate) struct Bvh {
+    pub(crate) nodes: Vec<Node>,
+    pub(crate) packed: Vec<Packed>,
+    pub(crate) shading: Vec<Shading>,
 }
 
 /// How many triangles a box holds before it's split, and how many ways splits are tried along

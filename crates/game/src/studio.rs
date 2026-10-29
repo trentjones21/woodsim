@@ -15,11 +15,15 @@ use bevy::{
     },
     light::{GlobalAmbientLight, NotShadowCaster},
     prelude::*,
-    render::render_resource::{Extent3d, TextureDimension, TextureFormat},
+    render::{
+        render_resource::{Extent3d, TextureDimension, TextureFormat},
+        renderer::{RenderDevice, RenderQueue},
+    },
 };
 
 use crate::{
     controls::{Action, Actions},
+    gpu::Gpu,
     hand::Gesture,
     hud::{OnHud, Viewfinder},
     meshes::lumber_mesh,
@@ -104,8 +108,15 @@ pub fn camera_pose(studio: &Studio) -> Option<Transform> {
 }
 
 /// Does what's asked in the studio: turns the piece, moves the camera or a light, changes the
-/// backdrop or the lens or how long to take, and starts, finishes, or stops a render.
-fn work_in_studio(actions: Res<Actions>, viewfinder: Res<Viewfinder>, mut studio: ResMut<Studio>) {
+/// backdrop or the lens or how long to take or which renderer, and starts, finishes, or stops
+/// a render, on the GPU Bevy draws with if the setup says so.
+fn work_in_studio(
+    actions: Res<Actions>,
+    viewfinder: Res<Viewfinder>,
+    device: Option<Res<RenderDevice>>,
+    queue: Option<Res<RenderQueue>>,
+    mut studio: ResMut<Studio>,
+) {
     for action in actions.started() {
         match action {
             Action::TurnLeft | Action::TurnRight => {
@@ -150,10 +161,18 @@ fn work_in_studio(actions: Res<Actions>, viewfinder: Res<Viewfinder>, mut studio
             }
             Action::Render => {
                 if let Some(aspect) = viewfinder.aspect() {
-                    studio.render(aspect);
+                    let gpu = device
+                        .as_ref()
+                        .zip(queue.as_ref())
+                        .map(|(device, queue)| Gpu {
+                            device: (*device).clone(),
+                            queue: (*queue).clone(),
+                        });
+                    studio.render(aspect, gpu);
                 }
             }
             Action::StopRender => studio.stop(),
+            Action::Engine => studio.switch_engine(),
             _ => {}
         }
     }

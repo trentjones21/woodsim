@@ -24,6 +24,7 @@ use woodsim::{Assembly, Board, Source};
 
 use crate::{
     controls::Step,
+    gpu::{Gpu, GpuRender},
     grain::{Log, mix},
     meshes::lumber_mesh,
     trace::{Camera, Environment, Lamp, Material, Picture, Render, Scene, Triangle, Wood},
@@ -161,12 +162,15 @@ impl Quality {
         cycle(&Quality::ALL, self, forward)
     }
 
-    /// About how long a render takes, on a good computer.
-    fn takes(self) -> &'static str {
-        match self {
-            Quality::Draft => "a few seconds",
-            Quality::Good => "about a minute",
-            Quality::Best => "a few minutes",
+    /// About how long a render takes on `engine`, on a good computer.
+    fn takes(self, engine: Engine) -> &'static str {
+        match (engine, self) {
+            (Engine::Gpu, Quality::Draft) => "a second or two",
+            (Engine::Gpu, Quality::Good) => "about 15 seconds",
+            (Engine::Gpu, Quality::Best) => "under a minute",
+            (Engine::Cpu, Quality::Draft) => "a few seconds",
+            (Engine::Cpu, Quality::Good) => "about a minute",
+            (Engine::Cpu, Quality::Best) => "a few minutes",
         }
     }
 
@@ -175,6 +179,24 @@ impl Quality {
             Quality::Draft => 64,
             Quality::Good => 256,
             Quality::Best => 512,
+        }
+    }
+}
+
+/// Which renderer draws the picture: the GPU, four or five times faster, or the CPU, the
+/// reference the GPU's is tested against. They draw the same picture.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Engine {
+    #[default]
+    Gpu,
+    Cpu,
+}
+
+impl Engine {
+    pub fn name(self) -> &'static str {
+        match self {
+            Engine::Gpu => "GPU",
+            Engine::Cpu => "CPU",
         }
     }
 }
@@ -191,6 +213,7 @@ pub struct Setup {
     pub lens: u32,
     /// How far the camera looks down at the piece, in radians.
     pub pitch: f32,
+    pub engine: Engine,
 }
 
 impl Setup {
@@ -228,6 +251,7 @@ impl Default for Setup {
             quality: Quality::Good,
             lens: 70,
             pitch: 24.0 * PI / 180.0,
+            engine: Engine::Gpu,
         }
     }
 }
@@ -591,12 +615,83 @@ fn triangles_of(mesh: &Mesh) -> (Vec<[Vec3; 3]>, Vec<Vec3>) {
         .unzip()
 }
 
+/// A render under way, on the GPU or the CPU.
+enum Renderer {
+    Gpu(GpuRender),
+    Cpu(Render),
+}
+
+impl Renderer {
+    fn engine(&self) -> Engine {
+        match self {
+            Renderer::Gpu(_) => Engine::Gpu,
+            Renderer::Cpu(_) => Engine::Cpu,
+        }
+    }
+
+    fn size(&self) -> (u32, u32) {
+        match self {
+            Renderer::Gpu(render) => render.size(),
+            Renderer::Cpu(render) => render.size(),
+        }
+    }
+
+    fn progress(&self) -> f32 {
+        match self {
+            Renderer::Gpu(render) => render.progress(),
+            Renderer::Cpu(render) => render.progress(),
+        }
+    }
+
+    fn samples(&self) -> u32 {
+        match self {
+            Renderer::Gpu(render) => render.samples(),
+            Renderer::Cpu(render) => render.samples(),
+        }
+    }
+
+    fn is_done(&self) -> bool {
+        match self {
+            Renderer::Gpu(render) => render.is_done(),
+            Renderer::Cpu(render) => render.is_done(),
+        }
+    }
+
+    fn elapsed(&self) -> std::time::Duration {
+        match self {
+            Renderer::Gpu(render) => render.elapsed(),
+            Renderer::Cpu(render) => render.elapsed(),
+        }
+    }
+
+    fn picture_since(&self, version: u64) -> Option<Picture> {
+        match self {
+            Renderer::Gpu(render) => render.picture_since(version),
+            Renderer::Cpu(render) => render.picture_since(version),
+        }
+    }
+
+    fn finish(self) -> Picture {
+        match self {
+            Renderer::Gpu(render) => render.finish(),
+            Renderer::Cpu(render) => render.finish(),
+        }
+    }
+
+    fn stop_and_finish(self) -> Picture {
+        match self {
+            Renderer::Gpu(render) => render.stop_and_finish(),
+            Renderer::Cpu(render) => render.stop_and_finish(),
+        }
+    }
+}
+
 /// What the studio's doing: being set up, rendering, or showing a render it's saved.
 #[derive(Default)]
 enum Job {
     #[default]
     SettingUp,
-    Rendering(Render),
+    Rendering(Renderer),
     Done {
         picture: Picture,
         size: (u32, u32),
@@ -666,8 +761,9 @@ impl Studio {
         matches!(self.job, Job::Done { .. })
     }
 
-    /// Starts rendering the piece in a picture `aspect` times as wide as it's high.
-    pub fn render(&mut self, aspect: f32) {
+    /// Starts rendering the piece in a picture `aspect` times as wide as it's high, on `gpu`
+    /// if the setup says to and there is one, or else on the CPU.
+    pub fn render(&mut self, aspect: f32, gpu: Option<Gpu>) {
         let Some(shoot) = &self.shoot else {
             return;
         };
@@ -675,7 +771,21 @@ impl Studio {
         let width = quality.width();
         let height = ((width as f32 / aspect).round() as u32).max(1);
         let scene = shoot.scene(&self.setup);
-        self.job = Job::Rendering(Render::start(scene, width, height, quality.samples()));
+        let samples = quality.samples();
+        self.job = Job::Rendering(match gpu.filter(|_| self.setup.engine == Engine::Gpu) {
+            Some(gpu) => Renderer::Gpu(GpuRender::start(gpu, &scene, width, height, samples)),
+            None => Renderer::Cpu(Render::start(scene, width, height, samples)),
+        });
+    }
+
+    /// Renders on the CPU from now on, or on the GPU.
+    pub fn switch_engine(&mut self) {
+        if let Some((_, setup)) = self.adjust() {
+            setup.engine = match setup.engine {
+                Engine::Gpu => Engine::Cpu,
+                Engine::Cpu => Engine::Gpu,
+            };
+        }
     }
 
     /// Stops the render under way, keeping nothing.
@@ -721,7 +831,11 @@ impl Studio {
         size: (u32, u32),
         folder: &Path,
     ) -> Result<PathBuf, String> {
-        let saved = save(&picture.pixels, size, folder).map_err(|error| error.to_string());
+        let saved = if picture.pixels.len() == size.0 as usize * size.1 as usize * 4 {
+            save(&picture.pixels, size, folder).map_err(|error| error.to_string())
+        } else {
+            Err("the render didn't come out".to_string())
+        };
         self.job = Job::Done {
             picture,
             size,
@@ -867,13 +981,15 @@ impl Studio {
             }
             Job::SettingUp => {
                 let (name, _) = self.picked();
-                let quality = self.setup.quality;
+                let (quality, engine) = (self.setup.quality, self.setup.engine);
                 format!(
                     "Drag to turn the piece and look from higher or lower; scroll to frame it. \
-                     Move the {} or pick another light, then render: {} quality takes {}.",
+                     Move the {} or pick another light, then render: {} quality takes {} on \
+                     the {}.",
                     name.to_lowercase(),
                     quality.name().to_lowercase(),
-                    quality.takes(),
+                    quality.takes(engine),
+                    engine.name(),
                 )
             }
             Job::Rendering(render) => {
@@ -886,8 +1002,9 @@ impl Studio {
                     String::new()
                 };
                 format!(
-                    "Rendering {width} × {height}: {:.0}% ({} of {} samples){left}. Finish \
-                     now to save it as it is, or stop to change the setup.",
+                    "Rendering {width} × {height} on the {}: {:.0}% ({} of {} samples){left}. \
+                     Finish now to save it as it is, or stop to change the setup.",
+                    render.engine().name(),
                     progress * 100.0,
                     render.samples(),
                     self.setup.quality.samples(),
@@ -1168,10 +1285,12 @@ mod tests {
         studio.open(&piece(), 1.5);
         assert!(studio.status().contains("key light"));
         studio.setup.quality = Quality::Draft;
-        studio.render(1.5);
+        studio.render(1.5, None);
         assert!(studio.rendering());
         assert!(
-            studio.status().starts_with("Rendering 1280 × 853"),
+            studio
+                .status()
+                .starts_with("Rendering 1280 × 853 on the CPU"),
             "{}",
             studio.status()
         );
@@ -1180,6 +1299,19 @@ mod tests {
         assert_eq!(studio.setup.picked, 0);
         studio.stop();
         assert!(!studio.rendering());
+        // It renders on the GPU unless told otherwise.
+        assert!(
+            studio.status().ends_with("on the GPU."),
+            "{}",
+            studio.status()
+        );
+        studio.switch_engine();
+        assert_eq!(studio.setup.engine, Engine::Cpu);
+        assert!(
+            studio.status().ends_with("a few seconds on the CPU."),
+            "{}",
+            studio.status()
+        );
         assert_eq!(describe_time(42.0), "45 s");
         assert_eq!(describe_time(200.0), "3 min");
     }
@@ -1296,7 +1428,8 @@ mod tests {
 
     /// Renders real pieces into `renders/` at the top of the workspace, to look at:
     /// `cargo test -p game --release -- --ignored studio_renders`. Set `WOODSHOP_QUALITY` to
-    /// `draft` or `best` for less or more time over them.
+    /// `draft` or `best` for less or more time over them, and `WOODSHOP_ENGINE` to `cpu` to
+    /// render on the CPU.
     #[test]
     #[ignore]
     fn studio_renders() {
@@ -1305,6 +1438,10 @@ mod tests {
             Ok("draft") => Quality::Draft,
             Ok("best") => Quality::Best,
             _ => Quality::Good,
+        };
+        let engine = match std::env::var("WOODSHOP_ENGINE").as_deref() {
+            Ok("cpu") => Engine::Cpu,
+            _ => Engine::Gpu,
         };
         let shots = [
             ("mitered frame", pieces::frame(), Backdrop::White),
@@ -1315,9 +1452,10 @@ mod tests {
             let mut studio = Studio::default();
             studio.setup.quality = quality;
             studio.setup.backdrop = backdrop;
+            studio.setup.engine = engine;
             studio.open(&piece, 1.5);
             let started = std::time::Instant::now();
-            studio.render(1.5);
+            studio.render(1.5, Some(crate::gpu::for_tests()));
             let saved = loop {
                 if let Some(saved) = studio.poll(&folder) {
                     break saved;
@@ -1325,8 +1463,9 @@ mod tests {
                 std::thread::sleep(std::time::Duration::from_millis(100));
             };
             println!(
-                "{name} on {}: {:?} in {:.1} s",
+                "{name} on {}, on the {}: {:?} in {:.1} s",
                 backdrop.name(),
+                engine.name(),
                 saved,
                 started.elapsed().as_secs_f32()
             );

@@ -7,6 +7,7 @@ mod copy;
 mod cutting;
 mod feed;
 mod flights;
+mod gpu;
 mod grain;
 mod hand;
 mod hud;

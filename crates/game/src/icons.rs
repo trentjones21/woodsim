@@ -82,10 +82,12 @@ pub enum Icon {
     Backdrop,
     /// Sparkles: how fine a render.
     Quality,
+    /// A chip with pins along its sides: render on the GPU.
+    Chip,
 }
 
 impl Icon {
-    const ALL: [Icon; 47] = [
+    const ALL: [Icon; 48] = [
         Icon::TurnLeft,
         Icon::TurnRight,
         Icon::Flip,
@@ -133,6 +135,7 @@ impl Icon {
         Icon::Bright,
         Icon::Backdrop,
         Icon::Quality,
+        Icon::Chip,
     ];
 
     /// Every icon there is.
@@ -456,6 +459,19 @@ impl Icon {
                 Fill(sparkle(p(0.42, 0.56), 0.34)),
                 Fill(sparkle(p(0.76, 0.22), 0.16)),
             ],
+            Icon::Chip => {
+                let mut shapes = vec![Cut(
+                    Box::new(Rounded(p(0.24, 0.24), p(0.76, 0.76), 0.06)),
+                    Box::new(Rounded(p(0.36, 0.36), p(0.64, 0.64), 0.02)),
+                )];
+                for at in [0.34, 0.5, 0.66] {
+                    shapes.push(Line(vec![p(at, 0.08), p(at, 0.2)], 0.06));
+                    shapes.push(Line(vec![p(at, 0.8), p(at, 0.92)], 0.06));
+                    shapes.push(Line(vec![p(0.08, at), p(0.2, at)], 0.06));
+                    shapes.push(Line(vec![p(0.8, at), p(0.92, at)], 0.06));
+                }
+                shapes
+            }
             Icon::Help => vec![
                 Line(
                     [arc(p(0.5, 0.34), 0.18, 200.0, 450.0), vec![p(0.5, 0.64)]].concat(),

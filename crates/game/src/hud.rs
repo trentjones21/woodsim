@@ -308,6 +308,7 @@ fn dock(view: ShopView) -> Vec<Vec<Tool>> {
                 ),
             ],
             vec![
+                tool(Engine, Icon::Chip),
                 Tool {
                     look: Look::Go,
                     ..tool(Render, Icon::Shutter)
@@ -529,6 +530,14 @@ impl Shop<'_> {
             }
             Render if self.studio.rendering() => "Finish now, and save it as it is".to_string(),
             Render => "Render it".to_string(),
+            Engine => match self.studio.setup.engine {
+                crate::shoot::Engine::Gpu => {
+                    "Rendering on the GPU. Render on the CPU instead".to_string()
+                }
+                crate::shoot::Engine::Cpu => {
+                    "Rendering on the CPU. Render on the GPU instead".to_string()
+                }
+            },
             StopRender if self.studio.rendering() => "Stop rendering".to_string(),
             StopRender => "Back to setting up".to_string(),
             Store if self.view == ShopView::Bench => "Put it away".to_string(),
@@ -611,7 +620,7 @@ impl Shop<'_> {
             (
                 ShopView::Studio,
                 TurnLeft | TurnRight | Flip | ZoomIn | ZoomOut | Light(_) | Swing(_) | Raise(_)
-                | Brighten(_) | Tip(_) | Lens(_) | Backdrop(_) | Quality(_),
+                | Brighten(_) | Tip(_) | Lens(_) | Backdrop(_) | Quality(_) | Engine,
             ) => self.studio.shoot().is_some() && !self.studio.rendering(),
             _ => true,
         }
@@ -630,6 +639,7 @@ impl Shop<'_> {
                 _ => false,
             },
             Action::Light(index) => self.studio.setup.picked == index,
+            Action::Engine => self.studio.setup.engine == crate::shoot::Engine::Gpu,
             Action::Help => self.showing.help,
             Action::Inventory => self.showing.inventory,
             _ => false,

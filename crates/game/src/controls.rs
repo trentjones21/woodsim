@@ -69,6 +69,8 @@ pub enum Action {
     Quality(Step),
     Render,
     StopRender,
+    /// In the studio, render on the CPU from now on, or on the GPU.
+    Engine,
     /// At a saw: put away what's on it, or put the measured piece away and the offcut back to
     /// cut again. At the bench, put away the picked part or glue-up.
     Store,
@@ -171,6 +173,7 @@ pub fn bound(view: ShopView, key: KeyCode, shift: bool) -> Option<Action> {
         }),
         (Studio, Enter | NumpadEnter) => Render,
         (Studio, Backspace | Delete) => StopRender,
+        (Studio, KeyG) => Engine,
         (_, KeyQ) => TurnLeft,
         (_, KeyE) => TurnRight,
         (_, KeyF) => Flip,
