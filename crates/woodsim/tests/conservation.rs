@@ -7,7 +7,7 @@ mod common;
 use common::CutApart;
 
 use proptest::prelude::*;
-use woodsim::{Blade, Board, CutError, Length, MiterSaw, Orientation, Pass, Piece, TableSaw};
+use woodsim::{Blade, Board, CutError, Length, MiterSaw, Orientation, Pass, Piece, Side, TableSaw};
 
 /// Ten feet, in nanometers.
 const MAX_NM: i64 = 120 * 25_400_000;
@@ -34,6 +34,58 @@ fn miter_saw(kerf: i64) -> MiterSaw {
 }
 
 proptest! {
+    /// With the blade right up against the fence or the stop, nothing's on the measured side:
+    /// the blade takes one kerf off the side against it, and what's left is the piece, from
+    /// the blade's other side. A board no wider than the kerf turns to sawdust.
+    #[test]
+    fn a_setting_of_zero_takes_one_kerf_off_the_side_against_the_fence_or_stop(
+        size in 1..12 * INCH_NM,
+        kerf in 1..INCH_NM,
+        way in 0..3u8,
+    ) {
+        let (size_nm, kerf_nm) = (size, kerf);
+        let (size, kerf) = (Length::from_nm(size), Length::from_nm(kerf));
+        let thickness = Length::from_inch_fraction(3, 4);
+        let table_saw = TableSaw { blade: blade(kerf_nm), fence: Length::ZERO, height: Length::from_inches(1), miter_gauge: None, gauge_angle: woodsim::Angle::ZERO, tilt: woodsim::Angle::ZERO };
+        // A rip, a crosscut at the miter gauge, or one at the miter saw, and the dimension each
+        // cuts.
+        let (board, pass, across): (Board, _, fn(&Board) -> Length) = match way {
+            0 => {
+                let board = Board::new(Length::from_inches(24), size, thickness);
+                let pass = table_saw.rip(&board, Orientation::default());
+                (board, pass, Board::width)
+            }
+            1 => {
+                let board = Board::new(size, Length::from_inches(6), thickness);
+                let saw = TableSaw { miter_gauge: Some(Length::ZERO), ..table_saw };
+                let pass = saw.rip(&board, Orientation::default().turned_left());
+                (board, pass, Board::length)
+            }
+            _ => {
+                let board = Board::new(size, Length::from_inches(6), thickness);
+                let pass = miter_saw(kerf_nm).crosscut(&board, Orientation::default(), Length::ZERO);
+                (board, pass, Board::length)
+            }
+        };
+        match pass {
+            Ok(Pass::Cut(cut)) => {
+                prop_assert!(kerf_nm < size_nm);
+                prop_assert_eq!(across(&cut.piece.board), size - kerf);
+                prop_assert_eq!(cut.waste, kerf);
+                prop_assert!(cut.offcut.is_none() && cut.loose.is_empty());
+                prop_assert_eq!(cut.piece.board.thickness(), board.thickness());
+                prop_assert_eq!(cut.piece.board.length() + cut.piece.board.width(), board.length() + board.width() - kerf);
+                prop_assert_eq!(cut.piece.board.origin().side(), Some(Side::Offcut));
+                prop_assert_eq!(cut.piece.board.origin().replay(), cut.piece.board.clone());
+            }
+            Err(error) => {
+                prop_assert!(kerf_nm >= size_nm, "{:?}", error);
+                prop_assert_eq!(error, CutError::AllSawdust);
+            }
+            Ok(pass) => prop_assert!(false, "a blade through the board left {:?}", pass),
+        }
+    }
+
     #[test]
     fn rip_conserves_wood(width in 1..MAX_NM, fence in 1..MAX_NM, kerf in 1..INCH_NM) {
         let board = Board::new(Length::from_inches(96), Length::from_nm(width), Length::from_inch_fraction(3, 4));

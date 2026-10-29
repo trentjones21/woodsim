@@ -7,7 +7,7 @@
 //! longer holds together.
 
 use crate::{
-    Assembly, Board, Direction, Length, Rotation, Vector,
+    Assembly, Board, CutError, Direction, Length, Rotation, Vector,
     assembly::{Joint, Member},
     history::{Operation, Side, Tool},
     kerf::Kerf,
@@ -27,7 +27,9 @@ pub enum GlueUpPass {
 
 /// A glue-up the blade cut apart, sorted the way a board's pieces are: the biggest part on the
 /// measured side of the blade (against the fence, or the stop), the biggest on the far side,
-/// and anything else that came loose. A part can be a single board.
+/// and anything else that came loose. With nothing on the measured side, as when the blade is
+/// right up against the fence, the piece is the biggest part on the far side. A part can be a
+/// single board.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GlueUpCut {
     pub piece: Assembly,
@@ -192,8 +194,9 @@ impl<'a> Laid<'a> {
         Some(nearest)
     }
 
-    /// Runs the blade along `sweep` through every board, and sorts out what's left.
-    pub(crate) fn cut(&self, sweep: &Sweep) -> GlueUpPass {
+    /// Runs the blade along `sweep` through every board, and sorts out what's left: none of it,
+    /// if the blade took all the wood there was.
+    pub(crate) fn cut(&self, sweep: &Sweep) -> Result<GlueUpPass, CutError> {
         // One pass, through every board it touches.
         let operation = Operation::new(sweep.tool);
         let mut members = Vec::new();
@@ -222,7 +225,7 @@ impl<'a> Laid<'a> {
             }
         }
         if !touched {
-            return GlueUpPass::Missed;
+            return Ok(GlueUpPass::Missed);
         }
 
         // Pieces of boards that were fastened together still are wherever they meet flush,
@@ -249,27 +252,29 @@ impl<'a> Laid<'a> {
 
         let mut parts = held_together(pieces.members(), &joints);
         if parts.len() == 1 && !shaped {
-            return GlueUpPass::Kerfed(parts.remove(0));
+            return Ok(GlueUpPass::Kerfed(parts.remove(0)));
         }
         let (mut near, mut far): (Vec<Assembly>, Vec<Assembly>) = parts
             .into_iter()
             .partition(|part| self.ahead(part, sweep) == sweep.measured_ahead);
-        if near.is_empty() {
+        // With no wood on the measured side, the piece is what's left on the other.
+        let side = if near.is_empty() {
             std::mem::swap(&mut near, &mut far);
-        }
-        let piece = self
-            .take_biggest(&mut near)
-            .expect("a cut leaves some wood");
+            Side::Offcut
+        } else {
+            Side::Measured
+        };
+        let piece = self.take_biggest(&mut near).ok_or(CutError::AllSawdust)?;
         let offcut = self.take_biggest(&mut far);
         near.append(&mut far);
         // Each board the blade cut is on the side of the cut its part of the glue-up is.
-        let piece = on_side(piece, Side::Measured);
+        let piece = on_side(piece, side);
         let offcut = offcut.map(|offcut| on_side(offcut, Side::Offcut));
-        GlueUpPass::Cut(GlueUpCut {
+        Ok(GlueUpPass::Cut(GlueUpCut {
             piece,
             offcut,
             loose: near,
-        })
+        }))
     }
 
     /// Where `part`'s corners are in the saw's axes, in nanometers.

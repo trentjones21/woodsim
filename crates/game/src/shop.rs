@@ -17,7 +17,7 @@ use bevy::{
     prelude::*,
     render::view::{ColorGrading, ColorGradingGlobal},
 };
-use woodsim::{Angle, Board, Cut, Kerf, Length, Orientation, Piece, Run, Surface};
+use woodsim::{Angle, Board, Cut, Kerf, Length, Orientation, Piece, Run, Side, Surface};
 
 use crate::{
     bench::{self, BenchView},
@@ -602,6 +602,11 @@ pub fn describe_cut(verb: &str, cut: &Cut) -> String {
             "{verb} a {piece} piece, plus a {} offcut. The blade turned {waste} to sawdust.",
             describe_size(&offcut.board)
         ),
+        // Nothing was on the measured side, the blade right up against the fence: it took its
+        // kerf off the side there.
+        None if cut.piece.board.origin().side() == Some(Side::Offcut) => {
+            format!("Trimmed {waste} off to sawdust, leaving a {piece} piece.")
+        }
         None => {
             format!("{verb} a {piece} piece, and the blade turned the last {waste} to sawdust.")
         }

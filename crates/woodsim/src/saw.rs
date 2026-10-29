@@ -29,6 +29,8 @@ impl Blade {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Cut {
     /// The piece on the measured side of the blade: against the fence, or the length you cut to.
+    /// With no wood there, as when the blade is right up against the fence or the stop, it's
+    /// what's left on the blade's other side, and `offcut` is `None`.
     pub piece: Piece,
     /// The piece on the far side of the blade, or `None` if the blade turned it all to sawdust.
     pub offcut: Option<Piece>,
@@ -55,18 +57,23 @@ pub enum Pass {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CutError {
-    /// The fence or cut length is zero or negative.
-    NonPositiveSetting(Length),
+    /// The fence or cut length is negative. Zero puts the blade right up against the fence or
+    /// the stop.
+    NegativeSetting(Length),
     /// The setting is at or past the board's far edge, so the blade never touches it.
     MissesBoard { setting: Length, available: Length },
+    /// The blade would take all the wood there is: a board no wider than the kerf, the blade
+    /// right up against the fence or the stop.
+    AllSawdust,
 }
 
 impl fmt::Display for CutError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            CutError::NonPositiveSetting(setting) => {
+            CutError::NegativeSetting(setting) => {
                 write!(f, "the saw can't be set to {setting}")
             }
+            CutError::AllSawdust => write!(f, "the blade would turn all of it to sawdust"),
             CutError::MissesBoard { setting, available } => write!(
                 f,
                 "the blade misses the board: set to {setting}, but the board is only {available}"
@@ -132,7 +139,7 @@ impl TableSaw {
         let alone = alone(board);
         let laid = Laid::new(&alone, lie.rotation());
         let (sweep, waste) = self.sweep(&laid, Lie::Board(lie), (start, end))?;
-        Ok(one_board(laid.cut(&sweep), waste))
+        Ok(one_board(laid.cut(&sweep)?, waste))
     }
 
     /// Pushes `board`, lying as `lie` says, all the way past the blade. It's cut apart if the
@@ -234,8 +241,8 @@ impl TableSaw {
                 )
             }
         };
-        if setting <= Length::ZERO {
-            return Err(CutError::NonPositiveSetting(setting));
+        if setting < Length::ZERO {
+            return Err(CutError::NegativeSetting(setting));
         }
         // The blade's travel, from the board's leading corner.
         let travel = self.travel();
@@ -294,7 +301,7 @@ impl TableSaw {
     ) -> Result<GlueUpPass, CutError> {
         let laid = Laid::new(glue_up, lie);
         let (sweep, _) = self.sweep(&laid, Lie::GlueUp(lie), (start, end))?;
-        Ok(laid.cut(&sweep))
+        laid.cut(&sweep)
     }
 
     /// Pushes a glue-up, lying as `lie` lays it, all the way past the blade.
@@ -407,7 +414,7 @@ impl MiterSaw {
             bottom,
         };
         let (sweep, waste) = self.sweep(&laid, tool, length, bottom)?;
-        Ok(one_board(laid.cut(&sweep), waste))
+        Ok(one_board(laid.cut(&sweep)?, waste))
     }
 
     /// Where the blade sweeps through what `laid` lays on the saw, in its frame: along the fence
@@ -429,8 +436,8 @@ impl MiterSaw {
             self.max_miter,
             self.miter
         );
-        if length <= Length::ZERO {
-            return Err(CutError::NonPositiveSetting(length));
+        if length < Length::ZERO {
+            return Err(CutError::NegativeSetting(length));
         }
         let [total, span, _] = laid.extent;
         let (cos, sin) = self.miter.unit();
@@ -487,7 +494,7 @@ impl MiterSaw {
             bottom,
         };
         let (sweep, _) = self.sweep(&laid, tool, length, bottom)?;
-        Ok(laid.cut(&sweep))
+        laid.cut(&sweep)
     }
 
     /// Chops a glue-up with a full stroke, through the table.

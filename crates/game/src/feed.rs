@@ -23,7 +23,8 @@ use crate::{
     work::{self, Passed, Rest},
 };
 
-pub const FENCE_MIN: Length = Length::from_inch_fraction(1, 16);
+/// The rip fence goes right up against the blade, to trim an edge or cut a rabbet along it.
+pub const FENCE_MIN: Length = Length::ZERO;
 pub const FENCE_MAX: Length = Length::from_inches(24);
 /// How far the miter gauge's stop goes from the blade, along its 21" auxiliary fence.
 const GAUGE_STOP_MIN: Length = Length::from_inch_fraction(1, 16);
@@ -894,6 +895,37 @@ mod tests {
         let whole = station.boards().whole.into_iter().next().unwrap();
         assert_eq!(whole.board.kerfs().len(), 2);
         assert!(station.can_take(Part::Whole));
+    }
+
+    #[test]
+    fn with_the_fence_at_zero_the_blade_trims_the_edge_against_it_or_cuts_a_rabbet() {
+        let mut station = TableSawStation::default();
+        station.set_fence(-Length::from_inches(1));
+        assert_eq!(station.saw.fence, Length::ZERO);
+        push_through(&mut station);
+        assert_eq!(
+            station.status(),
+            "Trimmed 1/8\" off to sawdust, leaving a 3/4\" x 7-1/8\" x 24\" piece."
+        );
+        let boards = station.boards();
+        assert!(boards.offcut.is_empty());
+        let [piece] = boards.piece.as_slice() else {
+            panic!("expected the rest of the board");
+        };
+        assert_eq!(piece.board.width(), Length::from_inch_fraction(57, 8));
+        // There's no offcut to cut again.
+        assert!(station.can_take(Part::Piece) && !station.can_cut_again());
+
+        // Low, it cuts a rabbet along that edge.
+        let mut station = TableSawStation::default();
+        station.set_fence(Length::ZERO);
+        station.set_height(Length::from_inch_fraction(3, 8));
+        push_through(&mut station);
+        assert_eq!(
+            station.status(),
+            "Cut a 1/8\"-wide, 3/8\"-deep rabbet the full length. \
+             Bring the board back around for another pass."
+        );
     }
 
     #[test]

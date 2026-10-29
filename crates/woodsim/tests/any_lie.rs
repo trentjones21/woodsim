@@ -270,8 +270,8 @@ proptest! {
         glue_up in glue_up(),
         lie in lie(),
         guide in prop_oneof![
-            (1..=48i64).prop_map(|fence| (fraction(fence, 8), None)),
-            (1..=48i64, -6000..=6000i32)
+            (0..=48i64).prop_map(|fence| (fraction(fence, 8), None)),
+            (0..=48i64, -6000..=6000i32)
                 .prop_map(|(stop, angle)| (fraction(stop, 8), Some(angle))),
         ],
         tilt in prop_oneof![Just(0), 0..=4500i32],
@@ -296,7 +296,7 @@ proptest! {
         glue_up in glue_up(),
         lie in lie(),
         miter in prop_oneof![Just(0), -5000..=5000i32],
-        length in 1..=48i64,
+        length in 0..=48i64,
         bottom in proptest::option::of(-8..=24i64),
     ) {
         let saw = MiterSaw {

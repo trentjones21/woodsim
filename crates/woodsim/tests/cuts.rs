@@ -1,7 +1,7 @@
 mod common;
 
 use common::CutApart;
-use woodsim::{Blade, Board, Cut, CutError, Length, MiterSaw, Orientation, Pass, TableSaw};
+use woodsim::{Blade, Board, Cut, CutError, Length, MiterSaw, Orientation, Pass, Side, TableSaw};
 
 /// `whole numerator/denominator` inches, e.g. `inches(7, 1, 4)` for 7-1/4".
 fn inches(whole: i64, numerator: i64, denominator: i64) -> Length {
@@ -109,11 +109,74 @@ fn fence_at_or_past_the_board_width_misses_the_board() {
 }
 
 #[test]
-fn fence_at_zero_is_rejected() {
+fn fence_at_zero_trims_a_kerf_off_the_edge_against_it() {
+    let cut = rip(
+        table_saw(blade(Blade::FULL_KERF), Length::ZERO),
+        &one_by_eight(),
+    );
     assert_eq!(
-        table_saw(blade(Blade::FULL_KERF), Length::ZERO)
-            .rip(&one_by_eight(), Orientation::default()),
-        Err(CutError::NonPositiveSetting(Length::ZERO))
+        cut.piece.board,
+        Board::new(
+            Length::from_inches(96),
+            inches(7, 1, 4) - Blade::FULL_KERF,
+            inches(0, 3, 4)
+        )
+    );
+    assert_eq!(cut.offcut, None);
+    assert_eq!(cut.waste, Blade::FULL_KERF);
+    // The kerf came off the edge against the fence, so the rest is where it was.
+    assert_eq!(
+        (cut.piece.l, cut.piece.w, cut.piece.t),
+        (Length::ZERO, Length::ZERO, Length::ZERO)
+    );
+    // It was on the blade's far side: nothing was against the fence to measure.
+    assert_eq!(cut.piece.board.origin().side(), Some(Side::Offcut));
+    assert_eq!(cut.piece.board.origin().replay(), cut.piece.board);
+}
+
+#[test]
+fn a_low_blade_at_the_fence_cuts_a_rabbet_in_the_edge_against_it() {
+    let board = one_by_eight();
+    let saw = TableSaw {
+        height: inches(0, 3, 8),
+        ..table_saw(blade(Blade::FULL_KERF), Length::ZERO)
+    };
+    let Ok(Pass::Kerfed(rabbeted)) = saw.rip(&board, Orientation::default()) else {
+        panic!("expected a rabbet");
+    };
+    assert_eq!(
+        (rabbeted.length(), rabbeted.width(), rabbeted.thickness()),
+        (board.length(), board.width(), board.thickness())
+    );
+    let [kerf] = rabbeted.kerfs() else {
+        panic!("expected one slot");
+    };
+    assert_eq!(
+        (kerf.near, kerf.far),
+        (board.width() - Blade::FULL_KERF, board.width())
+    );
+    let slot = rabbeted.slot(kerf);
+    assert_eq!(
+        (slot.width, slot.depth),
+        (Blade::FULL_KERF, inches(0, 3, 8))
+    );
+}
+
+#[test]
+fn a_fence_past_the_blade_is_rejected() {
+    let fence = -inches(0, 1, 16);
+    assert_eq!(
+        table_saw(blade(Blade::FULL_KERF), fence).rip(&one_by_eight(), Orientation::default()),
+        Err(CutError::NegativeSetting(fence))
+    );
+}
+
+#[test]
+fn a_strip_no_wider_than_the_kerf_against_the_fence_at_zero_is_all_sawdust() {
+    let strip = Board::new(Length::from_inches(24), Blade::FULL_KERF, inches(0, 3, 4));
+    assert_eq!(
+        table_saw(blade(Blade::FULL_KERF), Length::ZERO).rip(&strip, Orientation::default()),
+        Err(CutError::AllSawdust)
     );
 }
 
