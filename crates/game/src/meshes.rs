@@ -284,7 +284,12 @@ impl Cell<'_> {
     fn column(&self, point: Vec2) -> Vec<(f32, f32)> {
         let (low, high) = leaning(self.leans, point, self.thickness);
         let (bottom, top) = wood_at(&self.slots, point, (low, high), self.thickness);
-        let taken: Vec<(f32, f32)> = self.cutouts.iter().map(|cutout| cutout.at(point)).collect();
+        let middle = centroid(&self.corners);
+        let taken: Vec<(f32, f32)> = self
+            .cutouts
+            .iter()
+            .map(|cutout| cutout.at(point, middle))
+            .collect();
         (0..=taken.len())
             .map(|k| {
                 let low = if k == 0 {
@@ -395,11 +400,12 @@ enum Cutout<'a> {
 }
 
 impl Cutout<'_> {
-    /// The heights it takes out at `point`, low to high; the same height twice if none.
-    fn at(&self, point: Vec2) -> (f32, f32) {
+    /// The heights it takes out at `point` in a cell whose middle is `middle`, low to high; the
+    /// same height twice if none.
+    fn at(&self, point: Vec2, middle: Vec2) -> (f32, f32) {
         match self {
             Cutout::Layer(near, far) => (*near, *far),
-            Cutout::Band(slot) => slot.band(point),
+            Cutout::Band(slot) => slot.band(point, middle),
         }
     }
 }
@@ -422,7 +428,7 @@ fn cutouts<'a>(
                 .map(Cutout::Band),
         )
         .collect();
-    cutouts.sort_by(|a, b| a.at(point).0.total_cmp(&b.at(point).0));
+    cutouts.sort_by(|a, b| a.at(point, point).0.total_cmp(&b.at(point, point).0));
     cutouts
 }
 
@@ -657,12 +663,15 @@ impl Band {
     }
 
     /// The heights up the line through `point`, in nanometers, between the slot's faces: all of
-    /// them, for faces square to the board's, if `point` is between them.
-    fn between(&self, point: Vec2) -> Option<(f64, f64)> {
-        let across = Band::across(self.normal, point);
+    /// them, for faces square to the board's, if the cell `point` is a corner of is between
+    /// them. Cells are split along such faces, so its middle says, where a corner on one could
+    /// round either way.
+    fn between(&self, point: Vec2, middle: Vec2) -> Option<(f64, f64)> {
         if self.normal[2] == 0.0 {
+            let across = Band::across(self.normal, middle);
             return (self.near < across && across < self.far).then_some((f64::MIN, f64::MAX));
         }
+        let across = Band::across(self.normal, point);
         let faces = [self.near, self.far].map(|face| (face - across) / self.normal[2]);
         Some((faces[0].min(faces[1]), faces[0].max(faces[1])))
     }
@@ -670,15 +679,19 @@ impl Band {
     /// The heights up the line through `point`, in nanometers, the blade reached: where it's
     /// within its radius of its center's path, in its plane. Along the line, how far along the
     /// path and how far up the plane change steadily, so it's where a line crosses the round-
-    /// ended shape the blade swept, one span.
-    fn reached(&self, point: Vec2) -> Option<(f64, f64)> {
+    /// ended shape the blade swept, one span. Where the blade reached as far all the way up, it
+    /// reached all of the line or none of it, as the middle of the cell `point` is a corner of
+    /// says.
+    fn reached(&self, point: Vec2, middle: Vec2) -> Option<(f64, f64)> {
         let (a, u) = (length(self.along), length(self.up));
         // Along the path and up the plane, in nanometers, at height `t`: `x + dx t`.
-        let (along, d_along) = (Band::across(self.along, point) / a, self.along[2] / a);
-        let (up, d_up) = (
-            (Band::across(self.up, point) - self.center) / u,
-            self.up[2] / u,
-        );
+        let place = |point: Vec2| {
+            (
+                Band::across(self.along, point) / a,
+                (Band::across(self.up, point) - self.center) / u,
+            )
+        };
+        let ((along, up), (d_along, d_up)) = (place(point), (self.along[2] / a, self.up[2] / u));
         let (start, end) = (self.start / a, self.end / a);
         let r = self.radius;
         // Where `(d - past)^2 + up^2 < r^2` holds, `past` the way along the path from `from`.
@@ -693,7 +706,11 @@ impl Band {
                 x * x + up * up - r * r,
             );
             if qa == 0.0 {
-                return (qc < 0.0).then_some((f64::MIN, f64::MAX));
+                // The side of the sweep stands square to the board's face, and cells are split
+                // along it.
+                let (along, up) = place(middle);
+                let x = past.map_or(0.0, |from| along - from);
+                return (x * x + up * up < r * r).then_some((f64::MIN, f64::MAX));
             }
             let discriminant = qb * qb - 4.0 * qa * qc;
             (discriminant > 0.0).then(|| {
@@ -728,12 +745,12 @@ impl Band {
         .reduce(|a, b| (a.0.min(b.0), a.1.max(b.1)))
     }
 
-    /// The band of height it takes out at `point`, low to high, in meters: between its faces,
-    /// as far up and down as the blade reached there.
-    fn band(&self, point: Vec2) -> (f32, f32) {
+    /// The band of height it takes out at `point`, a corner of a cell whose middle is `middle`,
+    /// low to high, in meters: between its faces, as far up and down as the blade reached there.
+    fn band(&self, point: Vec2, middle: Vec2) -> (f32, f32) {
         let span = self
-            .between(point)
-            .zip(self.reached(point))
+            .between(point, middle)
+            .zip(self.reached(point, middle))
             .and_then(|(faces, reached)| {
                 let (low, high) = (faces.0.max(reached.0), faces.1.min(reached.1));
                 (low < high).then_some((low, high))
@@ -746,7 +763,7 @@ impl Band {
 
     /// Whether it takes any wood out at `point` of a board `thickness` thick.
     fn cuts(&self, point: Vec2, thickness: f32) -> bool {
-        let (low, high) = self.band(point);
+        let (low, high) = self.band(point, point);
         low < high && high > 0.0 && low < thickness
     }
 
@@ -1947,6 +1964,105 @@ mod tests {
             "{}",
             inside(far, -1.0)
         );
+    }
+
+    /// Whether `slot` took the wood at `point` (`w`, `t`, `l` in meters) and a micron each way
+    /// around it.
+    fn deep_in(slot: &woodsim::Kerf, point: Vec3) -> bool {
+        let nm = |meters: f32| Length::from_nm((f64::from(meters) * 1e9).round() as i64);
+        [Vec3::X, Vec3::Y, Vec3::Z]
+            .into_iter()
+            .flat_map(|axis| [axis, -axis])
+            .all(|off| {
+                let p = point + off * 1e-6;
+                slot.contains(nm(p.z), nm(p.x), nm(p.y))
+            })
+    }
+
+    /// Checks that nothing of `mesh` is off `board` or inside one of its slots.
+    fn drawn_only_where_its_wood_is(board: &woodsim::Board, mesh: &Mesh) {
+        let size = Vec3::new(
+            board.width().as_meters_f32(),
+            board.thickness().as_meters_f32(),
+            board.length().as_meters_f32(),
+        );
+        for p in positions(mesh) {
+            assert!(
+                p.cmpge(Vec3::splat(-1e-6)).all() && p.cmple(size + 1e-6).all(),
+                "{p} is off the board"
+            );
+        }
+        for [a, b, c] in triangles(mesh) {
+            let middle = (a + b + c) / 3.0;
+            assert!(
+                !board.kerfs().iter().any(|slot| deep_in(slot, middle)),
+                "a triangle at {middle} is inside a slot"
+            );
+        }
+    }
+
+    #[test]
+    fn a_board_on_edge_crosscut_with_the_blade_lower_than_it_leaves_nothing_in_the_slot() {
+        // A 1x4 on edge, its thickness along the table, pushed all the way past the blade at
+        // every height up to most of its width: the blade's center travels up through the
+        // thickness, so the slot's bottom is a line along the board, square to its face, that
+        // the corners of the mesh on it round to either side of.
+        let board = woodsim::Board::new(
+            Length::from_inches(24),
+            Length::from_inches(3),
+            Length::from_inch_fraction(3, 4),
+        );
+        let lie = Orientation::default().tipped().turned_left();
+        for n in 4..=176 {
+            let saw = TableSaw {
+                miter_gauge: Some(Length::from_inches(10)),
+                height: Length::from_inch_fraction(n, 64),
+                tilt: woodsim::Angle::ZERO,
+                ..tilted_saw()
+            };
+            let Ok(Pass::Kerfed(board)) =
+                saw.feed(&board, lie, -Length::from_inches(6), Length::from_inches(6))
+            else {
+                panic!("expected a slot {n}/64\" high");
+            };
+            drawn_only_where_its_wood_is(&board, &lumber_mesh(&board, Vec3::ZERO));
+        }
+    }
+
+    /// Four 1x8s beveled 45° on both edges and glued up into a square tube, crosscut on the
+    /// table saw with the blade 1" high, then turned over and crosscut again: each side stood
+    /// on its beveled edge, the blade traveling up through its thickness, and was slotted 1" in
+    /// from one edge and then the other, the slots side by side.
+    const TUBE: &str = include_str!("../../woodsim/tests/pasted/tube-crosscut-from-both-sides.txt");
+
+    #[test]
+    fn slots_cut_up_through_a_beveled_stave_from_each_edge_take_all_the_wood_in_them() {
+        let woodsim::Wood::GlueUp(tube) = woodsim::Recipe::read(TUBE).unwrap().wood else {
+            panic!("expected a glue-up");
+        };
+        let sides: Vec<&woodsim::Board> = tube
+            .members()
+            .iter()
+            .map(|member| &member.board)
+            .filter(|board| board.kerfs().len() == 2)
+            .collect();
+        assert_eq!(sides.len(), 2);
+        for board in sides {
+            let mesh = lumber_mesh(board, Vec3::ZERO);
+            drawn_only_where_its_wood_is(board, &mesh);
+            // The top face, 6-3/4" wide, and the bottom, 5-1/4", each lose 1/8" by however far
+            // each slot reaches across it: 1" on top, and 1/4" past the bevel underneath.
+            let notches = |reach: f32| 2.0 * square_inches(reach / 8.0);
+            let thickness = board.thickness().as_meters_f32();
+            assert!(
+                (top_area(&mesh, thickness) - (square_inches(6.75 * 24.0) - notches(1.0))).abs()
+                    < 1e-6
+            );
+            assert!(
+                (bottom_area(&mesh) - (square_inches(5.25 * 24.0) - notches(0.25))).abs() < 1e-6
+            );
+            faces_its_normals(&mesh);
+        }
     }
 
     #[test]
