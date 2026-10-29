@@ -442,6 +442,103 @@ fn a_glue_up_with_a_board_standing_up_is_cut_through_both() {
     assert!(cut.loose.is_empty());
 }
 
+/// A 1x6 with a 30° bevel ripped along its edge, and a 1x2 glued flat onto the bevel, standing
+/// off it at 60° from the 1x6's face: a board turned out of square every way but along its
+/// length.
+fn glued_onto_a_bevel() -> Assembly {
+    let saw = TableSaw {
+        tilt: Angle::from_degrees(30),
+        ..table_saw(inches(4), None, inches(2))
+    };
+    let base = Board::new(inches(24), fraction(11, 2), fraction(3, 4));
+    let beveled = saw
+        .rip(&base, Orientation::default())
+        .cut_apart()
+        .piece
+        .board;
+    let [(bevel, _)] = beveled.bevels()[..] else {
+        panic!("expected one bevel");
+    };
+    let mut glue_up = Assembly::of(beveled);
+    let one_by_two = Board::new(inches(24), fraction(3, 2), fraction(3, 4));
+    assert!(glue_up.attach(
+        (0, Surface::Side(bevel)),
+        &Assembly::of(one_by_two),
+        (0, Surface::Bottom),
+        Mating::default(),
+        Fastener::Glue,
+    ));
+    glue_up
+}
+
+#[test]
+fn a_glue_up_with_a_board_at_an_angle_crosscuts_into_two_still_glued() {
+    let glue_up = glued_onto_a_bevel();
+    let tipped = glue_up.members()[1].axes();
+    assert!(tipped[2][2].abs() < 0.99 && tipped[2][2].abs() > 0.01);
+    let Ok(GlueUpPass::Cut(cut)) =
+        mitered(0).crosscut_glue_up(&glue_up, Rotation::NONE, inches(10))
+    else {
+        panic!("expected the glue-up cut apart");
+    };
+    let offcut = cut.offcut.expect("the rest of it");
+    for (part, length) in [
+        (&cut.piece, inches(10)),
+        (&offcut, inches(14) - Blade::FULL_KERF),
+    ] {
+        assert_eq!(part.members().len(), 2);
+        assert_eq!(part.joints().len(), 1);
+        assert!(part.fit().iter().all(|contact| contact.is_tight()));
+        for member in part.members() {
+            assert_eq!(member.board.length(), length);
+            assert_eq!(member.board.origin().replay(), member.board);
+        }
+    }
+    assert!(cut.loose.is_empty());
+}
+
+#[test]
+fn a_glue_up_with_a_board_at_an_angle_rips_whichever_boards_the_blade_reaches() {
+    let glue_up = glued_onto_a_bevel();
+    // The fence 2" from the blade: through the 1x6 only. The 1x2 stands off its bevel on the
+    // far side and goes with the offcut, still glued.
+    let Ok(GlueUpPass::Cut(cut)) =
+        table_saw(inches(2), None, inches(3)).rip_glue_up(&glue_up, Rotation::NONE)
+    else {
+        panic!("expected the glue-up ripped");
+    };
+    assert_eq!(cut.piece.members().len(), 1);
+    assert_eq!(cut.piece.members()[0].board.width(), inches(2));
+    let offcut = cut.offcut.expect("the rest, with the 1x2");
+    assert_eq!(offcut.members().len(), 2);
+    assert_eq!(offcut.joints().len(), 1);
+    assert_eq!(offcut.members()[1].board, glue_up.members()[1].board);
+    // The fence half an inch short of the far side: through the 1x2 only, along its length.
+    let [_, (near, far), _] = glue_up.bounds();
+    let fence = far - near - fraction(1, 2);
+    let Ok(GlueUpPass::Cut(cut)) =
+        table_saw(fence, None, inches(3)).rip_glue_up(&glue_up, Rotation::NONE)
+    else {
+        panic!("expected the 1x2 ripped");
+    };
+    let parts: Vec<&Assembly> = std::iter::once(&cut.piece)
+        .chain(&cut.offcut)
+        .chain(&cut.loose)
+        .collect();
+    let boards: Vec<&Board> = parts
+        .iter()
+        .flat_map(|part| part.members().iter().map(|member| &member.board))
+        .collect();
+    assert_eq!(boards.len(), 3, "{cut:?}");
+    for board in boards {
+        assert_eq!(board.length(), inches(24));
+        assert_eq!(board.origin().replay(), *board);
+    }
+    for part in parts {
+        assert!(part.fit().iter().all(|contact| contact.is_tight()));
+    }
+}
+
 #[test]
 fn a_blade_that_misses_the_glue_up_leaves_it_alone() {
     let panel = panel(&[inches(2), inches(2)]);

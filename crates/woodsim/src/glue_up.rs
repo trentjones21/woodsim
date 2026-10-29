@@ -7,7 +7,7 @@
 //! longer holds together.
 
 use crate::{
-    Assembly, Board, CutError, Direction, Length, Rotation, Vector,
+    Assembly, Board, Direction, Length, Rotation, Vector,
     assembly::{Joint, Member},
     history::{Operation, Side, Tool},
     kerf::Kerf,
@@ -80,16 +80,8 @@ struct Frame {
     square: bool,
 }
 
-/// Slanted directions are whole numbers at this scale, the same as a saw's angles.
-const DIRECTION_UNIT: f64 = (1 << 24) as f64;
-
 impl<'a> Laid<'a> {
-    pub(crate) fn new(glue_up: &'a Assembly, lie: Rotation) -> Result<Laid<'a>, CutError> {
-        if !lie.is_square() {
-            return Err(CutError::NotModeled(
-                "what's on the saw has to lie square on it",
-            ));
-        }
+    pub(crate) fn new(glue_up: &'a Assembly, lie: Rotation) -> Laid<'a> {
         let mut low = [f64::MAX; 3];
         let mut high = [f64::MIN; 3];
         for member in glue_up.members() {
@@ -102,12 +94,12 @@ impl<'a> Laid<'a> {
             }
         }
         let low = low.map(f64::round);
-        Ok(Laid {
+        Laid {
             glue_up,
             lie,
             low,
             extent: [0, 1, 2].map(|k| Length::from_nm((high[k] - low[k]).round() as i64)),
-        })
+        }
     }
 
     /// The near corner of the box it fills and how far it reaches, as the corners of that box,
@@ -142,12 +134,8 @@ impl<'a> Laid<'a> {
 
     /// The slot `sweep` cuts in the board `frame` places, and its faces' normal as the board
     /// has it before the slot writes it one way, with where its measured face is on it.
-    fn slot(&self, frame: &Frame, sweep: &Sweep) -> Result<(Kerf, Vector, Length), CutError> {
-        const STANDING: CutError = CutError::NotModeled(
-            "a board in the glue-up stands at an angle the saw can't cut it at yet",
-        );
-        let normal = frame.direction(sweep.normal).ok_or(STANDING)?;
-        let along = frame.square_to(normal, sweep.along).ok_or(STANDING)?;
+    fn slot(&self, frame: &Frame, sweep: &Sweep) -> (Kerf, Vector, Length) {
+        let (normal, along) = frame.directions(sweep.normal, sweep.along);
         let at = |direction: Vector, point: [Length; 3]| {
             let [l, w, t] = frame.point(point);
             direction.dot(l, w, t)
@@ -175,15 +163,15 @@ impl<'a> Laid<'a> {
             sweep.radius,
             center,
         );
-        Ok((kerf, normal, face))
+        (kerf, normal, face)
     }
 
     /// How far short of the wood the blade's measured face is, square to it, if it's past all
     /// of it: the setting's too long. `None` if some wood is beyond it, where the blade cuts.
-    pub(crate) fn short_of(&self, sweep: &Sweep) -> Result<Option<f64>, CutError> {
+    pub(crate) fn short_of(&self, sweep: &Sweep) -> Option<f64> {
         let mut nearest = f64::INFINITY;
         for member in self.glue_up.members() {
-            let (_, normal, face) = self.slot(&self.frame(member), sweep)?;
+            let (_, normal, face) = self.slot(&self.frame(member), sweep);
             // The wood the blade cuts is past the measured face, away from the measured side.
             let (toward, at) = if sweep.measured_ahead {
                 (normal.reversed(), -face.as_nm() as i128)
@@ -191,7 +179,7 @@ impl<'a> Laid<'a> {
                 (normal, face.as_nm() as i128)
             };
             if member.board.reaches_beyond(toward.edge(at)) {
-                return Ok(None);
+                return None;
             }
             let furthest = member
                 .board
@@ -201,11 +189,11 @@ impl<'a> Laid<'a> {
                 .fold(f64::MIN, f64::max);
             nearest = nearest.min((at as f64 - furthest) / toward.scale());
         }
-        Ok(Some(nearest))
+        Some(nearest)
     }
 
     /// Runs the blade along `sweep` through every board, and sorts out what's left.
-    pub(crate) fn cut(&self, sweep: &Sweep) -> Result<GlueUpPass, CutError> {
+    pub(crate) fn cut(&self, sweep: &Sweep) -> GlueUpPass {
         // One pass, through every board it touches.
         let operation = Operation::new(sweep.tool);
         let mut members = Vec::new();
@@ -215,7 +203,7 @@ impl<'a> Laid<'a> {
         // Whether any board came apart or lost some of its outline, rather than just a slot.
         let mut shaped = false;
         for (index, member) in self.glue_up.members().iter().enumerate() {
-            let (kerf, ..) = self.slot(&self.frame(member), sweep)?;
+            let (kerf, ..) = self.slot(&self.frame(member), sweep);
             if !member.board.touched_by(&kerf) {
                 members.push(member.clone());
                 from.push(index);
@@ -234,7 +222,7 @@ impl<'a> Laid<'a> {
             }
         }
         if !touched {
-            return Ok(GlueUpPass::Missed);
+            return GlueUpPass::Missed;
         }
 
         // Pieces of boards that were fastened together still are wherever they meet flush,
@@ -261,7 +249,7 @@ impl<'a> Laid<'a> {
 
         let mut parts = held_together(pieces.members(), &joints);
         if parts.len() == 1 && !shaped {
-            return Ok(GlueUpPass::Kerfed(parts.remove(0)));
+            return GlueUpPass::Kerfed(parts.remove(0));
         }
         let (mut near, mut far): (Vec<Assembly>, Vec<Assembly>) = parts
             .into_iter()
@@ -277,11 +265,11 @@ impl<'a> Laid<'a> {
         // Each board the blade cut is on the side of the cut its part of the glue-up is.
         let piece = on_side(piece, Side::Measured);
         let offcut = offcut.map(|offcut| on_side(offcut, Side::Offcut));
-        Ok(GlueUpPass::Cut(GlueUpCut {
+        GlueUpPass::Cut(GlueUpCut {
             piece,
             offcut,
             loose: near,
-        }))
+        })
     }
 
     /// Where `part`'s corners are in the saw's axes, in nanometers.
@@ -340,65 +328,20 @@ impl Frame {
         self.columns.map(dot)
     }
 
-    /// The board's axis that stands straight up the saw, if one does, and which way.
-    fn upright(&self) -> Option<(usize, f64)> {
-        (0..3)
-            .find(|&k| (self.columns[k][2].abs() - 1.0).abs() < 1e-9)
-            .map(|k| (k, self.columns[k][2].signum()))
-    }
-
-    /// The direction given by whole numbers in the saw's frame, on the board: exact if the
-    /// board lies square, otherwise as near as whole numbers at the scale of a saw's angles come.
-    /// `None` for a board turned out of square except about the saw's up, which isn't modeled.
-    fn direction(&self, v: [i64; 3]) -> Option<Vector> {
-        let mapped = self.onto_board(v.map(|c| c as f64));
+    /// A blade's faces' normal and its path, whole numbers square to each other in the saw's
+    /// frame, on the board: exact if the board lies square, otherwise the nearest whole numbers
+    /// still exactly square to each other, within 1/16,000,000 of a radian, however the board
+    /// is turned (`Vector::nearest_pair`).
+    fn directions(&self, normal: [i64; 3], along: [i64; 3]) -> (Vector, Vector) {
+        let [normal, along] = [normal, along].map(|v| self.onto_board(v.map(|c| c as f64)));
         if self.square {
-            let [l, w, t] = mapped.map(|c| c.round() as i64);
-            return Some(Vector::new(l, w, t));
+            let exact = |v: [f64; 3]| {
+                let [l, w, t] = v.map(|c| c.round() as i64);
+                Vector::new(l, w, t)
+            };
+            return (exact(normal), exact(along));
         }
-        // Turned about the saw's up: what runs up the saw stays exact, the rest comes as near
-        // as whole numbers at the saw's scale do.
-        let (up, _) = self.upright()?;
-        let across: Vec<usize> = (0..3).filter(|&k| k != up).collect();
-        let size = mapped[across[0]].hypot(mapped[across[1]]);
-        let mut parts = [0i64; 3];
-        if size < 1e-9 {
-            parts[up] = mapped[up].signum() as i64;
-        } else {
-            let scale = DIRECTION_UNIT / size;
-            for k in 0..3 {
-                parts[k] = (mapped[k] * scale).round() as i64;
-            }
-        }
-        Some(Vector::new(parts[0], parts[1], parts[2]))
-    }
-
-    /// The direction `v` in the saw's frame, on the board, made exactly square to `normal` there,
-    /// as a blade's path is to its faces. For a board turned off square, `v` has to run level
-    /// in the saw, as a blade's path does.
-    fn square_to(&self, normal: Vector, v: [i64; 3]) -> Option<Vector> {
-        let near = self.direction(v)?;
-        if self.square {
-            return Some(near);
-        }
-        // Level in the saw, a blade's path is square to the board's upright axis, and to the
-        // faces: across the level plane from the faces' normal there.
-        let (up, _) = self.upright()?;
-        let parts = [normal.l, normal.w, normal.t];
-        let across: Vec<usize> = (0..3).filter(|&k| k != up).collect();
-        let (a, b) = (parts[across[0]], parts[across[1]]);
-        if a == 0 && b == 0 {
-            return Some(near);
-        }
-        let mut square = [0i64; 3];
-        square[across[0]] = -b;
-        square[across[1]] = a;
-        let square = Vector::new(square[0], square[1], square[2]);
-        Some(if square.dot_vector(near) >= 0 {
-            square
-        } else {
-            square.reversed()
-        })
+        Vector::nearest_pair(normal, along)
     }
 
     /// Where a point in the saw's frame is on the board, to the nanometer.

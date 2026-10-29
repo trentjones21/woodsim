@@ -240,6 +240,231 @@ impl Vector {
     }
 }
 
+/// Slanted directions are whole numbers at about this scale, the same as a saw's angles.
+const DIRECTION_UNIT: f64 = (1 << 24) as f64;
+
+/// The longest a direction found by `Vector::nearest_square` gets in any part, so positions
+/// along it stay well within a `Length`.
+const SQUARE_LIMIT: i128 = 1 << 28;
+
+/// How near `Vector::nearest_pair` comes, in radians: a little inside 1/16,000,000.
+const PAIR_TOLERANCE: f64 = 1.0 / 16_777_216.0;
+
+impl Vector {
+    /// The whole-number direction nearest `v`, a direction in floating point, its biggest
+    /// part about `unit`. A part of `v` that's exactly zero stays zero.
+    fn nearest_at(v: [f64; 3], unit: f64) -> Vector {
+        let size = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+        let [l, w, t] = v.map(|c| (c * unit / size).round() as i64);
+        Vector::new(l, w, t)
+    }
+
+    /// Whole-number directions exactly square to each other, nearest `normal` and `along`,
+    /// two directions square to each other in floating point, as a blade's faces and its path
+    /// are: each within 1/16,000,000 of a radian, as fine as a saw's angles. Whole-number
+    /// directions square to one leave gaps around the short ones, so where `along` falls in a
+    /// gap, `normal` is rounded a little finer, until one leaves none there. Parts of either
+    /// that are exactly zero stay zero, unless `along` is in a gap whatever `normal` is rounded
+    /// to (a zero in `normal` makes the axis square to it a short direction with a wide gap),
+    /// and then `normal` leans off the zero by as little as whole numbers can.
+    pub(crate) fn nearest_pair(normal: [f64; 3], along: [f64; 3]) -> (Vector, Vector) {
+        let off_by = |v: Vector, toward: [f64; 3]| {
+            let v = [v.l as f64, v.w as f64, v.t as f64];
+            let crossed = cross(v, toward);
+            let dot = |a: [f64; 3], b: [f64; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+            dot(crossed, crossed).sqrt() / (dot(v, v) * dot(toward, toward)).sqrt()
+        };
+        let mut best: Option<(f64, Vector, Vector)> = None;
+        for finer in 0..32 {
+            let mut n = Vector::nearest_at(normal, DIRECTION_UNIT * (1.0 + finer as f64 / 64.0));
+            if finer >= 16 {
+                // Off any zero by one, at twice the scale, so within the angle still.
+                let twice =
+                    Vector::nearest_at(normal, 2.0 * DIRECTION_UNIT * (1.0 + finer as f64 / 64.0));
+                let nudge = if finer % 2 == 0 { 1 } else { -1 };
+                let [l, w, t] = [twice.l, twice.w, twice.t].map(|c| if c == 0 { nudge } else { c });
+                n = Vector::new(l, w, t);
+            }
+            let a = n.nearest_square(along);
+            let off = off_by(n, normal).max(off_by(a, along));
+            if off < PAIR_TOLERANCE {
+                return (n, a);
+            }
+            if best.is_none_or(|(least, ..)| off < least) {
+                best = Some((off, n, a));
+            }
+        }
+        let (_, n, a) = best.expect("some pair");
+        (n, a)
+    }
+
+    /// The whole-number direction exactly square to this one that comes nearest `toward`, a
+    /// direction in floating point: within about 1/16,000,000 of a radian of `toward` made
+    /// square to this one, and kept small, as a blade's path is to its faces. If `toward` is
+    /// already square to this one, as near as whole numbers come, a part of it that's exactly
+    /// zero stays zero, so a path level on a board stays level.
+    pub(crate) fn nearest_square(self, toward: [f64; 3]) -> Vector {
+        let dot = |a: [f64; 3], b: [f64; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+        let n = [self.l, self.w, self.t].map(i128::from);
+        let float = |v: [i128; 3]| v.map(|c| c as f64);
+        let pointing = |v: Vector| {
+            if dot([v.l as f64, v.w as f64, v.t as f64], toward) < 0.0 {
+                v.reversed()
+            } else {
+                v
+            }
+        };
+        let vector = |v: [i128; 3]| {
+            let [l, w, t] = v.map(|c| i64::try_from(c).expect("a direction too fine"));
+            pointing(Vector::new(l, w, t))
+        };
+        // A part that's exactly zero: the one direction square to both this and that axis.
+        let nf = float(n);
+        let square = dot(toward, nf).abs() < 1e-6 * (dot(toward, toward) * dot(nf, nf)).sqrt();
+        let level = (0..3)
+            .filter(|&axis| square && toward[axis] == 0.0)
+            .filter_map(|axis| {
+                let mut e = [0i128; 3];
+                e[axis] = 1;
+                let square = cross128(n, e);
+                square.iter().any(|&c| c != 0).then(|| vector(square))
+            })
+            .max_by(|a, b| {
+                let along = |v: &Vector| {
+                    let v = [v.l as f64, v.w as f64, v.t as f64];
+                    dot(v, toward) / dot(v, v).sqrt()
+                };
+                along(a).total_cmp(&along(b))
+            });
+        if let Some(level) = level {
+            return level;
+        }
+        // The whole-number directions square to this one are the whole-number combinations
+        // of two, found with Euclid's algorithm, then made as short as they go.
+        let (mut a, mut b) = if n[0] == 0 && n[1] == 0 {
+            ([1, 0, 0], [0, 1, 0])
+        } else {
+            let (g, u, w) = extended_gcd(n[0], n[1]);
+            ([n[1] / g, -n[0] / g, 0], [n[2] * u, n[2] * w, -g])
+        };
+        let idot = |x: [i128; 3], y: [i128; 3]| x[0] * y[0] + x[1] * y[1] + x[2] * y[2];
+        loop {
+            if idot(a, a) > idot(b, b) {
+                std::mem::swap(&mut a, &mut b);
+            }
+            // The nearest whole number to their dot over `a`'s length squared.
+            let (p, q) = (idot(a, b), idot(a, a));
+            let m = (2 * p + q).div_euclid(2 * q);
+            if m == 0 {
+                break;
+            }
+            b = [0, 1, 2].map(|k| b[k] - m * a[k]);
+        }
+        // `toward`, made square to this one, as `alpha a + beta b`.
+        let off = dot(toward, nf) / dot(nf, nf);
+        let toward = [0, 1, 2].map(|k| toward[k] - off * nf[k]);
+        let (af, bf) = (float(a), float(b));
+        let (aa, ab, bb) = (dot(af, af), dot(af, bf), dot(bf, bf));
+        let (at, bt) = (dot(af, toward), dot(bf, toward));
+        let determinant = aa * bb - ab * ab;
+        let (alpha, beta) = (
+            (at * bb - bt * ab) / determinant,
+            (bt * aa - at * ab) / determinant,
+        );
+        // Whole numbers in the ratio alpha : beta, from its continued fraction, each pair
+        // nearer than the last: the first near enough, or the nearest that's small enough.
+        let (big, small) = if alpha.abs() >= beta.abs() {
+            (alpha, beta)
+        } else {
+            (beta, alpha)
+        };
+        let sign = big.signum() as i128;
+        // The combination of `a` and `b` for `h / k`, near `small / big`.
+        let combination = |h: i128, k: i128| {
+            let (p, q) = if alpha.abs() >= beta.abs() {
+                (sign * k, sign * h)
+            } else {
+                (sign * h, sign * k)
+            };
+            [0, 1, 2].map(|i| p * a[i] + q * b[i])
+        };
+        let small_enough = |v: [i128; 3]| v.iter().all(|c| c.abs() <= SQUARE_LIMIT);
+        let off_by = |v: [i128; 3]| {
+            let v = float(v);
+            let crossed = cross(v, toward);
+            dot(crossed, crossed).sqrt() / (dot(v, v) * dot(toward, toward)).sqrt()
+        };
+        let mut x = small / big;
+        let ((mut h0, mut h1), (mut k0, mut k1)) = ((0i128, 1i128), (1i128, 0i128));
+        let mut best = a;
+        loop {
+            let digit = x.floor() as i128;
+            let candidate = combination(digit * h1 + h0, digit * k1 + k0);
+            if !small_enough(candidate) {
+                // Too long: the longest fraction between this and the last that isn't, if
+                // it's nearer.
+                let (mut low, mut high) = (0, digit);
+                while high - low > 1 {
+                    let middle = (low + high) / 2;
+                    if small_enough(combination(middle * h1 + h0, middle * k1 + k0)) {
+                        low = middle;
+                    } else {
+                        high = middle;
+                    }
+                }
+                let between = combination(low * h1 + h0, low * k1 + k0);
+                if low > 0 && off_by(between) < off_by(best) {
+                    best = between;
+                }
+                break;
+            }
+            best = candidate;
+            let rest = x - x.floor();
+            if off_by(candidate) < 1e-9 || rest == 0.0 {
+                break;
+            }
+            x = 1.0 / rest;
+            (h0, h1, k0, k1) = (h1, digit * h1 + h0, k1, digit * k1 + k0);
+        }
+        vector(best)
+    }
+}
+
+fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
+fn cross128(a: [i128; 3], b: [i128; 3]) -> [i128; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
+/// `(g, u, w)` with `g` the greatest common divisor of `a` and `b`, not both zero, and
+/// `a u + b w = g`.
+fn extended_gcd(a: i128, b: i128) -> (i128, i128, i128) {
+    let (mut old, mut r) = (a, b);
+    let (mut old_u, mut u) = (1i128, 0i128);
+    let (mut old_w, mut w) = (0i128, 1i128);
+    while r != 0 {
+        let q = old.div_euclid(r);
+        (old, r) = (r, old - q * r);
+        (old_u, u) = (u, old_u - q * u);
+        (old_w, w) = (w, old_w - q * w);
+    }
+    if old < 0 {
+        (-old, -old_u, -old_w)
+    } else {
+        (old, old_u, old_w)
+    }
+}
+
 fn gcd128(mut a: u128, mut b: u128) -> u128 {
     while b != 0 {
         (a, b) = (b, a % b);
@@ -629,7 +854,66 @@ pub(crate) fn merge_all(mut regions: Vec<Region>, thickness: Length) -> Vec<Regi
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
+
+    /// A direction from two angles, in hundredths of a degree.
+    fn pointing(turn: i32, rise: i32) -> [f64; 3] {
+        let (turn, rise) = (
+            (turn as f64 / 100.0).to_radians(),
+            (rise as f64 / 100.0).to_radians(),
+        );
+        [turn.cos() * rise.cos(), turn.sin() * rise.cos(), rise.sin()]
+    }
+
+    fn float(v: Vector) -> [f64; 3] {
+        [v.l as f64, v.w as f64, v.t as f64]
+    }
+
+    /// The angle between two directions, in radians.
+    fn between(a: [f64; 3], b: [f64; 3]) -> f64 {
+        let dot = a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+        let crossed = cross(a, b);
+        let sine =
+            (crossed[0] * crossed[0] + crossed[1] * crossed[1] + crossed[2] * crossed[2]).sqrt();
+        sine.atan2(dot)
+    }
+
+    proptest! {
+        #[test]
+        fn the_nearest_pair_is_exactly_square_and_within_a_saws_angles(
+            normal in (0..36_000i32, -9_000..=9_000i32),
+            toward in (0..36_000i32, -9_000..=9_000i32),
+        ) {
+            // A direction, and another made square to it, as a blade's faces and path are.
+            let normal = pointing(normal.0, normal.1);
+            let toward = pointing(toward.0, toward.1);
+            let off = toward[0] * normal[0] + toward[1] * normal[1] + toward[2] * normal[2];
+            let along = [0, 1, 2].map(|k| toward[k] - off * normal[k]);
+            prop_assume!(along.iter().map(|c| c * c).sum::<f64>() > 1e-6);
+            let (n, a) = Vector::nearest_pair(normal, along);
+            prop_assert_eq!(n.dot_vector(a), 0);
+            prop_assert!(between(float(n), normal) < 1.0 / 16_000_000.0);
+            prop_assert!(between(float(a), along) < 1.0 / 16_000_000.0);
+            prop_assert!([a.l, a.w, a.t].iter().all(|c| c.abs() <= 1 << 28));
+        }
+    }
+
+    #[test]
+    fn the_nearest_square_direction_keeps_level_what_is_level() {
+        // A tilted face's normal, and a path level on the board.
+        let normal = Vector::nearest_at(pointing(3_000, 1_500), DIRECTION_UNIT);
+        let along =
+            normal.nearest_square([-(30f64.to_radians().sin()), 30f64.to_radians().cos(), 0.0]);
+        assert_eq!(along.t, 0);
+        assert_eq!(normal.dot_vector(along), 0);
+        // Square to the faces, straight along the board, it's exactly the board's length.
+        assert_eq!(
+            Vector::new(0, 1, 0).nearest_square([1.0, 0.0, 0.0]),
+            Vector::LENGTH
+        );
+    }
 
     fn inches(n: i64) -> Length {
         Length::from_inches(n)

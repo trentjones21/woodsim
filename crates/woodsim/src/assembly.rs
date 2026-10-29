@@ -4,7 +4,7 @@
 //! across the joint it sits. Where surfaces meet or nearly do, the assembly measures how well:
 //! tight, open, or running into each other.
 
-use crate::{Board, Length, face::Edge, history::next_number};
+use crate::{Angle, Board, Length, face::Edge, history::next_number};
 
 /// A turn in space, as where it turns each of three axes: whole numbers over 2^40, so quarter
 /// turns are exact and any other turn is within a trillionth of a radian.
@@ -26,6 +26,20 @@ impl Rotation {
         Rotation {
             columns: columns.map(|column| column.map(|v| (v * ROTATION_UNIT).round() as i64)),
         }
+    }
+
+    /// `angle` about `axis`, counterclockwise looking back down it: any turn, as near as
+    /// whole numbers over 2^40 come.
+    pub fn about(axis: [f64; 3], angle: Angle) -> Rotation {
+        let size = (axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]).sqrt();
+        let [x, y, z] = axis.map(|c| c / size);
+        let (sin, cos) = angle.radians().sin_cos();
+        let t = 1.0 - cos;
+        Rotation::from_columns([
+            [t * x * x + cos, t * x * y + sin * z, t * x * z - sin * y],
+            [t * x * y - sin * z, t * y * y + cos, t * y * z + sin * x],
+            [t * x * z + sin * y, t * y * z - sin * x, t * z * z + cos],
+        ])
     }
 
     /// `turns` quarter turns about `x`, `y`, or `z` (`axis` 0, 1, or 2), counterclockwise

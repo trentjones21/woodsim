@@ -59,8 +59,6 @@ pub enum CutError {
     NonPositiveSetting(Length),
     /// The setting is at or past the board's far edge, so the blade never touches it.
     MissesBoard { setting: Length, available: Length },
-    /// The board lies a way the simulation can't cut yet, for the reason given.
-    NotModeled(&'static str),
 }
 
 impl fmt::Display for CutError {
@@ -73,7 +71,6 @@ impl fmt::Display for CutError {
                 f,
                 "the blade misses the board: set to {setting}, but the board is only {available}"
             ),
-            CutError::NotModeled(reason) => write!(f, "{reason}"),
         }
     }
 }
@@ -133,9 +130,9 @@ impl TableSaw {
         end: Length,
     ) -> Result<Pass, CutError> {
         let alone = alone(board);
-        let laid = Laid::new(&alone, lie.rotation())?;
+        let laid = Laid::new(&alone, lie.rotation());
         let (sweep, waste) = self.sweep(&laid, Lie::Board(lie), (start, end))?;
-        Ok(one_board(laid.cut(&sweep)?, waste))
+        Ok(one_board(laid.cut(&sweep), waste))
     }
 
     /// Pushes `board`, lying as `lie` says, all the way past the blade. It's cut apart if the
@@ -150,7 +147,7 @@ impl TableSaw {
     /// trailing one along the blade's travel.
     pub fn reach(&self, board: &Board, lie: Orientation) -> Length {
         let alone = alone(board);
-        Laid::new(&alone, lie.rotation()).map_or(Length::ZERO, |laid| self.reach_of(&laid))
+        self.reach_of(&Laid::new(&alone, lie.rotation()))
     }
 
     /// How far what's laid on the saw reaches along the blade's travel.
@@ -295,15 +292,15 @@ impl TableSaw {
         start: Length,
         end: Length,
     ) -> Result<GlueUpPass, CutError> {
-        let laid = Laid::new(glue_up, lie)?;
+        let laid = Laid::new(glue_up, lie);
         let (sweep, _) = self.sweep(&laid, Lie::GlueUp(lie), (start, end))?;
-        laid.cut(&sweep)
+        Ok(laid.cut(&sweep))
     }
 
     /// Pushes a glue-up, lying as `lie` lays it, all the way past the blade.
     pub fn rip_glue_up(&self, glue_up: &Assembly, lie: Rotation) -> Result<GlueUpPass, CutError> {
         let radius = self.blade.radius();
-        let reach = self.reach_of(&Laid::new(glue_up, lie)?);
+        let reach = self.reach_of(&Laid::new(glue_up, lie));
         self.feed_glue_up(glue_up, lie, -radius, reach + radius)
     }
 }
@@ -402,7 +399,7 @@ impl MiterSaw {
         bottom: Length,
     ) -> Result<Pass, CutError> {
         let alone = alone(board);
-        let laid = Laid::new(&alone, lie.rotation())?;
+        let laid = Laid::new(&alone, lie.rotation());
         let tool = Tool::MiterSaw {
             saw: *self,
             lie: Lie::Board(lie),
@@ -410,7 +407,7 @@ impl MiterSaw {
             bottom,
         };
         let (sweep, waste) = self.sweep(&laid, tool, length, bottom)?;
-        Ok(one_board(laid.cut(&sweep)?, waste))
+        Ok(one_board(laid.cut(&sweep), waste))
     }
 
     /// Where the blade sweeps through what `laid` lays on the saw, in its frame: along the fence
@@ -482,7 +479,7 @@ impl MiterSaw {
         length: Length,
         bottom: Length,
     ) -> Result<GlueUpPass, CutError> {
-        let laid = Laid::new(glue_up, lie)?;
+        let laid = Laid::new(glue_up, lie);
         let tool = Tool::MiterSaw {
             saw: *self,
             lie: Lie::GlueUp(lie),
@@ -490,7 +487,7 @@ impl MiterSaw {
             bottom,
         };
         let (sweep, _) = self.sweep(&laid, tool, length, bottom)?;
-        laid.cut(&sweep)
+        Ok(laid.cut(&sweep))
     }
 
     /// Chops a glue-up with a full stroke, through the table.
@@ -519,7 +516,7 @@ impl MiterSaw {
 /// long. The error says the setting that would just reach it: moving the setting moves the
 /// face square to itself by `cosines` as much.
 fn reaches(laid: &Laid, sweep: &Sweep, setting: Length, cosines: f64) -> Result<(), CutError> {
-    match laid.short_of(sweep)? {
+    match laid.short_of(sweep) {
         None => Ok(()),
         Some(short) => Err(CutError::MissesBoard {
             setting,

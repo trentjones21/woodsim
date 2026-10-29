@@ -5,7 +5,7 @@
 
 use proptest::prelude::*;
 use woodsim::{
-    Angle, Assembly, Blade, Board, CutError, Fastener, GlueUpPass, Length, Mating, Member,
+    Angle, Assembly, Blade, Board, CutError, Fastener, GlueUpPass, Kerf, Length, Mating, Member,
     MiterSaw, Orientation, Rotation, Source, Surface, TableSaw, surfaces,
 };
 
@@ -68,13 +68,57 @@ fn l_of(board: &Board) -> Assembly {
         .expect("a way around with their lengths alike")
 }
 
-/// One board on its own, or two glued into an L.
+/// `board` with another like it glued onto a bevel ripped along its edge, `tilt` hundredths of
+/// a degree from square: the other board stands off at an angle, turned out of square.
+fn angled(board: &Board, tilt: i32) -> Assembly {
+    let saw = TableSaw {
+        tilt: Angle::from_hundredths(tilt),
+        ..table_saw(
+            (Length::from_nm(board.width().as_nm() / 2), None),
+            0,
+            inches(3),
+        )
+    };
+    let Ok(GlueUpPass::Cut(cut)) = saw.rip_glue_up(&Assembly::of(board.clone()), Rotation::NONE)
+    else {
+        panic!("a rip down the middle cuts it apart");
+    };
+    let beveled = cut.piece.members()[0].board.clone();
+    let (bevel, _) = beveled.bevels()[0];
+    let mut glue_up = Assembly::of(beveled);
+    assert!(glue_up.attach(
+        (0, Surface::Side(bevel)),
+        &Assembly::of(board.clone()),
+        (0, Surface::Bottom),
+        Mating::default(),
+        Fastener::Glue,
+    ));
+    glue_up
+}
+
+/// One board on its own, two glued into an L, or one glued onto another's bevel at an angle.
 fn glue_up() -> impl Strategy<Value = Assembly> {
-    (board(), any::<bool>()).prop_map(
-        |(board, l)| {
-            if l { l_of(&board) } else { Assembly::of(board) }
-        },
-    )
+    (board(), 0..3u8, 100..=4500i32).prop_map(|(board, kind, tilt)| match kind {
+        0 => Assembly::of(board),
+        1 => l_of(&board),
+        _ => angled(&board, tilt),
+    })
+}
+
+/// How it lies on the saw: one of the 24 square ways, or turned any way at all, about an axis
+/// pointing `turn` around and `rise` up, by `angle`, all in hundredths of a degree.
+fn lie() -> impl Strategy<Value = Rotation> {
+    prop_oneof![
+        (0..24usize).prop_map(|k| square_lies()[k]),
+        (0..36_000i32, -9_000..=9_000i32, 0..36_000i32).prop_map(|(turn, rise, angle)| {
+            let (turn, rise) = (
+                (turn as f64 / 100.0).to_radians(),
+                (rise as f64 / 100.0).to_radians(),
+            );
+            let axis = [turn.cos() * rise.cos(), turn.sin() * rise.cos(), rise.sin()];
+            Rotation::about(axis, Angle::from_hundredths(angle))
+        }),
+    ]
 }
 
 /// A table saw with a 10" blade: against the fence `fence` from it, or the miter gauge's stop
@@ -123,32 +167,47 @@ fn left(before: &Assembly, pass: &GlueUpPass) -> Vec<Member> {
 /// it, and nowhere else does any.
 fn holds_its_wood(before: &Assembly, pass: &GlueUpPass) -> Result<(), TestCaseError> {
     let after = left(before, pass);
-    let mut slot = None;
+    // The slot the blade cut in each of the glue-up's boards it touched, in that board's own
+    // whole numbers.
+    let mut slots: Vec<Option<Kerf>> = vec![None; before.members().len()];
     for member in &after {
         prop_assert_eq!(&member.board.origin().replay(), &member.board);
+        // Left as it was, the blade didn't touch it, though it may have been sawn before.
+        if before.members().contains(member) {
+            continue;
+        }
         let Source::Sawn { from, kerf, at, .. } = member.board.origin().source() else {
             continue;
         };
         // The board it was sawn from, where it is now.
         let corner = member.point(Length::ZERO, Length::ZERO, Length::ZERO);
-        let was = before.members().iter().find(|was| {
+        let was = before.members().iter().position(|was| {
             was.rotation == member.rotation
                 && was.point(at[0], at[1], at[2]) == corner
                 && from.replay() == was.board
         });
         prop_assert!(was.is_some(), "a piece moved from where it was cut");
-        slot = slot.or(was.map(|was| (was.clone(), *kerf)));
+        slots[was.unwrap()] = Some(*kerf);
     }
-    let in_slot = |x: [Length; 3]| {
-        slot.as_ref().is_some_and(|(was, kerf)| {
-            let [l, w, t] = on(was, x);
-            kerf.contains(l, w, t)
-        })
-    };
     const STEPS: i64 = 5;
     // Off from any whole fraction differently on each axis, so no point lands on a face.
     let at = |size: Length, i: i64, off: i64| {
         Length::from_nm(size.as_nm() * (2 * i + 1) / (2 * STEPS) + off)
+    };
+    let nm = Length::from_nm;
+    // How many of the glue-up's boards have wood at `x` the blade didn't take: one at most,
+    // since they don't overlap, though one's box can hold another's wood.
+    let wood_at = |x: [Length; 3]| {
+        before
+            .members()
+            .iter()
+            .zip(&slots)
+            .filter(|(member, slot)| {
+                let [l, w, t] = on(member, x);
+                member.board.has_wood_in(l, w, t)
+                    && !slot.is_some_and(|kerf| kerf.contains(l, w, t))
+            })
+            .count()
     };
     for member in before.members() {
         let board = &member.board;
@@ -161,7 +220,20 @@ fn holds_its_wood(before: &Assembly, pass: &GlueUpPass) -> Result<(), TestCaseEr
                         at(board.thickness(), k, 3),
                     );
                     let x = member.point(l, w, t);
-                    let wood = board.has_wood_in(l, w, t) && !in_slot(x);
+                    // Where wood starts or stops, turning a point into a board turned off
+                    // square can land it a nanometer either side, so only points clear of
+                    // every face are checked.
+                    let wood = wood_at(x);
+                    let near = (0..3).any(|axis| {
+                        [-25, 25].into_iter().any(|off| {
+                            let mut y = x;
+                            y[axis] = y[axis] + nm(off);
+                            wood_at(y) != wood
+                        })
+                    });
+                    if near {
+                        continue;
+                    }
                     let holding = after
                         .iter()
                         .filter(|piece| {
@@ -169,7 +241,7 @@ fn holds_its_wood(before: &Assembly, pass: &GlueUpPass) -> Result<(), TestCaseEr
                             piece.board.has_wood_in(l, w, t)
                         })
                         .count();
-                    prop_assert_eq!(holding, usize::from(wood), "at {:?}", x);
+                    prop_assert_eq!(holding, wood, "at {:?}", x);
                 }
             }
         }
@@ -196,7 +268,7 @@ proptest! {
     #[test]
     fn the_table_saw_cuts_anything_lying_any_way_at_any_angle_and_tilt(
         glue_up in glue_up(),
-        lie in 0..24usize,
+        lie in lie(),
         guide in prop_oneof![
             (1..=48i64).prop_map(|fence| (fraction(fence, 8), None)),
             (1..=48i64, -6000..=6000i32)
@@ -207,7 +279,6 @@ proptest! {
         stopped in proptest::option::of(0.0..1.0f64),
     ) {
         let saw = table_saw(guide, tilt, fraction(height, 8));
-        let lie = square_lies()[lie];
         let pass = match stopped {
             None => saw.rip_glue_up(&glue_up, lie),
             Some(part) => {
@@ -223,7 +294,7 @@ proptest! {
     #[test]
     fn the_miter_saw_cuts_anything_lying_any_way_at_any_angle(
         glue_up in glue_up(),
-        lie in 0..24usize,
+        lie in lie(),
         miter in prop_oneof![Just(0), -5000..=5000i32],
         length in 1..=48i64,
         bottom in proptest::option::of(-8..=24i64),
@@ -232,7 +303,6 @@ proptest! {
             miter: Angle::from_hundredths(miter),
             ..MiterSaw::twelve_inch()
         };
-        let lie = square_lies()[lie];
         let length = fraction(length, 8);
         let pass = match bottom {
             None => saw.crosscut_glue_up(&glue_up, lie, length),
