@@ -78,30 +78,49 @@ struct Step {
     also: Vec<Joint>,
 }
 
+/// What each member of `assembly` is called in its plans: "A", or "A1", "A2", ... for parts
+/// that come out the same.
+pub fn labels(assembly: &Assembly) -> Vec<String> {
+    labeled(&parts(assembly), assembly.members().len())
+}
+
+/// The lines of the cut list: parts that come out the same, however they're turned over,
+/// lettered in the order they're in the assembly.
+fn parts(assembly: &Assembly) -> Vec<Part> {
+    let mut parts: Vec<Part> = Vec::new();
+    for (index, member) in assembly.members().iter().enumerate() {
+        let sketch = Sketch::of(&member.board);
+        match parts.iter_mut().find(|part| part.sketch.key == sketch.key) {
+            Some(part) => part.members.push(index),
+            None => parts.push(Part {
+                letter: letter(parts.len()),
+                members: vec![index],
+                board: member.board.clone(),
+                sketch,
+            }),
+        }
+    }
+    parts
+}
+
+/// Each of `count` members' label: its part's letter, numbered when there are more than one.
+fn labeled(parts: &[Part], count: usize) -> Vec<String> {
+    let mut labels = vec![String::new(); count];
+    for part in parts {
+        for (count, &member) in part.members.iter().enumerate() {
+            labels[member] = match part.members.len() {
+                1 => part.letter.clone(),
+                _ => format!("{}{}", part.letter, count + 1),
+            };
+        }
+    }
+    labels
+}
+
 impl Plan {
     pub fn of(assembly: Assembly) -> Plan {
-        let mut parts: Vec<Part> = Vec::new();
-        for (index, member) in assembly.members().iter().enumerate() {
-            let sketch = Sketch::of(&member.board);
-            match parts.iter_mut().find(|part| part.sketch.key == sketch.key) {
-                Some(part) => part.members.push(index),
-                None => parts.push(Part {
-                    letter: letter(parts.len()),
-                    members: vec![index],
-                    board: member.board.clone(),
-                    sketch,
-                }),
-            }
-        }
-        let mut labels = vec![String::new(); assembly.members().len()];
-        for part in &parts {
-            for (count, &member) in part.members.iter().enumerate() {
-                labels[member] = match part.members.len() {
-                    1 => part.letter.clone(),
-                    _ => format!("{}{}", part.letter, count + 1),
-                };
-            }
-        }
+        let parts = parts(&assembly);
+        let labels = labeled(&parts, assembly.members().len());
         let steps = steps(&assembly);
         let cutting = Cutting::of(&assembly);
         Plan {
@@ -1694,6 +1713,37 @@ mod tests {
             Length::from_inch_fraction(3, 4),
         );
         assert_ne!(Sketch::of(&square).key, Sketch::of(&piece).key);
+    }
+
+    #[test]
+    fn duplicated_parts_are_bought_and_cut_again() {
+        let piece = frame_piece(Length::from_inches(10), 4500);
+        let mut frame = Assembly::of(piece.clone());
+        for last in 0..3 {
+            let copy = piece.duplicate();
+            let onto = (last, miter(&frame.members()[last].board, true));
+            add(&mut frame, onto, &copy, miter(&copy, false));
+        }
+        let plan = Plan::of(frame);
+        assert_eq!(plan.cutting.stock.len(), 4);
+        assert!(
+            plan.cutting
+                .buy_list()
+                .contains("<td>3/4\" x 1-1/2\" x 48\" board</td><td>4</td>"),
+            "{}",
+            plan.cutting.buy_list()
+        );
+        // Each made the same way from its own board: the same cuts, listed once for all four.
+        assert_eq!(plan.cutting.listings.len(), 1);
+        let said = plan
+            .cutting
+            .describe(0, plan.assembly.members(), &plan.labels, &|listing| {
+                listing + 1
+            });
+        assert!(
+            said.starts_with("<p>For each board, to make A1, A2, A3, and A4:</p>"),
+            "{said}"
+        );
     }
 
     #[test]

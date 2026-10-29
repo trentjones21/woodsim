@@ -5,7 +5,10 @@
 use bevy::{input::InputSystems, picking::PickingSystems, prelude::*};
 use woodsim::Fastener;
 
-use crate::shop::ShopView;
+use crate::{
+    parts::{Entry, Fold, Where},
+    shop::ShopView,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Action {
@@ -93,6 +96,12 @@ pub enum Action {
     Save(u64),
     Load(u64),
     DeleteSaved(u64),
+    /// In the inventory's tree: pick out a line, fold a heading away or open a glue-up's
+    /// boards, duplicate a piece wherever it is, or put away a piece that's on a station.
+    Select(Entry),
+    Fold(Fold),
+    Duplicate(Entry),
+    Stash(Where),
     /// The list of every control here, and the inventory.
     Help,
     Inventory,

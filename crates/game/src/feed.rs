@@ -497,6 +497,20 @@ impl TableSawStation {
         }
     }
 
+    /// What's on the saw that hasn't been carried off, as each would be handed over: the board,
+    /// slots and all, or the sides of the cut it was cut into.
+    pub fn wood(&self) -> Vec<(Part, Workpiece)> {
+        match self.result() {
+            Some(Ok(Passed::Cut(cut))) => [Part::Piece, Part::Offcut]
+                .into_iter()
+                .filter(|part| !self.taken.contains(part))
+                .filter_map(|part| Some((part, cut.take(part, self.lie)?)))
+                .collect(),
+            _ if self.taken.contains(&Part::Whole) => Vec::new(),
+            _ => vec![(Part::Whole, work::hand_off(self.current_board(), self.lie))],
+        }
+    }
+
     /// Whether a board can be set down on the saw: not while one is at the blade.
     pub fn can_load(&self) -> bool {
         !self.at_blade()
@@ -508,16 +522,11 @@ impl TableSawStation {
         let loose = self.take_loose();
         self.set_aside
             .extend(loose.into_iter().map(|strip| (Shelf::Offcuts, strip)));
-        let left: Vec<(Shelf, Workpiece)> = match self.result() {
-            Some(Ok(Passed::Cut(cut))) => [Part::Piece, Part::Offcut]
-                .into_iter()
-                .filter(|part| !self.taken.contains(part))
-                .filter_map(|part| Some((shelf(part), cut.take(part, self.lie)?)))
-                .collect(),
-            _ if self.taken.contains(&Part::Whole) => Vec::new(),
-            _ => vec![(Shelf::Parts, work::hand_off(self.current_board(), self.lie))],
-        };
-        self.set_aside.extend(left);
+        let left = self
+            .wood()
+            .into_iter()
+            .map(|(part, work)| (shelf(part), work));
+        self.set_aside.extend(left.collect::<Vec<_>>());
         self.board = board;
         self.lie = Orientation::default();
         self.advance = START;

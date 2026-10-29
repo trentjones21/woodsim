@@ -2,6 +2,9 @@
 //! glue-ups go on one shelf and offcuts on another, and either can move to the other. New
 //! lumber comes in the sizes the rack stocks, as much as you like. From anywhere, a part goes
 //! straight to the station you're at: onto a saw to cut, or onto the bench to put together.
+//! Any piece, wherever it is, can be duplicated onto the parts shelf, made again the same way
+//! from new lumber of its own, and put away from wherever it is. The tree (`parts`) lists it
+//! all, the shelves along with the stations.
 //!
 //! Wood a station sets aside comes here: whatever a board set down on a saw displaces, what a
 //! cut leaves when you take one side, strips a cut sets loose, and what you put away.
@@ -12,11 +15,12 @@ use woodsim::Length;
 use crate::{
     chop::MiterSawStation,
     controls::{Action, Actions},
-    feed::TableSawStation,
+    feed::{TableSawStation, shelf},
     hand::{Hand, Workpiece, describe_glue_up, from_rack},
     join::BenchStation,
+    parts::{Entry, Places, Tree, Where},
     saved::Saved,
-    shop::{ShopView, describe_board, describe_size},
+    shop::{Part, ShopView, describe_board, describe_size},
 };
 
 /// Where in the inventory a piece of wood goes.
@@ -163,7 +167,20 @@ impl Inventory {
         self.items.iter().find(|item| item.id == id)
     }
 
+    /// The first piece on the same shelf as `id` that's just like it: the one its line is
+    /// named for.
+    pub fn first_like(&self, id: u64) -> u64 {
+        let Some(item) = self.get(id) else {
+            return id;
+        };
+        self.items
+            .iter()
+            .find(|other| other.shelf == item.shelf && other.work == item.work)
+            .map_or(id, |other| other.id)
+    }
+
     /// How many pieces are on `shelf`.
+    #[cfg(test)]
     pub fn count(&self, shelf: Shelf) -> usize {
         self.items.iter().filter(|item| item.shelf == shelf).count()
     }
@@ -220,14 +237,21 @@ pub struct InventoryPlugin;
 pub struct InventorySystems;
 
 impl Inventory {
-    /// Puts `work` on `shelf`, and says it came from `from`.
-    fn put(&mut self, shelf: Shelf, work: Workpiece, from: Spot, moved: &mut MessageWriter<Moved>) {
+    /// Puts `work` on `shelf`, and says it came from `from`. Returns the line it's on.
+    fn put(
+        &mut self,
+        shelf: Shelf,
+        work: Workpiece,
+        from: Spot,
+        moved: &mut MessageWriter<Moved>,
+    ) -> Where {
         let id = self.store(shelf, work.clone());
         moved.write(Moved {
             work,
             from,
             to: Spot::Item(id),
         });
+        Where::Shelf(self.first_like(id))
     }
 }
 
@@ -282,7 +306,7 @@ pub fn can_use_at(
 }
 
 /// Where the stations are, and what's in hand: everything the inventory gives wood to or takes
-/// it from.
+/// it from; and the tree, which follows it.
 #[derive(SystemParam)]
 struct Stations<'w> {
     view: Res<'w, ShopView>,
@@ -290,10 +314,12 @@ struct Stations<'w> {
     table_saw: ResMut<'w, TableSawStation>,
     miter_saw: ResMut<'w, MiterSawStation>,
     bench: ResMut<'w, BenchStation>,
+    tree: ResMut<'w, Tree>,
 }
 
 /// Uses the inventory as asked: a piece or new lumber to wherever you are, a piece to the other
-/// shelf or the scrap bin, or what's in hand, on the saw, or picked at the bench, put away.
+/// shelf or the scrap bin, or what's in hand, on the saw, or picked at the bench, put away; a
+/// piece anywhere duplicated, or put away from where it is.
 fn use_inventory(
     actions: Res<Actions>,
     saved: Res<Saved>,
@@ -309,7 +335,9 @@ fn use_inventory(
             {
                 let work = match action {
                     Action::Take(id) => inventory.take(id),
-                    Action::Load(index) => saved.part(index as usize),
+                    // A copy with a history of its own, so a part used twice is two pieces of
+                    // wood, each to buy and cut.
+                    Action::Load(index) => saved.part(index as usize).map(|part| part.duplicate()),
                     _ => lumber(id as usize),
                 };
                 let Some(work) = work else { continue };
@@ -331,6 +359,56 @@ fn use_inventory(
                             inventory.put(Shelf::Parts, held, Spot::Hand, &mut moved);
                         }
                     }
+                }
+                if let Action::Take(id) = action {
+                    let to = match view {
+                        ShopView::TableSaw | ShopView::MiterSaw => Where::Saw(view, Part::Whole),
+                        ShopView::Bench => Where::Bench(at.bench.groups.len() - 1),
+                        ShopView::Overview | ShopView::Studio => Where::Hand,
+                    };
+                    at.tree.follow(Where::Shelf(id), to);
+                }
+            }
+            Action::Duplicate(entry) if !matches!(entry.at, Where::Lumber(_)) => {
+                let places = Places {
+                    hand: &at.hand,
+                    table_saw: &at.table_saw,
+                    miter_saw: &at.miter_saw,
+                    bench: &at.bench,
+                    inventory: &inventory,
+                    saved: &saved,
+                };
+                let Some(work) = places.wood(entry) else {
+                    continue;
+                };
+                let line = inventory.put(Shelf::Parts, work.duplicate(), Spot::Pressed, &mut moved);
+                at.tree.selected = Some(Entry::at(line));
+            }
+            Action::Stash(from) => {
+                let station = |view| Spot::Station(view);
+                let taken = match from {
+                    Where::Hand => at
+                        .hand
+                        .0
+                        .take()
+                        .map(|work| (Shelf::Parts, work, Spot::Hand)),
+                    Where::Saw(ShopView::TableSaw, part) => at
+                        .table_saw
+                        .take(part)
+                        .map(|work| (shelf(part), work, station(ShopView::TableSaw))),
+                    Where::Saw(ShopView::MiterSaw, part) => at
+                        .miter_saw
+                        .take(part)
+                        .map(|work| (shelf(part), work, station(ShopView::MiterSaw))),
+                    Where::Bench(index) => at
+                        .bench
+                        .take(index)
+                        .map(|work| (Shelf::Parts, work, station(ShopView::Bench))),
+                    _ => None,
+                };
+                if let Some((shelf, work, spot)) = taken {
+                    let line = inventory.put(shelf, work, spot, &mut moved);
+                    at.tree.follow(from, line);
                 }
             }
             Action::MoveShelf(id) => {
@@ -355,16 +433,19 @@ fn use_inventory(
             }
             Action::PutAway => {
                 if let Some(work) = at.hand.0.take() {
-                    inventory.put(Shelf::Parts, work, Spot::Hand, &mut moved);
+                    let line = inventory.put(Shelf::Parts, work, Spot::Hand, &mut moved);
+                    at.tree.follow(Where::Hand, line);
                 }
             }
             Action::Store => match view {
                 ShopView::TableSaw => at.table_saw.put_away(),
                 ShopView::MiterSaw => at.miter_saw.put_away(),
                 ShopView::Bench => {
-                    if let Some(work) = at.bench.take_picked() {
+                    let picked = at.bench.picked.map(|picked| Where::Bench(picked.group));
+                    if let (Some(work), Some(picked)) = (at.bench.take_picked(), picked) {
                         let from = Spot::Station(ShopView::Bench);
-                        inventory.put(Shelf::Parts, work, from, &mut moved);
+                        let line = inventory.put(Shelf::Parts, work, from, &mut moved);
+                        at.tree.follow(picked, line);
                     }
                 }
                 ShopView::Overview | ShopView::Studio => {}
@@ -397,6 +478,7 @@ mod tests {
         world.init_resource::<MiterSawStation>();
         world.init_resource::<BenchStation>();
         world.init_resource::<Saved>();
+        world.init_resource::<Tree>();
         world
     }
 
@@ -504,6 +586,120 @@ mod tests {
             ),
             (1, 1)
         );
+    }
+
+    #[test]
+    fn a_duplicate_of_wood_anywhere_goes_on_the_parts_shelf_made_from_its_own_lumber() {
+        let mut world = shop(ShopView::TableSaw);
+        let on_saw = Entry::at(Where::Saw(ShopView::TableSaw, Part::Whole));
+        act(&mut world, Action::Duplicate(on_saw));
+        act(&mut world, Action::Duplicate(on_saw));
+        let inventory = world.resource::<Inventory>();
+        let rows = inventory.rows(Shelf::Parts);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].count, 2);
+        let saw = world.resource::<TableSawStation>().wood();
+        assert_eq!(rows[0].work, &saw[0].1);
+        let stock = |work: &Workpiece| work.board().unwrap().origin().stock().clone();
+        let copies: Vec<_> = rows[0]
+            .ids
+            .iter()
+            .map(|&id| stock(&inventory.get(id).unwrap().work))
+            .collect();
+        assert!(!copies[0].same(&stock(&saw[0].1)));
+        assert!(!copies[0].same(&copies[1]));
+        // The copy is picked out, on the line it joined.
+        assert_eq!(
+            world.resource::<Tree>().selected,
+            Some(Entry::at(Where::Shelf(rows[0].id)))
+        );
+        // New lumber is new already.
+        act(&mut world, Action::Duplicate(Entry::at(Where::Lumber(0))));
+        assert_eq!(world.resource::<Inventory>().count(Shelf::Parts), 2);
+    }
+
+    #[test]
+    fn a_board_of_a_glue_up_duplicates_on_its_own() {
+        let mut world = shop(ShopView::Bench);
+        let panel = crate::work::panel(
+            &[Length::from_inches(4), Length::from_inches(2)],
+            Length::from_inches(24),
+        );
+        world
+            .resource_mut::<BenchStation>()
+            .set_down(Workpiece::GlueUp(panel.clone()), None);
+        let member = Entry {
+            at: Where::Bench(0),
+            member: Some(1),
+        };
+        act(&mut world, Action::Duplicate(member));
+        let inventory = world.resource::<Inventory>();
+        assert_eq!(
+            inventory.rows(Shelf::Parts)[0].work,
+            &Workpiece::Board(panel.members()[1].board.clone())
+        );
+        assert_eq!(world.resource::<BenchStation>().groups.len(), 1);
+    }
+
+    #[test]
+    fn wood_on_a_station_is_put_away_from_the_tree_and_stays_picked_out() {
+        let mut world = shop(ShopView::Overview);
+        let mut bench = world.resource_mut::<BenchStation>();
+        bench.set_down(board(10), None);
+        bench.set_down(board(12), None);
+        world
+            .resource_mut::<Tree>()
+            .select(Entry::at(Where::Bench(1)));
+        act(&mut world, Action::Stash(Where::Bench(1)));
+        assert_eq!(world.resource::<BenchStation>().groups.len(), 1);
+        let inventory = world.resource::<Inventory>();
+        let row = &inventory.rows(Shelf::Parts)[0];
+        assert_eq!(row.work, &board(12));
+        assert_eq!(
+            world.resource::<Tree>().selected,
+            Some(Entry::at(Where::Shelf(row.id)))
+        );
+        // The offcut of a cut on the miter saw goes to the offcuts; the piece is set aside
+        // to the parts.
+        let mut saw = world.resource_mut::<MiterSawStation>();
+        saw.load(board(24));
+        saw.lower(1.0);
+        saw.raise(1.0);
+        act(
+            &mut world,
+            Action::Stash(Where::Saw(ShopView::MiterSaw, Part::Offcut)),
+        );
+        let inventory = world.resource::<Inventory>();
+        assert_eq!(
+            (
+                inventory.count(Shelf::Parts),
+                inventory.count(Shelf::Offcuts)
+            ),
+            (2, 1)
+        );
+    }
+
+    #[test]
+    fn a_saved_part_used_twice_is_two_pieces_of_wood() {
+        let mut world = shop(ShopView::Bench);
+        world.insert_resource(Saved {
+            parts: vec![crate::saved::SavedPart {
+                path: "saved/part-1.txt".into(),
+                work: board(10),
+            }],
+            unread: Vec::new(),
+        });
+        act(&mut world, Action::Load(0));
+        act(&mut world, Action::Load(0));
+        let bench = world.resource::<BenchStation>();
+        let stock = |group: usize| {
+            bench.groups[group].assembly.members()[0]
+                .board
+                .origin()
+                .stock()
+                .clone()
+        };
+        assert!(!stock(0).same(&stock(1)));
     }
 
     #[test]

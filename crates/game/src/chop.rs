@@ -432,6 +432,22 @@ impl MiterSawStation {
         }
     }
 
+    /// What's on the saw, as each would be handed over: the board against the stop, as the
+    /// blade has scarred it so far, or the sides of the cut it was cut into.
+    pub fn wood(&self) -> Vec<(Part, Workpiece)> {
+        match &self.work {
+            Work::Empty => Vec::new(),
+            Work::Ready { board, scarred, .. } => {
+                let board = scarred.as_ref().unwrap_or(board).clone();
+                vec![(Part::Whole, work::hand_off(board, self.lie))]
+            }
+            Work::Cut { cut, .. } => [Part::Piece, Part::Offcut]
+                .into_iter()
+                .filter_map(|part| Some((part, cut.take(part, self.lie)?)))
+                .collect(),
+        }
+    }
+
     /// Sets aside everything on the saw: the board against the stop to the parts, or the
     /// measured piece of a cut to the parts and the offcut to the offcuts.
     fn clear_saw(&mut self) {

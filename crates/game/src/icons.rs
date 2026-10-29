@@ -59,6 +59,8 @@ pub enum Icon {
     Inventory,
     /// Two sheets, one over the other: a copy.
     Copy,
+    /// A board with another behind it, and a plus: another made the same way.
+    Duplicate,
     /// A floppy disk: save it as a file.
     Save,
     /// Into the inventory, out of it to where you are, cut again, and throw away.
@@ -89,13 +91,14 @@ pub enum Icon {
 }
 
 impl Icon {
-    const ALL: [Icon; 49] = [
+    const ALL: [Icon; 50] = [
         Icon::TurnLeft,
         Icon::TurnRight,
         Icon::Flip,
         Icon::StandUp,
         Icon::Rest,
         Icon::Copy,
+        Icon::Duplicate,
         Icon::Save,
         Icon::SwitchGuide,
         Icon::Push,
@@ -194,6 +197,21 @@ impl Icon {
                     0.08,
                 ),
                 Rounded(p(0.1, 0.34), p(0.66, 0.9), 0.07),
+            ],
+            Icon::Duplicate => vec![
+                Line(
+                    vec![
+                        p(0.24, 0.3),
+                        p(0.24, 0.14),
+                        p(0.9, 0.14),
+                        p(0.9, 0.44),
+                        p(0.8, 0.44),
+                    ],
+                    0.08,
+                ),
+                Rounded(p(0.1, 0.36), p(0.76, 0.62), 0.05),
+                Line(vec![p(0.62, 0.7), p(0.62, 0.94)], 0.09),
+                Line(vec![p(0.5, 0.82), p(0.74, 0.82)], 0.09),
             ],
             Icon::Rest => {
                 let mut shapes = vec![
@@ -520,8 +538,8 @@ impl Icon {
                 shapes
             }
             Icon::Place => {
-                let mut shapes = vec![Rounded(p(0.1, 0.16), p(0.22, 0.84), 0.04)];
-                shapes.extend(arrow_line(p(0.88, 0.5), p(0.3, 0.5), 0.12));
+                let mut shapes = vec![Rounded(p(0.78, 0.16), p(0.9, 0.84), 0.04)];
+                shapes.extend(arrow_line(p(0.12, 0.5), p(0.7, 0.5), 0.12));
                 shapes
             }
             Icon::Again => {

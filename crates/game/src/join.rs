@@ -554,10 +554,14 @@ impl BenchStation {
     /// fastened into, lying as it lies on the bench.
     pub fn take_picked(&mut self) -> Option<Workpiece> {
         let picked = self.picked?;
-        self.picked = None;
         self.lining_up = None;
-        self.note = None;
-        let group = self.groups.remove(picked.group);
+        self.take(picked.group)
+    }
+
+    /// The part or glue-up `index`, as it would be carried off: a loose board, or the glue-up
+    /// lying as it lies on the bench.
+    pub fn wood(&self, index: usize) -> Option<Workpiece> {
+        let group = self.groups.get(index)?;
         Some(if group.is_loose() {
             Workpiece::Board(group.assembly.members()[0].board.clone())
         } else {
@@ -566,6 +570,33 @@ impl BenchStation {
                 shift: [Length::ZERO; 3],
             }))
         })
+    }
+
+    /// Takes the part or glue-up `index` off the bench to carry, as `wood` has it. What's
+    /// picked, and the joint being lined up, stay as they were if they weren't on it.
+    pub fn take(&mut self, index: usize) -> Option<Workpiece> {
+        let work = self.wood(index)?;
+        self.groups.remove(index);
+        let after = |group: usize| group - usize::from(group > index);
+        if self.picked.is_some_and(|picked| picked.group == index)
+            || self
+                .lining_up
+                .is_some_and(|lining_up| lining_up.onto.group == index)
+        {
+            self.lining_up = None;
+        }
+        self.picked = self
+            .picked
+            .filter(|picked| picked.group != index)
+            .map(|picked| Spot {
+                group: after(picked.group),
+                ..picked
+            });
+        if let Some(lining_up) = &mut self.lining_up {
+            lining_up.onto.group = after(lining_up.onto.group);
+        }
+        self.note = None;
+        Some(work)
     }
 
     /// What to draw up plans for, lying as it lies on the bench: the glue-up (or loose part)

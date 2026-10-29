@@ -8,7 +8,7 @@ use crate::{
     Angle, Board, Length, Orientation,
     exposed::{exposed, slot_shapes},
     face::Edge,
-    history::next_number,
+    history::{Copies, next_number},
 };
 
 /// Why something can't rest on a saw the way it was asked to (`Assembly::resting`).
@@ -259,6 +259,41 @@ impl Assembly {
 
     pub fn joints(&self) -> &[Joint] {
         &self.joints
+    }
+
+    /// Another just like it, made the same way from new lumber of its own (as
+    /// `Board::duplicate`): boards that came from the same stock still do, but not the stock
+    /// this one's boards came from, and every pass and joint is numbered after everything so
+    /// far, in the order they were, joints fastened at once still sharing a number.
+    pub fn duplicate(&self) -> Assembly {
+        let passes = self
+            .members
+            .iter()
+            .flat_map(|member| member.board.origin().operations())
+            .map(|operation| operation.number);
+        let joints = self.joints.iter().map(|joint| joint.number);
+        let mut copies = Copies::numbering(passes.chain(joints));
+        Assembly {
+            members: self
+                .members
+                .iter()
+                .map(|member| Member {
+                    board: member
+                        .board
+                        .clone()
+                        .with_origin(copies.origin(member.board.origin())),
+                    ..*member
+                })
+                .collect(),
+            joints: self
+                .joints
+                .iter()
+                .map(|joint| Joint {
+                    number: copies.number(joint.number),
+                    ..*joint
+                })
+                .collect(),
+        }
     }
 
     /// The assembly, moved as a whole.

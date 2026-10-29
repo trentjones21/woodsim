@@ -49,7 +49,7 @@ pub struct Block {
 
 /// The parts of a board a saw shows: the board in one piece (slots and all), or both sides of a
 /// cut that went through it.
-#[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Part {
     Whole,
     Piece,

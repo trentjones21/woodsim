@@ -9,6 +9,7 @@
 //! equal however they were made.
 
 use std::{
+    collections::HashMap,
     fmt,
     sync::{
         Arc,
@@ -270,6 +271,83 @@ impl Origin {
                 }
             }
         }
+    }
+}
+
+/// Histories copied afresh, for wood made again the same way from new lumber of its own: each
+/// copy starts from stock of its own and goes through passes of its own, shared wherever the
+/// originals were, and every pass and joint gets a new number, after everything so far, in the
+/// order the originals had.
+pub(crate) struct Copies {
+    numbers: HashMap<u64, u64>,
+    origins: Vec<(Origin, Origin)>,
+    operations: Vec<(Arc<Operation>, Arc<Operation>)>,
+}
+
+impl Copies {
+    /// Ready to copy histories whose passes and joints are numbered `numbers`.
+    pub(crate) fn numbering(numbers: impl IntoIterator<Item = u64>) -> Copies {
+        let mut numbers: Vec<u64> = numbers.into_iter().collect();
+        numbers.sort_unstable();
+        numbers.dedup();
+        Copies {
+            numbers: numbers
+                .into_iter()
+                .map(|number| (number, next_number()))
+                .collect(),
+            origins: Vec::new(),
+            operations: Vec::new(),
+        }
+    }
+
+    /// The new number for what was numbered `number`.
+    pub(crate) fn number(&self, number: u64) -> u64 {
+        self.numbers[&number]
+    }
+
+    /// The copy of `origin`: the same copy for the same origin, every time.
+    pub(crate) fn origin(&mut self, origin: &Origin) -> Origin {
+        if let Some((_, copy)) = self.origins.iter().find(|(seen, _)| seen.same(origin)) {
+            return copy.clone();
+        }
+        let copy = match origin.source() {
+            Source::Stock {
+                length,
+                width,
+                thickness,
+            } => Origin::new_stock(*length, *width, *thickness),
+            Source::Sawn {
+                operation,
+                from,
+                kerf,
+                part,
+                at,
+                side,
+            } => {
+                let from = self.origin(from);
+                let operation = self.operation(operation);
+                Origin::sawn(&operation, &from, *kerf, *part, *at, *side)
+            }
+        };
+        self.origins.push((origin.clone(), copy.clone()));
+        copy
+    }
+
+    fn operation(&mut self, operation: &Arc<Operation>) -> Arc<Operation> {
+        if let Some((_, copy)) = self
+            .operations
+            .iter()
+            .find(|(seen, _)| Arc::ptr_eq(seen, operation))
+        {
+            return Arc::clone(copy);
+        }
+        let copy = Arc::new(Operation {
+            number: self.number(operation.number),
+            tool: operation.tool,
+        });
+        self.operations
+            .push((Arc::clone(operation), Arc::clone(&copy)));
+        copy
     }
 }
 

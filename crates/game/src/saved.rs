@@ -3,8 +3,8 @@
 //! exact to the nanometer, with its whole history, so its plans come out as they would have. The
 //! parts in `saved/` are read when the game starts and again after each save (`Saved`), and
 //! listed in the inventory, where each is used (`Action::Load`) the way new lumber is: a copy of
-//! it goes where you are, and the file stays to use again until it's deleted
-//! (`Action::DeleteSaved`).
+//! it, with a history of its own, goes where you are, and the file stays to use again until it's
+//! deleted (`Action::DeleteSaved`).
 
 use std::{
     fs, io,

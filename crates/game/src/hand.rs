@@ -22,6 +22,17 @@ pub enum Workpiece {
     GlueUp(Assembly),
 }
 
+impl Workpiece {
+    /// Another just like it, made the same way from new lumber of its own, so plans buy it and
+    /// cut it again.
+    pub fn duplicate(&self) -> Workpiece {
+        match self {
+            Workpiece::Board(board) => Workpiece::Board(board.duplicate()),
+            Workpiece::GlueUp(assembly) => Workpiece::GlueUp(assembly.duplicate()),
+        }
+    }
+}
+
 #[cfg(test)]
 impl Workpiece {
     /// The board, if it's one board.

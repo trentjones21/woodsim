@@ -8,7 +8,7 @@ use crate::{
     Angle, Axis, Kerf, Length, Surface,
     assembly::surfaces,
     face::{Direction, Edge, Region, Vector, merge_all},
-    history::{Operation, Origin, Part, Side},
+    history::{Copies, Operation, Origin, Part, Side},
     kerf::{self, Opening},
     solid::{self, hull, line_crosses},
 };
@@ -117,13 +117,22 @@ impl Board {
         (kerfed, pieces)
     }
 
-    /// Notes which side of the cut that made it the board was on.
     /// The same board, made as `origin` says it was.
     pub(crate) fn with_origin(mut self, origin: Origin) -> Board {
         self.origin = origin;
         self
     }
 
+    /// Another board just like it, made the same way from new lumber of its own: it equals this
+    /// one, but its stock and every pass that cut it are its own, numbered after everything so
+    /// far, so plans buy it and cut it again.
+    pub fn duplicate(&self) -> Board {
+        let operations = self.origin.operations();
+        let mut copies = Copies::numbering(operations.iter().map(|operation| operation.number));
+        self.clone().with_origin(copies.origin(&self.origin))
+    }
+
+    /// Notes which side of the cut that made it the board was on.
     pub(crate) fn set_side(&mut self, side: Side) {
         self.origin = self.origin.on_side(side);
     }

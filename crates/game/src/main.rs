@@ -17,6 +17,7 @@ mod inventory;
 mod join;
 mod meshes;
 mod miter_saw;
+mod parts;
 mod plan;
 mod rest;
 mod saved;
@@ -55,6 +56,7 @@ use hand::HandPlugin;
 use hud::HudPlugin;
 use inventory::InventoryPlugin;
 use miter_saw::MiterSawPlugin;
+use parts::PartsPlugin;
 use rest::RestPlugin;
 use saved::SavedPlugin;
 use scenery::ScenePlugin;
@@ -119,6 +121,7 @@ fn main() {
         HandPlugin,
         ControlsPlugin,
         InventoryPlugin,
+        PartsPlugin,
         HudPlugin,
         FlightsPlugin,
         RestPlugin,

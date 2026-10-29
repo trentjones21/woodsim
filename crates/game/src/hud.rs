@@ -1,14 +1,15 @@
-//! Everything drawn over the shop. Along the top, a button back to the shop and a tab for each
-//! station, and buttons for the inventory and the controls. At a station, its settings, each a
-//! card with buttons to step it, and along the bottom a dock of buttons for what can be done
-//! there, over a line on what's going on. What's in hand shows at the top. Down the right, the
-//! inventory: parts, offcuts, and new lumber, each with buttons to use it where you are. Buttons
-//! start the same `Action`s their keys do, show their key, say what they do when the pointer
-//! rests on them, and dim when they'd do nothing.
+//! Everything drawn over the shop. Along the top, a button for the inventory, a button back to
+//! the shop and a tab for each station, and buttons for copying and the controls. Down the
+//! left, the inventory as a tree of every piece of wood in the shop, wherever it is (`parts`),
+//! with a card under it for the line picked out and what can be done with it. At a station, its
+//! settings down the right, each a card with buttons to step it, and along the bottom a dock of
+//! buttons for what can be done there, over a line on what's going on. What's in hand shows at
+//! the bottom. Buttons start the same `Action`s their keys do, show their key, say what they do
+//! when the pointer rests on them, and dim when they'd do nothing.
 
 use bevy::{
     diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin},
-    ecs::system::SystemParam,
+    ecs::{relationship::RelatedSpawner, spawn::SpawnWith, system::SystemParam},
     input::mouse::{MouseScrollUnit, MouseWheel},
     picking::{
         PickingSystems,
@@ -18,7 +19,7 @@ use bevy::{
     prelude::*,
     time::common_conditions::on_real_timer,
     ui::{InteractionDisabled, Pressed},
-    ui_widgets::{Activate, Button},
+    ui_widgets::{Activate, Button, ControlOrientation, Scrollbar, ScrollbarThumb},
 };
 use std::time::Duration;
 use woodsim::Fastener;
@@ -30,10 +31,12 @@ use crate::{
     copy::{Notice, to_copy},
     feed::TableSawStation,
     flights::{HandPicture, InventoryButton, LastPress, ListArea, RowOf},
-    hand::{self, Hand},
-    icons::{Icon, Icons},
+    hand::{self, Hand, Workpiece},
+    icons::{Icon, Icons, picture},
     inventory::{self, Inventory, LUMBER, Shelf},
     join::BenchStation,
+    parts::{self, Entry, Heading, Line, Places, Tree, Where, WoodLine},
+    plan,
     saved::Saved,
     shoot::Studio,
     shop::{HoveredStation, ShopView, describe_miter},
@@ -103,8 +106,9 @@ impl Plugin for HudPlugin {
                 (
                     toggle_panels,
                     build_for_view,
-                    build_inventory,
+                    build_tree,
                     scroll_inventory,
+                    fit_inventory,
                     update_controls,
                     update_text,
                     show_tip,
@@ -156,6 +160,10 @@ enum Look {
     Small,
     /// A tab along the top: an icon and a name.
     Tab,
+    /// A line of the inventory's tree, lit while it's picked out.
+    Row,
+    /// A small flat chevron in a line of the tree, to open or fold it.
+    Chevron,
 }
 
 /// The icon on a button.
@@ -381,6 +389,8 @@ struct Game<'w> {
     hand: Res<'w, Hand>,
     showing: Res<'w, Showing>,
     inventory: Res<'w, Inventory>,
+    saved: Res<'w, Saved>,
+    tree: Res<'w, Tree>,
     notice: Res<'w, Notice>,
     studio: Res<'w, Studio>,
 }
@@ -395,6 +405,8 @@ impl Game<'_> {
             hand: &self.hand,
             showing: &self.showing,
             inventory: &self.inventory,
+            saved: &self.saved,
+            tree: &self.tree,
             notice: self.notice.0.as_ref().map(|(notice, _)| notice.as_str()),
             studio: &self.studio,
         }
@@ -409,6 +421,8 @@ impl Game<'_> {
             || self.hand.is_changed()
             || self.showing.is_changed()
             || self.inventory.is_changed()
+            || self.saved.is_changed()
+            || self.tree.is_changed()
             || self.studio.is_changed()
     }
 }
@@ -422,12 +436,26 @@ struct Shop<'a> {
     hand: &'a Hand,
     showing: &'a Showing,
     inventory: &'a Inventory,
+    saved: &'a Saved,
+    tree: &'a Tree,
     /// A line in place of the status for now, like where a copy went.
     notice: Option<&'a str>,
     studio: &'a Studio,
 }
 
 impl Shop<'_> {
+    /// Everywhere wood is.
+    fn places(&self) -> Places<'_> {
+        Places {
+            hand: self.hand,
+            table_saw: self.table_saw,
+            miter_saw: self.miter_saw,
+            bench: self.bench,
+            inventory: self.inventory,
+            saved: self.saved,
+        }
+    }
+
     /// What `action` does, for its tooltip.
     fn describe(&self, action: Action) -> String {
         use Action::*;
@@ -572,6 +600,23 @@ impl Shop<'_> {
             Save(_) => "Save it as a file, to use after a restart".to_string(),
             Load(_) => format!("Saved part: {}", self.use_here().to_lowercase()),
             DeleteSaved(_) => "Delete its file".to_string(),
+            Select(_) => "Pick it out".to_string(),
+            Fold(fold) => match (fold, self.tree.is_open(fold)) {
+                (parts::Fold::GlueUp(_), true) => "Hide its boards".to_string(),
+                (parts::Fold::GlueUp(_), false) => "List its boards".to_string(),
+                (_, true) => "Fold it away".to_string(),
+                (_, false) => "Open it".to_string(),
+            },
+            Duplicate(entry) if entry.member.is_some() => {
+                "Duplicate this board on its own: another made the same way, from new lumber, \
+                 on the parts shelf"
+                    .to_string()
+            }
+            Duplicate(_) => {
+                "Duplicate it: another made the same way, from new lumber, on the parts shelf"
+                    .to_string()
+            }
+            Stash(_) => "Put it away".to_string(),
             Help => "Controls".to_string(),
             Inventory => "Inventory".to_string(),
         }
@@ -593,7 +638,14 @@ impl Shop<'_> {
         let (table, miter, bench) = (self.table_saw, self.miter_saw, self.bench);
         match (self.view, action) {
             (view, Take(_) | NewLumber(_) | Load(_)) => inventory::can_use_at(view, table, miter),
-            (_, PutAway) => self.hand.0.is_some(),
+            (_, PutAway | Stash(Where::Hand)) => self.hand.0.is_some(),
+            (_, Duplicate(entry)) => {
+                !matches!(entry.at, Where::Lumber(_)) && self.places().wood(entry).is_some()
+            }
+            (_, Stash(Where::Saw(ShopView::TableSaw, part))) => table.can_take(part),
+            (_, Stash(Where::Saw(ShopView::MiterSaw, part))) => miter.can_take(part),
+            (_, Stash(Where::Bench(index))) => index < bench.groups.len(),
+            (_, Stash(_)) => false,
             // Nothing in the studio comes from the inventory or goes into it.
             (ShopView::Studio, Inventory) => false,
             (view, Copy) => to_copy(view, self.hand, table, miter, bench).is_some(),
@@ -652,6 +704,7 @@ impl Shop<'_> {
             Action::DepthOfField => self.studio.setup.depth_of_field,
             Action::Help => self.showing.help,
             Action::Inventory => self.showing.inventory,
+            Action::Select(entry) => self.tree.selected == Some(entry),
             _ => false,
         }
     }
@@ -892,8 +945,8 @@ fn strip(node: Node) -> impl Bundle {
 }
 
 fn spawn_hud(mut commands: Commands, icons: Res<Icons>) {
-    // Along the top: the way back to the shop and to each station on the left; the frame
-    // rate, the inventory, and the controls on the right.
+    // Along the top: the inventory, the way back to the shop, and each station on the left;
+    // the frame rate, copying, and the controls on the right.
     let top_left = commands
         .spawn(strip(Node {
             top: px(14),
@@ -902,6 +955,23 @@ fn spawn_hud(mut commands: Commands, icons: Res<Icons>) {
             ..default()
         }))
         .id();
+    let inventory = spawn_button(
+        &mut commands,
+        &icons,
+        top_left,
+        Action::Inventory,
+        Icon::Inventory,
+        Look::Round,
+        TipAt::BelowLeft,
+    );
+    commands.entity(inventory).insert(InventoryButton);
+    commands.spawn((
+        Node {
+            width: px(6),
+            ..default()
+        },
+        ChildOf(top_left),
+    ));
     spawn_button(
         &mut commands,
         &icons,
@@ -945,12 +1015,8 @@ fn spawn_hud(mut commands: Commands, icons: Res<Icons>) {
         ChildOf(top_right),
         children![(text("", 13.0, INK.with_alpha(0.7)), Readout::Fps)],
     ));
-    for (action, icon) in [
-        (Action::Copy, Icon::Copy),
-        (Action::Inventory, Icon::Inventory),
-        (Action::Help, Icon::Help),
-    ] {
-        let button = spawn_button(
+    for (action, icon) in [(Action::Copy, Icon::Copy), (Action::Help, Icon::Help)] {
+        spawn_button(
             &mut commands,
             &icons,
             top_right,
@@ -959,35 +1025,86 @@ fn spawn_hud(mut commands: Commands, icons: Res<Icons>) {
             Look::Round,
             TipAt::BelowRight,
         );
-        if action == Action::Inventory {
-            commands.entity(button).insert(InventoryButton);
-        }
     }
-    // The inventory hangs below its button, its list scrolling if it's long, and the controls
-    // go in the middle of the screen.
+    // The inventory's tree hangs down the left below its button, its list scrolling if it's
+    // long, over the card for the line picked out; the controls go in the middle of the
+    // screen.
     commands.spawn((
         panel(Node {
             position_type: PositionType::Absolute,
-            top: px(80),
-            right: px(14),
+            top: px(INVENTORY_TOP),
+            left: px(14),
             width: px(INVENTORY_WIDTH),
-            max_height: vh(66),
+            max_height: vh(70),
+            min_height: px(0),
             flex_direction: FlexDirection::Column,
             padding: UiRect::axes(px(6), px(8)),
             ..default()
         }),
         PanelOf(Readout::Inventory),
-        children![(
-            Node {
-                flex_direction: FlexDirection::Column,
-                overflow: Overflow::scroll_y(),
-                padding: UiRect::horizontal(px(8)),
-                ..default()
-            },
-            ScrollPosition::default(),
-            InventoryList,
-            ListArea,
-        )],
+        children![
+            (
+                Node {
+                    min_height: px(0),
+                    flex_shrink: 1.0,
+                    column_gap: px(4),
+                    ..default()
+                },
+                Children::spawn(SpawnWith(|row: &mut RelatedSpawner<ChildOf>| {
+                    let list = row
+                        .spawn((
+                            Node {
+                                flex_direction: FlexDirection::Column,
+                                flex_grow: 1.0,
+                                overflow: Overflow::scroll_y(),
+                                min_height: px(0),
+                                padding: UiRect::horizontal(px(2)),
+                                ..default()
+                            },
+                            ScrollPosition::default(),
+                            InventoryList,
+                            ListArea,
+                        ))
+                        .id();
+                    // Only there when the list's too long to see all at once
+                    // (`fit_inventory`).
+                    row.spawn((
+                        Node {
+                            display: Display::None,
+                            width: px(6),
+                            margin: UiRect::vertical(px(4)),
+                            ..default()
+                        },
+                        Scrollbar::new(list, ControlOrientation::Vertical, 24.0),
+                        children![(
+                            Hovered::default(),
+                            BackgroundColor(INK.with_alpha(0.22)),
+                            ScrollbarThumb {
+                                border_radius: BorderRadius::all(px(3)),
+                                border: UiRect::ZERO,
+                            },
+                        )],
+                    ));
+                })),
+            ),
+            (
+                Node {
+                    display: Display::None,
+                    flex_direction: FlexDirection::Column,
+                    flex_shrink: 0.0,
+                    row_gap: px(8),
+                    margin: UiRect::top(px(6)),
+                    padding: UiRect {
+                        top: px(10),
+                        ..UiRect::horizontal(px(6))
+                    },
+                    border: UiRect::top(px(1.5)),
+                    ..default()
+                },
+                BorderColor::all(EDGE),
+                Details,
+            )
+        ],
     ));
     // The one tooltip, over everything.
     commands.spawn((
@@ -1028,12 +1145,13 @@ fn spawn_hud(mut commands: Commands, icons: Res<Icons>) {
             PanelOf(Readout::Help),
             children![(text("", 16.0, INK), Readout::Help)],
         ));
-    // The station's settings down the left, under the tabs.
+    // The station's settings down the right, under the buttons there.
     commands.spawn((
         strip(Node {
             top: px(80),
-            left: px(14),
+            right: px(14),
             flex_direction: FlexDirection::Column,
+            align_items: AlignItems::FlexEnd,
             row_gap: px(10),
             ..default()
         }),
@@ -1124,8 +1242,10 @@ fn spawn_button(
         Look::Round | Look::Go => (DOCK_BUTTON, 30.0),
         Look::Small => (STEP_BUTTON, 18.0),
         Look::Tab => (TAB_HEIGHT, 26.0),
+        Look::Row | Look::Chevron => (CHEVRON, 14.0),
     };
     let tab = look == Look::Tab;
+    let flat = matches!(look, Look::Row | Look::Chevron);
     let button = commands
         .spawn((
             Button,
@@ -1134,23 +1254,31 @@ fn spawn_button(
             Node {
                 width: if tab { Val::Auto } else { px(size) },
                 height: px(size),
+                flex_shrink: 0.0,
                 padding: UiRect::axes(px(if tab { 14.0 } else { 0.0 }), px(0)),
                 column_gap: px(8),
                 justify_content: JustifyContent::Center,
                 align_items: AlignItems::Center,
-                border: UiRect {
-                    bottom: px(3),
-                    ..UiRect::all(px(1.5))
+                border: match flat {
+                    true => UiRect::ZERO,
+                    false => UiRect {
+                        bottom: px(3),
+                        ..UiRect::all(px(1.5))
+                    },
                 },
                 border_radius: BorderRadius::all(px(size / 2.0)),
                 ..default()
             },
-            BackgroundColor(FACE),
+            BackgroundColor(if flat { Color::NONE } else { FACE }),
             BorderColor::all(EDGE),
-            BoxShadow::new(SHADOW, px(0), px(2), px(0), px(6)),
             ChildOf(parent),
         ))
         .id();
+    if !flat {
+        commands
+            .entity(button)
+            .insert(BoxShadow::new(SHADOW, px(0), px(2), px(0), px(6)));
+    }
     commands.spawn((
         ImageNode {
             image: icons.get(icon),
@@ -1199,14 +1327,14 @@ fn spawn_button(
 struct Badge;
 
 /// Where a button's tooltip shows: above it or below, centered on it or lined up with one side
-/// where it's near the edge of the screen; or to its left, for the inventory down the right.
+/// where it's near the edge of the screen; or to its right, for the inventory down the left.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum TipAt {
     Above,
     Below,
     BelowLeft,
     BelowRight,
-    Left,
+    Right,
 }
 
 /// A click on a button starts its action; Shift with an arrow that slides a part slides it a
@@ -1450,15 +1578,22 @@ fn update_controls(
         }
         let lit = shop.lit(action) || (pressed && can);
         let hover = hovered.get() && can;
+        let flat = matches!(control.look, Look::Row | Look::Chevron);
         let base = match (lit, control.look) {
+            (true, Look::Row) => ACCENT.with_alpha(0.2),
             (true, _) => ACCENT,
             (false, Look::Go) => GO,
+            (false, Look::Row | Look::Chevron) => Color::NONE,
             (false, _) => FACE,
         };
         let color = if !can {
             base.with_alpha(0.55)
+        } else if hover && base == Color::NONE {
+            INK.with_alpha(0.07)
         } else if hover && base == FACE {
             FACE_HOVER
+        } else if hover && flat {
+            ACCENT.with_alpha(0.26)
         } else if hover {
             base.lighter(0.06)
         } else {
@@ -1468,6 +1603,7 @@ fn update_controls(
             face.0 = color;
         }
         let ink = match (lit || control.look == Look::Go, can) {
+            (_, true) if flat => INK.with_alpha(0.7),
             (true, true) => Color::WHITE,
             (false, true) => INK,
             (_, false) => INK.with_alpha(0.3),
@@ -1521,9 +1657,9 @@ fn show_tip(
     mut words: Query<&mut Text>,
 ) {
     let (mut node, mut transform, children) = tip.into_inner();
-    let hovered = buttons
-        .iter()
-        .find(|(control, hovered, ..)| hovered.get() && control.look != Look::Tab);
+    let hovered = buttons.iter().find(|(control, hovered, ..)| {
+        hovered.get() && !matches!(control.look, Look::Tab | Look::Row)
+    });
     let Some((control, _, at, size)) = hovered else {
         if node.display != Display::None {
             node.display = Display::None;
@@ -1551,7 +1687,7 @@ fn show_tip(
         TipAt::Below => (middle.x, middle.y + half.y + GAP, (-50.0, 0.0)),
         TipAt::BelowLeft => (middle.x - half.x, middle.y + half.y + GAP, (0.0, 0.0)),
         TipAt::BelowRight => (middle.x + half.x, middle.y + half.y + GAP, (-100.0, 0.0)),
-        TipAt::Left => (middle.x - half.x - GAP, middle.y, (-100.0, -50.0)),
+        TipAt::Right => (middle.x + half.x + GAP, middle.y, (0.0, -50.0)),
     };
     let placed = Node {
         position_type: PositionType::Absolute,
@@ -1573,206 +1709,566 @@ fn show_tip(
 #[derive(Component)]
 struct InventoryList;
 
-/// How wide the inventory panel is.
-const INVENTORY_WIDTH: f32 = 400.0;
+/// The card under the tree for the line picked out.
+#[derive(Component)]
+struct Details;
 
-/// Fills the inventory's list afresh whenever what's in it, or where you are, changes: the
-/// parts, the offcuts, and new lumber, each line with buttons to use it here, move it to the
-/// other shelf, or throw it away.
-fn build_inventory(
+/// How wide the inventory panel is, how far a glue-up's boards are set in under it, and how
+/// big a line's chevron and picture are.
+const INVENTORY_WIDTH: f32 = 360.0;
+const INDENT: f32 = 16.0;
+const CHEVRON: f32 = 22.0;
+const THUMBNAIL: f32 = 30.0;
+
+/// The tree and the card as last built, so they're only built again when what they show
+/// changes, and the pictures of wood they show, painted once each.
+#[derive(Default)]
+struct BuiltTree {
+    view: Option<ShopView>,
+    lines: Vec<Line>,
+    card: Option<(Entry, Workpiece, String)>,
+    pictures: Vec<(Workpiece, Handle<Image>)>,
+}
+
+impl BuiltTree {
+    /// A picture of `work`, painted the first time it's needed.
+    fn picture(&mut self, work: &Workpiece, images: &mut Assets<Image>) -> Handle<Image> {
+        if let Some((_, handle)) = self.pictures.iter().find(|(seen, _)| seen == work) {
+            return handle.clone();
+        }
+        let handle = images.add(picture(work));
+        self.pictures.push((work.clone(), handle.clone()));
+        handle
+    }
+}
+
+/// Fills the inventory's tree afresh whenever what it lists changes: a heading for what's in
+/// hand, each station, each shelf, the parts saved, and new lumber, with the wood under each,
+/// and the card for the line picked out with buttons for what can be done with it.
+fn build_tree(
     mut commands: Commands,
-    view: Res<ShopView>,
-    inventory: Res<Inventory>,
-    saved: Res<Saved>,
+    game: Game,
     icons: Res<Icons>,
+    mut images: ResMut<Assets<Image>>,
     list: Single<Entity, With<InventoryList>>,
+    details: Single<(Entity, &mut Node), With<Details>>,
+    mut built: Local<BuiltTree>,
 ) {
-    if !(inventory.is_changed() || saved.is_changed() || view.is_changed()) {
+    if !game.is_changed() || *game.view == ShopView::Studio {
         return;
     }
-    let list = *list;
-    commands.entity(list).despawn_related::<Children>();
-    let use_icon = match *view {
-        ShopView::Overview => Icon::PickUp,
-        _ => Icon::Place,
-    };
-    for shelf in [Shelf::Parts, Shelf::Offcuts] {
-        let (name, empty, move_icon) = match shelf {
-            Shelf::Parts => (
-                "Parts",
-                "Pieces you cut to size, glue-ups, and boards you put away go here.",
-                Icon::Step(Arrow::Down, false),
-            ),
-            Shelf::Offcuts => (
-                "Offcuts",
-                "What's left over from a cut goes here.",
-                Icon::Step(Arrow::Up, false),
-            ),
-        };
-        let count = inventory.count(shelf);
-        heading(&mut commands, list, &format!("{name} · {count}"));
-        let rows = inventory.rows(shelf);
-        if rows.is_empty() {
-            commands.spawn((
-                text(empty, 14.0, INK.with_alpha(0.55)),
-                Node {
-                    margin: UiRect::bottom(px(6)),
-                    ..default()
-                },
-                ChildOf(list),
-            ));
-        }
-        for row in rows {
-            let (size, notes) = inventory::describe(row.work);
-            let line = line(&mut commands, list, &size, &notes, row.count);
-            commands.entity(line).insert(RowOf(row.ids.clone()));
-            for (action, icon) in [
-                (Action::Take(row.id), use_icon),
-                (Action::MoveShelf(row.id), move_icon),
-                (Action::Save(row.id), Icon::Save),
-                (Action::Scrap(row.id), Icon::Scrap),
-            ] {
-                spawn_button(
-                    &mut commands,
-                    &icons,
-                    line,
-                    action,
-                    icon,
-                    Look::Small,
-                    TipAt::Left,
-                );
+    let shop = game.shop();
+    let places = shop.places();
+    let view = Some(shop.view);
+    let lines = places.lines(shop.tree);
+    if built.lines != lines || built.view != view {
+        let list = *list;
+        commands.entity(list).despawn_related::<Children>();
+        let mut pictures = std::mem::take(&mut built.pictures);
+        built.pictures.clear();
+        for line in &lines {
+            match line {
+                Line::Heading {
+                    heading,
+                    count,
+                    open,
+                } => tree_heading(&mut commands, &icons, list, *heading, *count, *open),
+                Line::Empty(said) => {
+                    commands.spawn((
+                        text(*said, 13.0, INK.with_alpha(0.55)),
+                        Node {
+                            margin: UiRect {
+                                left: px(CHEVRON + 6.0),
+                                bottom: px(4),
+                                ..default()
+                            },
+                            ..default()
+                        },
+                        ChildOf(list),
+                    ));
+                }
+                Line::Wood(line) => {
+                    // Pictures painted for the last tree, kept for this one if it shows them.
+                    if let Some(at) = pictures.iter().position(|(seen, _)| *seen == line.work) {
+                        built.pictures.push(pictures.swap_remove(at));
+                    }
+                    let picture = built.picture(&line.work, &mut images);
+                    tree_line(&mut commands, &icons, &shop, list, line, picture);
+                }
             }
         }
+        built.lines = lines;
     }
-    heading(
-        &mut commands,
-        list,
-        &format!("Saved · {}", saved.parts.len()),
-    );
-    if saved.parts.is_empty() {
-        commands.spawn((
-            text(
-                "Parts you save go here, and stay after a restart.",
-                14.0,
-                INK.with_alpha(0.55),
-            ),
-            Node {
-                margin: UiRect::bottom(px(6)),
-                ..default()
-            },
-            ChildOf(list),
-        ));
-    }
-    for (index, part) in saved.parts.iter().enumerate() {
-        let (size, notes) = inventory::describe(&part.work);
-        let file = part
-            .path
-            .file_stem()
-            .map_or(String::new(), |name| name.to_string_lossy().into_owned());
-        let notes = if notes.is_empty() {
-            file
+    let card = shop
+        .tree
+        .selected
+        .and_then(|entry| Some((entry, places.wood(entry)?, places.say_where(entry))));
+    if built.card != card || built.view != view {
+        let (details, mut node) = details.into_inner();
+        commands.entity(details).despawn_related::<Children>();
+        let display = if card.is_some() {
+            Display::Flex
         } else {
-            format!("{file}: {notes}")
+            Display::None
         };
-        let line = line(&mut commands, list, &size, &notes, 1);
-        for (action, icon) in [
-            (Action::Load(index as u64), use_icon),
-            (Action::DeleteSaved(index as u64), Icon::Scrap),
-        ] {
-            spawn_button(
+        if node.display != display {
+            node.display = display;
+        }
+        if let Some(selected) = &card {
+            let picture = built.picture(&selected.1, &mut images);
+            let label = selected.0.member.and_then(|member| {
+                match places.wood(Entry::at(selected.0.at))? {
+                    Workpiece::GlueUp(assembly) => plan::labels(&assembly).get(member).cloned(),
+                    Workpiece::Board(_) => None,
+                }
+            });
+            fill_card(
                 &mut commands,
                 &icons,
-                line,
-                action,
-                icon,
-                Look::Small,
-                TipAt::Left,
+                &shop,
+                details,
+                selected,
+                label,
+                picture,
             );
         }
+        built.card = card;
     }
-    heading(&mut commands, list, "New lumber");
-    for (index, (name, thickness, width)) in LUMBER.iter().enumerate() {
-        let size = format!("{thickness} x {width} x 24\"");
-        let line = line(&mut commands, list, name, &size, 1);
-        spawn_button(
-            &mut commands,
-            &icons,
-            line,
-            Action::NewLumber(index as u64),
-            use_icon,
-            Look::Small,
-            TipAt::Left,
-        );
-    }
+    built.view = view;
 }
 
-/// A heading in the inventory's list.
-fn heading(commands: &mut Commands, list: Entity, name: &str) {
-    commands.spawn((
-        bold(name, 15.0, INK.with_alpha(0.65)),
-        Node {
-            margin: UiRect {
-                top: px(10),
-                bottom: px(4),
-                ..default()
-            },
-            ..default()
-        },
-        ChildOf(list),
-    ));
-}
-
-/// A line of the inventory: what it is, in bold, what else there is to say about it, and how
-/// many there are, with room after for its buttons. Returns the line, to put them in.
-fn line(commands: &mut Commands, list: Entity, name: &str, notes: &str, count: usize) -> Entity {
-    let line = commands
+/// A heading of the tree: a click folds it away or opens it again.
+fn tree_heading(
+    commands: &mut Commands,
+    icons: &Icons,
+    list: Entity,
+    heading: Heading,
+    count: usize,
+    open: bool,
+) {
+    let row = commands
         .spawn((
+            Button,
+            Hovered::default(),
+            Control {
+                action: Action::Fold(parts::Fold::Heading(heading)),
+                look: Look::Row,
+                tip: TipAt::Right,
+            },
             Node {
                 align_items: AlignItems::Center,
                 column_gap: px(6),
-                padding: UiRect::vertical(px(5)),
-                border: UiRect::top(px(1)),
+                padding: UiRect::axes(px(0), px(3)),
+                margin: UiRect::top(px(6)),
+                border_radius: BorderRadius::all(px(8)),
                 ..default()
             },
-            BorderColor::all(EDGE.with_alpha(0.12)),
+            BackgroundColor(Color::NONE),
             ChildOf(list),
         ))
         .id();
+    let chevron = if open { Arrow::Down } else { Arrow::Right };
+    commands.spawn((
+        Node {
+            width: px(CHEVRON),
+            height: px(CHEVRON),
+            justify_content: JustifyContent::Center,
+            align_items: AlignItems::Center,
+            flex_shrink: 0.0,
+            ..default()
+        },
+        Pickable::IGNORE,
+        ChildOf(row),
+        children![(
+            ImageNode {
+                image: icons.get(Icon::Step(chevron, false)),
+                color: INK,
+                ..default()
+            },
+            Node {
+                width: px(14),
+                height: px(14),
+                ..default()
+            },
+            Pickable::IGNORE,
+        )],
+    ));
+    commands.spawn((
+        bold(heading.name(), 14.0, INK.with_alpha(0.65)),
+        Node {
+            flex_grow: 1.0,
+            ..default()
+        },
+        Pickable::IGNORE,
+        ChildOf(row),
+    ));
+    if heading != Heading::Lumber {
+        commands.spawn((
+            Node {
+                padding: UiRect::axes(px(7), px(0)),
+                margin: UiRect::right(px(4)),
+                border_radius: BorderRadius::all(px(9)),
+                ..default()
+            },
+            BackgroundColor(INK.with_alpha(if count > 0 { 0.1 } else { 0.05 })),
+            Pickable::IGNORE,
+            ChildOf(row),
+            children![(
+                bold(count.to_string(), 12.0, INK.with_alpha(0.6)),
+                Pickable::IGNORE
+            )],
+        ));
+    }
+}
+
+/// A line of the tree for a piece of wood: a chevron to list a glue-up's boards, its picture,
+/// what it is, in bold, and what else there is to say about it, how many there are, and a
+/// button to use it here if it comes from the inventory. A click picks it out.
+fn tree_line(
+    commands: &mut Commands,
+    icons: &Icons,
+    shop: &Shop,
+    list: Entity,
+    line: &WoodLine,
+    picture: Handle<Image>,
+) {
+    // The line lights up here when wood lands in it, behind the button that picks it out.
+    let outer = commands
+        .spawn((
+            Node {
+                flex_direction: FlexDirection::Column,
+                border_radius: BorderRadius::all(px(8)),
+                ..default()
+            },
+            BackgroundColor(Color::NONE),
+            ChildOf(list),
+        ))
+        .id();
+    if !line.ids.is_empty() {
+        commands.entity(outer).insert(RowOf(line.ids.clone()));
+    }
+    let depth = usize::from(line.entry.member.is_some());
+    let row = commands
+        .spawn((
+            Button,
+            Hovered::default(),
+            Control {
+                action: Action::Select(line.entry),
+                look: Look::Row,
+                tip: TipAt::Right,
+            },
+            Node {
+                align_items: AlignItems::Center,
+                column_gap: px(6),
+                padding: UiRect {
+                    left: px(depth as f32 * INDENT),
+                    right: px(2),
+                    top: px(3),
+                    bottom: px(3),
+                },
+                border_radius: BorderRadius::all(px(8)),
+                ..default()
+            },
+            BackgroundColor(Color::NONE),
+            ChildOf(outer),
+        ))
+        .id();
+    match line.open {
+        Some(open) => {
+            let arrow = if open { Arrow::Down } else { Arrow::Right };
+            spawn_button(
+                commands,
+                icons,
+                row,
+                Action::Fold(parts::Fold::GlueUp(line.entry.at)),
+                Icon::Step(arrow, false),
+                Look::Chevron,
+                TipAt::Right,
+            );
+        }
+        None => {
+            commands.spawn((
+                Node {
+                    width: px(CHEVRON),
+                    flex_shrink: 0.0,
+                    ..default()
+                },
+                Pickable::IGNORE,
+                ChildOf(row),
+            ));
+        }
+    }
+    commands.spawn((
+        ImageNode::new(picture),
+        Node {
+            width: px(THUMBNAIL),
+            height: px(THUMBNAIL),
+            flex_shrink: 0.0,
+            ..default()
+        },
+        Pickable::IGNORE,
+        ChildOf(row),
+    ));
     let words = commands
         .spawn((
             Node {
                 flex_direction: FlexDirection::Column,
                 flex_grow: 1.0,
                 flex_shrink: 1.0,
+                min_width: px(0),
                 ..default()
             },
-            ChildOf(line),
-            children![(bold(name, 15.0, INK), Pickable::IGNORE)],
+            Pickable::IGNORE,
+            ChildOf(row),
         ))
         .id();
-    if !notes.is_empty() {
+    named(commands, words, line.label.as_deref(), &line.name, 14.0);
+    if !line.notes.is_empty() {
         commands.spawn((
-            text(notes, 13.0, INK.with_alpha(0.6)),
+            text(&line.notes, 12.0, INK.with_alpha(0.6)),
             Pickable::IGNORE,
             ChildOf(words),
         ));
     }
-    if count > 1 {
+    if line.count > 1 {
         commands.spawn((
             Node {
                 padding: UiRect::axes(px(7), px(1)),
                 border_radius: BorderRadius::all(px(9)),
+                flex_shrink: 0.0,
                 ..default()
             },
             BackgroundColor(ACCENT),
-            ChildOf(line),
+            Pickable::IGNORE,
+            ChildOf(row),
             children![(
-                bold(format!("×{count}"), 13.0, Color::WHITE),
+                bold(format!("×{}", line.count), 13.0, Color::WHITE),
                 Pickable::IGNORE
             )],
         ));
     }
-    line
+    let use_here = match line.entry.at {
+        _ if line.entry.member.is_some() => None,
+        Where::Shelf(id) => Some(Action::Take(id)),
+        Where::Saved(index) => Some(Action::Load(index)),
+        Where::Lumber(index) => Some(Action::NewLumber(index)),
+        _ => None,
+    };
+    if let Some(action) = use_here {
+        spawn_button(
+            commands,
+            icons,
+            row,
+            action,
+            use_icon(shop.view),
+            Look::Small,
+            TipAt::Right,
+        );
+    }
+}
+
+/// What a piece of wood is called, in bold, after its letter in a glue-up's plans, if it has
+/// one.
+fn named(commands: &mut Commands, parent: Entity, label: Option<&str>, name: &str, size: f32) {
+    let row = commands
+        .spawn((
+            Node {
+                align_items: AlignItems::Center,
+                column_gap: px(6),
+                ..default()
+            },
+            Pickable::IGNORE,
+            ChildOf(parent),
+        ))
+        .id();
+    if let Some(label) = label {
+        commands.spawn((
+            Node {
+                padding: UiRect::axes(px(5), px(0)),
+                border_radius: BorderRadius::all(px(5)),
+                ..default()
+            },
+            BackgroundColor(INK.with_alpha(0.75)),
+            Pickable::IGNORE,
+            ChildOf(row),
+            children![(bold(label, size - 3.0, Color::WHITE), Pickable::IGNORE)],
+        ));
+    }
+    commands.spawn((bold(name, size, INK), Pickable::IGNORE, ChildOf(row)));
+}
+
+/// The icon for using a piece of wood where you are: picking it up in the shop, or setting it
+/// down at a station.
+fn use_icon(view: ShopView) -> Icon {
+    match view {
+        ShopView::Overview => Icon::PickUp,
+        _ => Icon::Place,
+    }
+}
+
+/// Fills the card for the line picked out, `selected`, with where it is in words: its picture,
+/// what it is and where, and buttons for what can be done with it there.
+fn fill_card(
+    commands: &mut Commands,
+    icons: &Icons,
+    shop: &Shop,
+    card: Entity,
+    (entry, work, at): &(Entry, Workpiece, String),
+    label: Option<String>,
+    picture: Handle<Image>,
+) {
+    let top = commands
+        .spawn((
+            Node {
+                align_items: AlignItems::Center,
+                column_gap: px(10),
+                ..default()
+            },
+            ChildOf(card),
+        ))
+        .id();
+    commands.spawn((
+        ImageNode::new(picture),
+        Node {
+            width: px(52),
+            height: px(52),
+            flex_shrink: 0.0,
+            ..default()
+        },
+        Pickable::IGNORE,
+        ChildOf(top),
+    ));
+    let words = commands
+        .spawn((
+            Node {
+                flex_direction: FlexDirection::Column,
+                flex_shrink: 1.0,
+                min_width: px(0),
+                row_gap: px(1),
+                ..default()
+            },
+            ChildOf(top),
+        ))
+        .id();
+    let (name, notes) = inventory::describe(work);
+    named(commands, words, label.as_deref(), &name, 16.0);
+    if !notes.is_empty() {
+        commands.spawn((
+            text(notes, 13.0, INK.with_alpha(0.7)),
+            Pickable::IGNORE,
+            ChildOf(words),
+        ));
+    }
+    let mut at = at.to_string();
+    if let Some(first) = at.get(..1) {
+        at.replace_range(..1, &first.to_uppercase());
+    }
+    commands.spawn((
+        text(at, 13.0, INK.with_alpha(0.55)),
+        Pickable::IGNORE,
+        ChildOf(words),
+    ));
+    let buttons = commands
+        .spawn((
+            Node {
+                column_gap: px(6),
+                ..default()
+            },
+            ChildOf(card),
+        ))
+        .id();
+    for (action, icon) in card_actions(shop, *entry) {
+        spawn_button(
+            commands,
+            icons,
+            buttons,
+            action,
+            icon,
+            Look::Small,
+            TipAt::Above,
+        );
+    }
+}
+
+/// What can be done with the wood at `entry`, from its card: go to the station it's on, use it
+/// here, duplicate it, put it away, move it to the other shelf, save it, or throw it away.
+fn card_actions(shop: &Shop, entry: Entry) -> Vec<(Action, Icon)> {
+    let duplicate = (Action::Duplicate(entry), Icon::Duplicate);
+    if entry.member.is_some() {
+        return vec![duplicate];
+    }
+    let go_to = |view: ShopView| {
+        let icon = match view {
+            ShopView::TableSaw => Icon::TableSaw,
+            ShopView::MiterSaw => Icon::MiterSaw,
+            _ => Icon::Bench,
+        };
+        (shop.view != view).then_some((Action::GoTo(view), icon))
+    };
+    let stash = (Action::Stash(entry.at), Icon::Store);
+    match entry.at {
+        Where::Hand => vec![(Action::PutAway, Icon::Store), duplicate],
+        Where::Saw(view, _) => go_to(view).into_iter().chain([stash, duplicate]).collect(),
+        Where::Bench(_) => go_to(ShopView::Bench)
+            .into_iter()
+            .chain([stash, duplicate])
+            .collect(),
+        Where::Shelf(id) => {
+            let other_shelf = match shop.inventory.get(id).map(|item| item.shelf) {
+                Some(Shelf::Offcuts) => Icon::Step(Arrow::Up, false),
+                _ => Icon::Step(Arrow::Down, false),
+            };
+            vec![
+                (Action::Take(id), use_icon(shop.view)),
+                duplicate,
+                (Action::MoveShelf(id), other_shelf),
+                (Action::Save(id), Icon::Save),
+                (Action::Scrap(id), Icon::Scrap),
+            ]
+        }
+        Where::Saved(index) => vec![
+            (Action::Load(index), use_icon(shop.view)),
+            (Action::DeleteSaved(index), Icon::Scrap),
+        ],
+        Where::Lumber(index) => vec![(Action::NewLumber(index), use_icon(shop.view))],
+    }
+}
+
+/// How far the inventory hangs from the top of the window, and stays above the line on
+/// what's going on.
+const INVENTORY_TOP: f32 = 80.0;
+const INVENTORY_GAP: f32 = 14.0;
+
+/// Keeps the inventory clear of the line on what's going on, however tall the window is, and
+/// shows its scrollbar only while its list is too long to see all at once.
+fn fit_inventory(
+    status: Query<(&PanelOf, &ComputedNode, &UiGlobalTransform)>,
+    mut panels: Query<(&PanelOf, &mut Node), Without<Scrollbar>>,
+    list: Single<&ComputedNode, With<InventoryList>>,
+    scrollbar: Single<&mut Node, With<Scrollbar>>,
+) {
+    let bottom = status
+        .iter()
+        .find(|(panel, ..)| panel.0 == Readout::Status)
+        .map(|(_, node, transform)| edges(node, transform).min.y);
+    if let Some(bottom) = bottom.filter(|&bottom| bottom > 0.0) {
+        let height = px((bottom - INVENTORY_GAP - INVENTORY_TOP).max(160.0).round());
+        for (panel, mut node) in &mut panels {
+            if panel.0 == Readout::Inventory && node.max_height != height {
+                node.max_height = height;
+            }
+        }
+    }
+    let overflows = list.content_size().y > list.size().y + 1.0;
+    let display = if overflows {
+        Display::Flex
+    } else {
+        Display::None
+    };
+    let mut scrollbar = scrollbar.into_inner();
+    if scrollbar.display != display {
+        scrollbar.display = display;
+    }
 }
 
 /// Scrolls the inventory's list under the mouse wheel.
@@ -1884,6 +2380,8 @@ mod tests {
     ) -> Shop<'a> {
         static INVENTORY: std::sync::LazyLock<Inventory> =
             std::sync::LazyLock::new(Inventory::default);
+        static SAVED: std::sync::LazyLock<Saved> = std::sync::LazyLock::new(Saved::default);
+        static TREE: std::sync::LazyLock<Tree> = std::sync::LazyLock::new(Tree::default);
         static STUDIO: std::sync::LazyLock<Studio> = std::sync::LazyLock::new(Studio::default);
         Shop {
             view,
@@ -1893,6 +2391,8 @@ mod tests {
             hand,
             showing,
             inventory: &INVENTORY,
+            saved: &SAVED,
+            tree: &TREE,
             notice: None,
             studio: &STUDIO,
         }
@@ -2005,7 +2505,7 @@ mod tests {
     }
 }
 
-/// The part of the window the HUD leaves clear in the studio, in logical pixels: right of the
+/// The part of the window the HUD leaves clear in the studio, in logical pixels: left of the
 /// settings, below the tabs, and above the line on what's going on. It's the camera's picture,
 /// so the piece is framed there and the render shows there. It's measured while setting up,
 /// and kept while a render's under way.
@@ -2021,6 +2521,13 @@ impl Viewfinder {
         let area = self.area?;
         (area.height() > 0.0).then(|| area.width() / area.height())
     }
+}
+
+/// A node's edges, in logical pixels.
+fn edges(node: &ComputedNode, transform: &UiGlobalTransform) -> Rect {
+    let scale = node.inverse_scale_factor;
+    let center = transform.affine().translation * scale;
+    Rect::from_center_size(center, node.size * scale)
 }
 
 /// How far the picture stays from the HUD and the window's edges, and below the top.
@@ -2046,20 +2553,14 @@ fn measure_viewfinder(
     let Some(window) = camera.logical_viewport_size() else {
         return;
     };
-    // Each node's edges, in logical pixels.
-    let edges = |node: &ComputedNode, transform: &UiGlobalTransform| {
-        let scale = node.inverse_scale_factor;
-        let center = transform.affine().translation * scale;
-        Rect::from_center_size(center, node.size * scale)
-    };
     let (node, transform) = *cards;
-    let left = edges(node, transform).max.x + VIEWFINDER_MARGIN;
+    let right = edges(node, transform).min.x - VIEWFINDER_MARGIN;
     let bottom = panels
         .iter()
         .filter(|(panel, ..)| panel.0 == Readout::Status)
         .map(|(_, node, transform)| edges(node, transform).min.y - VIEWFINDER_MARGIN)
         .fold(window.y - VIEWFINDER_MARGIN, f32::min);
-    let area = Rect::new(left, VIEWFINDER_TOP, window.x - VIEWFINDER_MARGIN, bottom);
+    let area = Rect::new(VIEWFINDER_MARGIN, VIEWFINDER_TOP, right, bottom);
     let measured = Viewfinder {
         area: (area.width() > 50.0 && area.height() > 50.0).then_some(area),
         window,

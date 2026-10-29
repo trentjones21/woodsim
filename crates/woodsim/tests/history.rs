@@ -309,6 +309,92 @@ fn joints_are_numbered_in_the_order_they_go_together() {
     assert!(bigger.joints().last().unwrap().number > numbers[1]);
 }
 
+#[test]
+fn a_duplicate_is_cut_again_the_same_way_from_new_lumber_of_its_own() {
+    let strip = table_saw(fraction(3, 4), inches(1))
+        .rip(&one_by_two(), Orientation::default())
+        .cut_apart()
+        .piece
+        .board;
+    let piece = mitered(4500)
+        .crosscut(&strip, Orientation::default(), inches(10))
+        .cut_apart()
+        .piece
+        .board;
+    let copy = piece.duplicate();
+    assert_eq!(copy, piece);
+    assert!(!copy.origin().stock().same(piece.origin().stock()));
+    assert_eq!(copy.origin().replay(), copy);
+    assert_eq!(copy.origin().at_on_stock(), piece.origin().at_on_stock());
+    let (old, new) = (piece.origin().operations(), copy.origin().operations());
+    assert_eq!(
+        new.iter().map(|pass| pass.tool).collect::<Vec<_>>(),
+        old.iter().map(|pass| pass.tool).collect::<Vec<_>>()
+    );
+    // Made after everything so far, in the same order, and before anything after.
+    assert!(new[0].number > old[1].number && new[0].number < new[1].number);
+    let later = mitered(0)
+        .crosscut(&copy, Orientation::default(), inches(4))
+        .cut_apart();
+    assert!(last(&later.piece.board).number > new[1].number);
+}
+
+#[test]
+fn a_duplicate_glue_up_shares_stock_where_the_original_did_and_is_glued_after() {
+    let saw = mitered(0);
+    let stock = one_by_two();
+    let first = saw
+        .crosscut(&stock, Orientation::default(), inches(10))
+        .cut_apart();
+    let second = saw
+        .crosscut(
+            &first.offcut.expect("the rest of the 1x2").board,
+            Orientation::default(),
+            inches(10),
+        )
+        .cut_apart();
+    let (a, b) = (first.piece.board, second.piece.board);
+    let end = |board: &Board, far: bool| {
+        surfaces(board)
+            .into_iter()
+            .find(|surface| {
+                matches!(surface, Surface::Side(edge) if edge.out.w == 0 && (edge.out.l > 0) == far)
+            })
+            .unwrap()
+    };
+    let mut glue_up = Assembly::of(a.clone());
+    assert!(glue_up.attach(
+        (0, end(&a, true)),
+        &Assembly::of(b.clone()),
+        (0, end(&b, false)),
+        Mating::default(),
+        Fastener::Glue
+    ));
+    let copy = glue_up.duplicate();
+    assert_eq!(copy, glue_up);
+    let stock_of = |assembly: &Assembly, member: usize| {
+        assembly.members()[member].board.origin().stock().clone()
+    };
+    assert!(stock_of(&copy, 0).same(&stock_of(&copy, 1)));
+    assert!(!stock_of(&copy, 0).same(&stock_of(&glue_up, 0)));
+    let last_pass = last(&copy.members()[1].board).number;
+    let glued = copy.joints()[0].number;
+    assert!(glued > last_pass && last_pass > glue_up.joints()[0].number);
+    // The two pieces' first cut is still one pass.
+    let firsts = copy
+        .members()
+        .iter()
+        .map(|member| Arc::clone(&member.board.origin().operations()[0]))
+        .collect::<Vec<_>>();
+    assert!(Arc::ptr_eq(&firsts[0], &firsts[1]));
+    let recipe = woodsim::Recipe {
+        wood: woodsim::Wood::GlueUp(copy.clone()),
+        saw: None,
+    };
+    let read = woodsim::Recipe::read(&recipe.write()).unwrap();
+    assert_eq!(read.wood, woodsim::Wood::GlueUp(copy));
+}
+
 /// A saw pass, in 64ths of an inch: a rip against the fence with the blade at some height,
 /// square or tilted some hundredths of a degree, or a chop on the miter saw at some angle,
 /// through or stopping above the table.
