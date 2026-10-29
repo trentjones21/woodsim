@@ -20,9 +20,10 @@
 //! number, then the saw (`table-saw`: blade diameter and kerf, fence, height, the miter gauge's
 //! stop or `none`, its angle, and the tilt; `miter-saw`: blade diameter and kerf, miter, the
 //! furthest it turns, the pivot behind the fence and up, the arm, and the stroke's top and
-//! bottom), how the wood lay (`board` or `glue-up`, and the turn), and how far the pass went
-//! (the table saw's travel from and to; the miter saw's length from the stop, and how low the
-//! blade came). `sawn` names a board a pass cut from another: which board, which pass, the slot
+//! bottom; `jointer`: the cutterhead's diameter, the knives' length, the depth of cut, the
+//! fence from the knives' end, and its tilt), how the wood lay (`board` or `glue-up`, and the
+//! turn), and how far the pass went (the table saw's and the jointer's travel from and to; the
+//! miter saw's length from the stop, and how low the blade came). `sawn` names a board a pass cut from another: which board, which pass, the slot
 //! (its faces' normal, its near and far faces, the way it traveled, the blade's radius, the
 //! path's height, and its start and end), which part it is (`whole`, or `piece` and which),
 //! where its corner was on the board it was cut from, and which side of the cut it was on.
@@ -35,7 +36,7 @@
 use std::{collections::HashMap, fmt::Write, sync::Arc};
 
 use crate::{
-    Angle, Assembly, Blade, Board, Direction, Edge, Fastener, Joint, Kerf, Length, Member,
+    Angle, Assembly, Blade, Board, Direction, Edge, Fastener, Joint, Jointer, Kerf, Length, Member,
     MiterSaw, Orientation, Rotation, Surface, TableSaw, Vector,
     history::{Lie, Operation, Origin, Part, Side, Source, Tool, number_used},
 };
@@ -191,6 +192,21 @@ fn tool_words(tool: &Tool) -> String {
             lie(on),
             nm(*length),
             nm(*bottom)
+        ),
+        Tool::Jointer {
+            jointer,
+            lie: on,
+            travel,
+        } => format!(
+            "jointer {} {} {} {} {} {} {} {}",
+            nm(jointer.cutterhead),
+            nm(jointer.knives),
+            nm(jointer.depth),
+            nm(jointer.fence),
+            jointer.tilt.hundredths(),
+            lie(on),
+            nm(travel.0),
+            nm(travel.1)
         ),
     }
 }
@@ -433,6 +449,20 @@ impl<'a> Words<'a> {
                     lie: self.lie()?,
                     length: self.length()?,
                     bottom: self.length()?,
+                }
+            }
+            "jointer" => {
+                let jointer = Jointer {
+                    cutterhead: self.length()?,
+                    knives: self.length()?,
+                    depth: self.length()?,
+                    fence: self.length()?,
+                    tilt: self.angle()?,
+                };
+                Tool::Jointer {
+                    jointer,
+                    lie: self.lie()?,
+                    travel: (self.length()?, self.length()?),
                 }
             }
             other => return Err(format!("`{other}` isn't a saw")),

@@ -48,6 +48,8 @@ pub enum Icon {
     Shop,
     TableSaw,
     MiterSaw,
+    /// Two tables, the outfeed a step higher, the cutterhead between them, and the fence behind.
+    Jointer,
     Bench,
     ZoomIn,
     ZoomOut,
@@ -95,7 +97,7 @@ pub enum Icon {
 }
 
 impl Icon {
-    const ALL: [Icon; 52] = [
+    const ALL: [Icon; 53] = [
         Icon::TurnLeft,
         Icon::TurnRight,
         Icon::Flip,
@@ -127,6 +129,7 @@ impl Icon {
         Icon::Shop,
         Icon::TableSaw,
         Icon::MiterSaw,
+        Icon::Jointer,
         Icon::Bench,
         Icon::ZoomIn,
         Icon::ZoomOut,
@@ -404,6 +407,17 @@ impl Icon {
                     Box::new(Fill(teeth(p(0.42, 0.44), 0.27, 0.22, 14))),
                     Box::new(Disc(p(0.42, 0.44), 0.07)),
                 ),
+            ],
+            Icon::Jointer => vec![
+                Rounded(p(0.3, 0.2), p(0.86, 0.36), 0.03),
+                Rounded(p(0.04, 0.5), p(0.38, 0.62), 0.03),
+                Rounded(p(0.6, 0.42), p(0.96, 0.54), 0.03),
+                Cut(
+                    Box::new(Fill(teeth(p(0.49, 0.58), 0.12, 0.07, 3))),
+                    Box::new(Disc(p(0.49, 0.58), 0.03)),
+                ),
+                Line(vec![p(0.2, 0.62), p(0.16, 0.92)], 0.08),
+                Line(vec![p(0.8, 0.54), p(0.84, 0.92)], 0.08),
             ],
             Icon::Bench => vec![
                 Rounded(p(0.06, 0.34), p(0.94, 0.48), 0.03),

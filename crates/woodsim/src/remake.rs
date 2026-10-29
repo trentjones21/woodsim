@@ -125,6 +125,10 @@ impl Remake {
                 | Tool::MiterSaw {
                     lie: Lie::GlueUp(_),
                     ..
+                }
+                | Tool::Jointer {
+                    lie: Lie::GlueUp(_),
+                    ..
                 },
                 _,
             ) => return Err(Refusal::GlueUpPass(operation.number)),
@@ -153,6 +157,24 @@ impl Remake {
                 },
                 Tool::MiterSaw { .. },
             ) => saw.chop(&board, lie, length, bottom),
+            (
+                Tool::Jointer {
+                    jointer,
+                    lie: Lie::Board(lie),
+                    travel: (start, end),
+                },
+                Tool::Jointer {
+                    jointer: before, ..
+                },
+            ) => {
+                // A pass that went all the way across still does, however far that is now.
+                let across = end >= before.reach(&was(), lie) + before.radius();
+                let end = match across {
+                    true => end.max(jointer.reach(&board, lie) + jointer.radius()),
+                    false => end,
+                };
+                jointer.feed(&board, lie, start, end)
+            }
             _ => return Err(refuse("it's a different saw")),
         }
         .map_err(|error| Refusal::Pass(operation.number, error.to_string()))?;
@@ -166,6 +188,8 @@ impl Remake {
             (Side::Measured, Pass::Cut(cut)) => cut.piece.board,
             (Side::Offcut, Pass::Cut(cut)) => match cut.offcut {
                 Some(offcut) => offcut.board,
+                // Nothing on the measured side, the piece is what's on the other: a trim.
+                None if cut.piece.board.origin().side() == Some(Side::Offcut) => cut.piece.board,
                 None => return Err(refuse("it leaves no offcut")),
             },
             (Side::Loose, Pass::Cut(cut)) => {

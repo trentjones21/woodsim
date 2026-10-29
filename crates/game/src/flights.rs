@@ -12,6 +12,7 @@ use bevy::{
 
 use crate::{
     chop::{MiterSawStation, board_turn},
+    dress::JointerStation,
     feed::TableSawStation,
     hand::{Hand, Workpiece},
     icons::picture,
@@ -137,6 +138,7 @@ struct Screen<'w, 's> {
     last_press: Res<'w, LastPress>,
     table_saw: Res<'w, TableSawStation>,
     miter_saw: Res<'w, MiterSawStation>,
+    jointer: Res<'w, JointerStation>,
     bench: Res<'w, BenchStation>,
     rows: Query<
         'w,
@@ -201,6 +203,10 @@ impl Screen<'_, '_> {
             ShopView::MiterSaw => {
                 let middle = middle(self.miter_saw.boards()).unwrap_or(Vec3::new(-0.08, 0.02, 0.0));
                 crate::miter_saw::ORIGIN + board_turn() * middle
+            }
+            ShopView::Jointer => {
+                let middle = middle(self.jointer.boards()).unwrap_or(Vec3::new(0.06, 0.02, 0.25));
+                crate::jointer::ORIGIN + middle
             }
             ShopView::Bench => {
                 let middle = self
@@ -467,6 +473,7 @@ mod tests {
         world.init_resource::<LastPress>();
         world.init_resource::<TableSawStation>();
         world.init_resource::<MiterSawStation>();
+        world.init_resource::<JointerStation>();
         world.init_resource::<BenchStation>();
         world.spawn((Camera::default(), GlobalTransform::default(), ShopCamera));
         world.spawn((

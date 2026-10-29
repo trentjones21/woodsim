@@ -8,6 +8,7 @@ use woodsim::{Assembly, Board, Length};
 
 use crate::{
     chop::MiterSawStation,
+    dress::JointerStation,
     feed::TableSawStation,
     join::BenchStation,
     shop::{ShopView, describe_size, measured},
@@ -100,6 +101,7 @@ pub fn set_down(
     hand: &mut Hand,
     table_saw: &mut TableSawStation,
     miter_saw: &mut MiterSawStation,
+    jointer: &mut JointerStation,
     bench: &mut BenchStation,
 ) -> bool {
     let Some(work) = hand.0.take() else {
@@ -112,6 +114,10 @@ pub fn set_down(
         }
         ShopView::MiterSaw => {
             miter_saw.load(work);
+            true
+        }
+        ShopView::Jointer => {
+            jointer.load(work);
             true
         }
         ShopView::Bench => {
@@ -188,13 +194,14 @@ mod tests {
     }
 
     #[test]
-    fn a_glue_up_goes_on_either_saw_or_the_bench() {
-        let (mut table_saw, mut miter_saw, mut bench) = (
+    fn a_glue_up_goes_on_either_saw_the_jointer_or_the_bench() {
+        let (mut table_saw, mut miter_saw, mut jointer, mut bench) = (
             TableSawStation::default(),
             MiterSawStation::default(),
+            JointerStation::default(),
             BenchStation::default(),
         );
-        for saw in [ShopView::TableSaw, ShopView::MiterSaw] {
+        for saw in [ShopView::TableSaw, ShopView::MiterSaw, ShopView::Jointer] {
             let mut hand = Hand(Some(Workpiece::GlueUp(panel())));
             assert!(set_down(
                 saw,
@@ -202,6 +209,7 @@ mod tests {
                 &mut hand,
                 &mut table_saw,
                 &mut miter_saw,
+                &mut jointer,
                 &mut bench
             ));
             assert!(hand.0.is_none());
@@ -213,6 +221,7 @@ mod tests {
             &mut hand,
             &mut table_saw,
             &mut miter_saw,
+            &mut jointer,
             &mut bench
         ));
         assert!(hand.0.is_none());

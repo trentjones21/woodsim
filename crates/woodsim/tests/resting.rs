@@ -1,13 +1,14 @@
 //! Resting what's on a saw on a surface you pick, with another against the fence: any way at all,
-//! the square ways and the ways a bevel or a glue-up at an angle sits.
+//! the square ways and the ways a bevel or a glue-up at an angle sits. At the jointer, just the
+//! surface to go against the fence is picked, and the wood rests on whatever's then lowest.
 
 mod common;
 
 use common::CutApart;
 
 use woodsim::{
-    Angle, Assembly, Blade, Board, Fastener, Length, Lie, Mating, Orientation, Pass, Recipe,
-    Surface, TableSaw, Tool, Unsteady, Wood, surfaces,
+    Angle, Assembly, Blade, Board, Fastener, Jointer, Length, Lie, Mating, Orientation, Pass,
+    Recipe, Surface, TableSaw, Tool, Unsteady, Wood, surfaces,
 };
 
 fn inches(n: i64) -> Length {
@@ -231,4 +232,87 @@ fn a_slot_in_a_board_resting_on_its_bevel_is_measured_from_the_bevel() {
     assert_eq!(size.exit, Surface::Top);
     let out = size.on_exit.expect("it comes out the top face").length;
     assert!(out > Length::from_inches(8) && out < run.length, "{out:?}");
+}
+
+/// `board`'s edge facing `w`'s way across its width.
+fn edge_of(board: &Board, w: i64) -> Surface {
+    surfaces(board)
+        .into_iter()
+        .find(|surface| matches!(surface, Surface::Side(edge) if edge.out.l == 0 && edge.out.w.signum() == w))
+        .unwrap()
+}
+
+#[test]
+fn against_the_jointers_fence_a_board_turns_the_least_to_bring_the_surface_to_it() {
+    let board = one_by_six();
+    let alone = Assembly::of(board.clone());
+    let flat = Orientation::default();
+    let against = |surface| alone.against_fence((0, surface), flat.rotation()).unwrap();
+    // Its bottom face to the fence: tipped up onto its edge, as V stands it.
+    assert_eq!(against(Surface::Bottom), flat.tipped());
+    // Its top: tipped up the other way, its length still along the tables.
+    let top = against(Surface::Top);
+    assert!(top.is_square() && top.on_edge());
+    assert!(dot(top.rotation().apply(facing(Surface::Top)), [0.0, 1.0, 0.0]) > 1.0 - 1e-12);
+    assert!(dot(top.rotation().apply([1.0, 0.0, 0.0]), [1.0, 0.0, 0.0]) > 1.0 - 1e-12);
+    // The edge already against it stays; the other turns end for end, still face down.
+    assert_eq!(against(edge_of(&board, 1)), flat);
+    assert_eq!(
+        against(edge_of(&board, -1)),
+        flat.turned_left().turned_left()
+    );
+    // An end: turned a quarter turn, across the tables.
+    let end = surfaces(&board)
+        .into_iter()
+        .find(|surface| matches!(surface, Surface::Side(edge) if edge.out.w == 0 && edge.out.l > 0))
+        .unwrap();
+    let across = against(end);
+    assert!(across.is_square() && across.along().0 == woodsim::Axis::Width);
+}
+
+#[test]
+fn against_the_jointers_fence_on_its_bevel_it_leans_and_the_knives_take_its_corner() {
+    let beveled = table_saw(inches(4), 30)
+        .rip(&one_by_six(), Orientation::default())
+        .cut_apart()
+        .piece
+        .board;
+    let [(bevel, _)] = beveled.bevels()[..] else {
+        panic!("expected one bevel");
+    };
+    let lie = Assembly::of(beveled.clone())
+        .against_fence((0, Surface::Side(bevel)), Orientation::default().rotation())
+        .unwrap();
+    assert!(!lie.is_square());
+    let toward = lie.rotation().apply(facing(Surface::Side(bevel)));
+    assert!(dot(toward, [0.0, 1.0, 0.0]) > 1.0 - 1e-9, "{toward:?}");
+    // Its length still runs along the tables, and the knives take whatever's lowest.
+    assert!(dot(lie.rotation().apply([1.0, 0.0, 0.0]), [1.0, 0.0, 0.0]) > 1.0 - 1e-9);
+    let jointed = Jointer::six_inch().joint(&beveled, lie).cut_apart();
+    assert!(jointed.piece.board.volume() < beveled.volume());
+    assert_eq!(jointed.piece.board.origin().replay(), jointed.piece.board);
+}
+
+#[test]
+fn against_the_jointers_fence_it_wont_go_where_other_wood_meets_the_fence_first() {
+    // A 1x2 glued on top of a 1x6 along one edge: the 1x2's inner edge has the 1x6 reaching past
+    // it toward the fence.
+    let board = one_by_six();
+    let mut stacked = Assembly::of(board.clone());
+    let one_by_two = Board::new(inches(24), fraction(3, 2), fraction(3, 4));
+    assert!(stacked.attach(
+        (0, Surface::Top),
+        &Assembly::of(one_by_two.clone()),
+        (0, Surface::Bottom),
+        Mating::default(),
+        Fastener::Glue,
+    ));
+    let flat = Orientation::default().rotation();
+    let results = [1, -1].map(|w| stacked.against_fence((1, edge_of(&one_by_two, w)), flat));
+    assert!(results.contains(&Err(Unsteady::Blocked)), "{results:?}");
+    assert!(results.iter().any(Result::is_ok), "{results:?}");
+    assert_eq!(
+        stacked.against_fence((0, Surface::Top), flat),
+        Err(Unsteady::Blocked)
+    );
 }

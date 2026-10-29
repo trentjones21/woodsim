@@ -276,6 +276,7 @@ impl TableSaw {
             travel: (from(start), from(end)),
             through,
             radius,
+            split: None,
         };
         reaches(
             laid,
@@ -463,6 +464,7 @@ impl MiterSaw {
             travel: (at, at),
             through,
             radius: self.blade.radius(),
+            split: None,
         };
         reaches(laid, &sweep, length, self.miter.radians().cos())?;
         // Along the fence, a slanted kerf is wider than the blade.
@@ -555,7 +557,7 @@ fn middle_at(
 }
 
 /// What a pass through a glue-up of one board did to the board.
-fn one_board(pass: GlueUpPass, waste: Length) -> Pass {
+pub(crate) fn one_board(pass: GlueUpPass, waste: Length) -> Pass {
     let piece = |part: Assembly| {
         let member = &part.members()[0];
         Piece {

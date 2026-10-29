@@ -73,6 +73,10 @@ fn scene(step: &CutStep, picked: Picked) -> Option<(Vec<Solid>, Overlay)> {
     | Tool::MiterSaw {
         lie: Lie::Board(lie),
         ..
+    }
+    | Tool::Jointer {
+        lie: Lie::Board(lie),
+        ..
     }) = tool
     else {
         return None;
@@ -103,8 +107,12 @@ fn scene(step: &CutStep, picked: Picked) -> Option<(Vec<Solid>, Overlay)> {
         }
     }
 
-    // The board on the saw: turned as it lay, from the near corner of the box it fills.
-    let rotation = lie.rotation();
+    // The board on the saw: turned as it lay, from the near corner of the box it fills; on the
+    // jointer, leaning with its fence.
+    let rotation = match tool {
+        Tool::Jointer { jointer, .. } => jointer.leaned(lie.rotation()),
+        _ => lie.rotation(),
+    };
     let nm = |length: Length| length.as_nm() as f64;
     let turned: Vec<Vec3> = board
         .corners()
@@ -129,10 +137,36 @@ fn scene(step: &CutStep, picked: Picked) -> Option<(Vec<Solid>, Overlay)> {
 
     let disc = Disc::of(kerf);
     let normal = rotation.apply(disc.normal);
-    let u = disc.drawn_at(kerf, &board.corners(), &|p| on_saw(p)[2]);
+    // The jointer's fence, square to the way it leans, and where its face is: through the
+    // wood's furthest reach that way.
+    let fence = match tool {
+        Tool::Jointer { jointer, .. } => {
+            let (sin, cos) = jointer.tilt.radians().sin_cos();
+            let toward = [0.0, cos, sin];
+            let against = turned
+                .iter()
+                .map(|&p| dot(toward, add(p, scaled(low, -1.0))))
+                .fold(f64::MIN, f64::max);
+            Some(Half::new(toward, against))
+        }
+        _ => None,
+    };
+    let u = match tool {
+        // Its cutterhead under the middle of the wood, half of it across.
+        Tool::Jointer { .. } => {
+            let at = |u: f64| on_saw(disc.center(u))[0];
+            let (start, per) = (at(0.0), at(disc.scale) - at(0.0));
+            (depth / 2.0 - start) / per * disc.scale
+        }
+        _ => disc.drawn_at(kerf, &board.corners(), &|p| on_saw(p)[2]),
+    };
     // The blade stops at the table and at the guides; the miter saw's at its middle, where its
-    // guard would cover it, so its lower half shows.
-    let mut keep = vec![Half::new([0.0, 0.0, -1.0], 0.0)];
+    // guard would cover it, so its lower half shows. The jointer's cutterhead turns below its
+    // tables, and stops at its fence.
+    let mut keep = match fence {
+        Some(fence) => vec![fence],
+        None => vec![Half::new([0.0, 0.0, -1.0], 0.0)],
+    };
     match tool {
         Tool::TableSaw { saw, .. } if saw.miter_gauge.is_some() => {
             keep.push(Half::new([1.0, 0.0, 0.0], depth));
@@ -144,6 +178,7 @@ fn scene(step: &CutStep, picked: Picked) -> Option<(Vec<Solid>, Overlay)> {
             let middle = on_saw(disc.center(u))[2];
             keep.push(Half::new([0.0, 0.0, 1.0], middle.max(tall + INCH)));
         }
+        Tool::Jointer { .. } => {}
     }
     let (near, far) = disc.faces(u, &on_saw);
     let sides = [dot(normal, near[0]), dot(normal, far[0])];
@@ -246,6 +281,37 @@ fn scene(step: &CutStep, picked: Picked) -> Option<(Vec<Solid>, Overlay)> {
                 });
             }
         }
+        Tool::Jointer { jointer, .. } => {
+            // The fence stands on the outfeed table, `cut` above the infeed table where the
+            // wood rests, its face leaning over the tables.
+            let fence = fence.expect("a jointer has a fence");
+            let cut = nm(jointer.depth);
+            let (sin, cos) = jointer.tilt.radians().sin_cos();
+            let foot = (fence.at - sin * cut) / cos;
+            let (rise, into) = ([0.0, -sin, cos], fence.normal);
+            let at =
+                |x: f64, a: f64, b: f64| add([x, foot, cut], add(scaled(rise, a), scaled(into, b)));
+            guides.push(
+                cuboid(
+                    [lo[0] - INCH, 0.0, 0.0],
+                    [hi[0] + INCH, 0.75 * INCH, 3.0 * INCH],
+                )
+                .into_iter()
+                .map(|face| face.into_iter().map(|[x, b, a]| at(x, a, b)).collect())
+                .collect(),
+            );
+            if jointer.fence < jointer.knives {
+                // On the outfeed table past the wood's leading end, from the fence to the
+                // knives' end.
+                let x = lo[0].min(0.0) - 0.75 * INCH;
+                let end = foot - nm(jointer.fence);
+                dimensions.push(Dimension {
+                    from: [[0.0, foot, cut], [0.0, end, cut]],
+                    to: [[x, foot, cut], [x, end, cut]],
+                    text: measured(jointer.fence).to_string(),
+                });
+            }
+        }
     }
     // All of it turned for the view: only for the miter gauge.
     let view = |p: Vec3| turn.apply(p);
@@ -272,11 +338,34 @@ fn scene(step: &CutStep, picked: Picked) -> Option<(Vec<Solid>, Overlay)> {
         table_lo = [0, 1, 2].map(|k| table_lo[k].min(p[k]));
         table_hi = [0, 1, 2].map(|k| table_hi[k].max(p[k]));
     }
-    let table = cuboid(
-        [table_lo[0] - INCH, table_lo[1] - INCH, -0.75 * INCH],
-        [table_hi[0] + INCH, table_hi[1] + INCH, 0.0],
-    );
-    let mut solids = vec![Solid::convex(table, Paint::Saw, None)];
+    let (near, far) = (table_lo[1] - INCH, table_hi[1] + INCH);
+    let tables = match tool {
+        // Either side of the cutterhead, the outfeed table, where the wood's going, as high as
+        // the knives reach, the infeed table where it rests, lower.
+        Tool::Jointer { jointer, .. } => {
+            let head = on_saw(disc.center(u))[0];
+            let gap = nm(jointer.radius()) + 0.25 * INCH;
+            let cut = nm(jointer.depth);
+            vec![
+                cuboid(
+                    [table_lo[0] - INCH, near, cut - 0.75 * INCH],
+                    [head - gap, far, cut],
+                ),
+                cuboid(
+                    [head + gap, near, -0.75 * INCH],
+                    [table_hi[0] + INCH, far, 0.0],
+                ),
+            ]
+        }
+        _ => vec![cuboid(
+            [table_lo[0] - INCH, near, -0.75 * INCH],
+            [table_hi[0] + INCH, far, 0.0],
+        )],
+    };
+    let mut solids: Vec<Solid> = tables
+        .into_iter()
+        .map(|table| Solid::convex(table, Paint::Saw, None))
+        .collect();
     solids.extend(
         guides
             .into_iter()

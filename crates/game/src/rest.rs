@@ -9,8 +9,10 @@ use woodsim::{Board, Surface, exposed};
 use crate::{
     bench::sheet,
     chop::MiterSawStation,
+    dress::JointerStation,
     feed::TableSawStation,
     join::surface_at,
+    jointer::AtJointer,
     miter_saw::AtMiterSaw,
     shop::{Part, Shape, ShopView, Slot},
     table_saw::AtTableSaw,
@@ -117,8 +119,11 @@ fn spawn_marks(
 #[allow(clippy::type_complexity)]
 fn mark_surfaces(
     view: Res<ShopView>,
-    table_saw: Res<TableSawStation>,
-    miter_saw: Res<MiterSawStation>,
+    (table_saw, miter_saw, jointer): (
+        Res<TableSawStation>,
+        Res<MiterSawStation>,
+        Res<JointerStation>,
+    ),
     pointing: Res<SawPointing>,
     parts: Query<(
         Entity,
@@ -126,8 +131,7 @@ fn mark_surfaces(
         &Slot,
         &Shape,
         &GlobalTransform,
-        Has<AtTableSaw>,
-        Has<AtMiterSaw>,
+        (Has<AtTableSaw>, Has<AtMiterSaw>, Has<AtJointer>),
     )>,
     mut marks: Query<(
         &Mark,
@@ -141,12 +145,14 @@ fn mark_surfaces(
     let (choosing, down) = match *view {
         ShopView::TableSaw => (table_saw.choosing_rest(), table_saw.resting_on()),
         ShopView::MiterSaw => (miter_saw.choosing_rest(), miter_saw.resting_on()),
+        ShopView::Jointer => (jointer.choosing_rest(), jointer.resting_on()),
         _ => (false, None),
     };
     // The whole board or glue-up on the saw you're at, a board of it by its slot.
-    let here = |at_table: bool, at_miter: bool| match *view {
+    let here = |(at_table, at_miter, at_jointer): (bool, bool, bool)| match *view {
         ShopView::TableSaw => at_table,
         ShopView::MiterSaw => at_miter,
+        ShopView::Jointer => at_jointer,
         _ => false,
     };
     let pointed = pointing
@@ -166,8 +172,8 @@ fn mark_surfaces(
         let found = spot.and_then(|(member, surface)| {
             parts
                 .iter()
-                .find(|(_, part, slot, _, _, at_table, at_miter)| {
-                    **part == Part::Whole && slot.0 == member && here(*at_table, *at_miter)
+                .find(|(_, part, slot, _, _, at)| {
+                    **part == Part::Whole && slot.0 == member && here(*at)
                 })
                 .and_then(|(_, _, _, board, placed, ..)| {
                     Some((surface, board.board()?.clone(), placed))

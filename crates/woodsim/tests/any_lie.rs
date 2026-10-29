@@ -1,12 +1,12 @@
 //! One way of cutting for everything: a board or a glue-up, lying any of the 24 square ways on
-//! either saw (on edge, on end, upside down), cut with the blade at any angle and tilt, stopped
-//! or all the way through, keeps exactly the wood the blade didn't take, in exactly one piece,
-//! and every piece replays from its stock.
+//! either saw or the jointer (on edge, on end, upside down), cut with the blade at any angle and
+//! tilt, or the jointer's fence at any tilt, stopped or all the way through, keeps exactly the
+//! wood the blade didn't take, in exactly one piece, and every piece replays from its stock.
 
 use proptest::prelude::*;
 use woodsim::{
-    Angle, Assembly, Blade, Board, CutError, Fastener, GlueUpPass, Kerf, Length, Mating, Member,
-    MiterSaw, Orientation, Rotation, Source, Surface, TableSaw, surfaces,
+    Angle, Assembly, Blade, Board, CutError, Fastener, GlueUpPass, Jointer, Kerf, Length, Mating,
+    Member, MiterSaw, Orientation, Rotation, Source, Surface, TableSaw, surfaces,
 };
 
 fn inches(n: i64) -> Length {
@@ -161,11 +161,28 @@ fn left(before: &Assembly, pass: &GlueUpPass) -> Vec<Member> {
     }
 }
 
+/// Which of `before`'s boards a pass left nothing of: none of what it left came from them, and
+/// they're not left as they were.
+fn gone(before: &Assembly, pass: &GlueUpPass) -> Vec<usize> {
+    let after = left(before, pass);
+    (0..before.members().len())
+        .filter(|&index| {
+            let was = &before.members()[index];
+            !after.iter().any(|member| {
+                member == was
+                    || matches!(member.board.origin().source(), Source::Sawn { from, .. }
+                        if from.replay() == was.board && member.rotation == was.rotation)
+            })
+        })
+        .collect()
+}
+
 /// Checks what a pass left of `before`: every board replays from its stock and sits where it
 /// was on the board it came from, and, on a grid through each of the glue-up's boards,
 /// wherever there was wood the blade's slot didn't take, exactly one board the pass left has
-/// it, and nowhere else does any.
+/// it, and nowhere else does any. A board the pass left nothing of went all to sawdust.
 fn holds_its_wood(before: &Assembly, pass: &GlueUpPass) -> Result<(), TestCaseError> {
+    let gone = gone(before, pass);
     let after = left(before, pass);
     // The slot the blade cut in each of the glue-up's boards it touched, in that board's own
     // whole numbers.
@@ -202,6 +219,9 @@ fn holds_its_wood(before: &Assembly, pass: &GlueUpPass) -> Result<(), TestCaseEr
             .members()
             .iter()
             .zip(&slots)
+            .enumerate()
+            .filter(|(index, _)| !gone.contains(index))
+            .map(|(_, member)| member)
             .filter(|(member, slot)| {
                 let [l, w, t] = on(member, x);
                 member.board.has_wood_in(l, w, t)
@@ -309,6 +329,53 @@ proptest! {
             Some(bottom) => saw.chop_glue_up(&glue_up, lie, length, fraction(bottom, 8)),
         };
         check(&glue_up, pass)?;
+    }
+
+    #[test]
+    fn the_jointer_joints_anything_lying_any_way_with_its_fence_at_any_tilt(
+        glue_up in glue_up(),
+        lie in lie(),
+        depth in 1..=32i64,
+        fence in 0..=48i64,
+        tilt in prop_oneof![Just(0), 0..=4500i32],
+        stopped in proptest::option::of(0.0..1.0f64),
+    ) {
+        let jointer = Jointer {
+            depth: fraction(depth, 64),
+            fence: fraction(fence, 8),
+            tilt: Angle::from_hundredths(tilt),
+            ..Jointer::six_inch()
+        };
+        let pass = match stopped {
+            None => jointer.joint_glue_up(&glue_up, lie),
+            Some(part) => {
+                // Stopped somewhere along the first 40" of the way across.
+                let radius = jointer.radius();
+                let end = Length::from_nm((inches(40).as_nm() as f64 * part) as i64) - radius;
+                jointer.feed_glue_up(&glue_up, lie, -radius, end)
+            }
+        };
+        // A thin enough board, lying low enough, can go entirely to chips: all of it, or some
+        // of a glue-up's boards, which lay within the depth of cut of the bottom of it all.
+        if let Ok(pass) = &pass {
+            let lie = jointer.leaned(lie);
+            let heights = |member: &Member| {
+                member
+                    .board
+                    .corners()
+                    .into_iter()
+                    .map(|[l, w, t]| lie.apply(member.point(l, w, t).map(|x| x.as_nm() as f64))[2])
+                    .collect::<Vec<f64>>()
+            };
+            let bottom = glue_up.members().iter().flat_map(heights).fold(f64::MAX, f64::min);
+            for index in gone(&glue_up, pass) {
+                let top = heights(&glue_up.members()[index]).into_iter().fold(f64::MIN, f64::max);
+                prop_assert!(top <= bottom + jointer.depth.as_nm() as f64 + 1.0);
+            }
+        }
+        if pass != Err(CutError::AllSawdust) {
+            check(&glue_up, pass)?;
+        }
     }
 }
 

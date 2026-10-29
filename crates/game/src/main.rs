@@ -6,6 +6,7 @@ mod chop;
 mod controls;
 mod copy;
 mod cutting;
+mod dress;
 mod edit;
 mod feed;
 mod flights;
@@ -16,6 +17,7 @@ mod hud;
 mod icons;
 mod inventory;
 mod join;
+mod jointer;
 mod meshes;
 mod miter_saw;
 mod parts;
@@ -57,6 +59,7 @@ use flights::FlightsPlugin;
 use hand::HandPlugin;
 use hud::HudPlugin;
 use inventory::InventoryPlugin;
+use jointer::JointerPlugin;
 use miter_saw::MiterSawPlugin;
 use parts::PartsPlugin;
 use rest::RestPlugin;
@@ -118,7 +121,7 @@ fn main() {
         ShopPlugin,
         ScenePlugin,
         // A tuple of plugins holds at most 15.
-        (TableSawPlugin, MiterSawPlugin, BladesPlugin),
+        (TableSawPlugin, MiterSawPlugin, JointerPlugin, BladesPlugin),
         BenchPlugin,
         HandPlugin,
         ControlsPlugin,

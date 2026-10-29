@@ -23,10 +23,12 @@ use crate::{
     bench::{self, BenchView},
     chop::MiterSawStation,
     controls::{Action, Actions, Arrow},
+    dress::JointerStation,
     feed::TableSawStation,
     hand::{Gesture, Hand, set_down},
     hud::OnHud,
     join::BenchStation,
+    jointer,
     meshes::{lumber_mesh, rounded_box},
     miter_saw,
     scenery::SKY,
@@ -180,6 +182,7 @@ pub enum ShopView {
     Overview,
     TableSaw,
     MiterSaw,
+    Jointer,
     Bench,
     /// The photo studio, where a part from the bench is set up and rendered.
     Studio,
@@ -433,6 +436,7 @@ pub struct Stations<'w> {
     pub hand: ResMut<'w, Hand>,
     pub table_saw: ResMut<'w, TableSawStation>,
     pub miter_saw: ResMut<'w, MiterSawStation>,
+    pub jointer: ResMut<'w, JointerStation>,
     pub bench: ResMut<'w, BenchStation>,
 }
 
@@ -446,13 +450,14 @@ impl Stations<'_> {
             &mut self.hand,
             &mut self.table_saw,
             &mut self.miter_saw,
+            &mut self.jointer,
             &mut self.bench,
         )
     }
 }
 
 /// Esc backs out to the overview; Tab goes around the stations: the table saw, the miter saw,
-/// the workbench.
+/// the jointer, the workbench.
 fn switch_view(actions: Res<Actions>, mut view: ResMut<ShopView>) {
     for action in actions.started() {
         let next = match action {
@@ -462,7 +467,8 @@ fn switch_view(actions: Res<Actions>, mut view: ResMut<ShopView>) {
             Action::GoTo(station) => station,
             Action::NextStation => match *view {
                 ShopView::TableSaw => ShopView::MiterSaw,
-                ShopView::MiterSaw => ShopView::Bench,
+                ShopView::MiterSaw => ShopView::Jointer,
+                ShopView::Jointer => ShopView::Bench,
                 ShopView::Overview | ShopView::Bench | ShopView::Studio => ShopView::TableSaw,
             },
             _ => continue,
@@ -562,6 +568,13 @@ fn station_pose(station: ShopView, using_gauge: bool) -> Option<Transform> {
             Vec3::new(-0.3, 0.7, 1.15),
             Vec3::new(0.0, 0.12, 0.0),
         ),
+        // Off the infeed end, on the open side, looking down along the fence at the gap the
+        // cutterhead turns in.
+        ShopView::Jointer => (
+            jointer::ORIGIN,
+            Vec3::new(-0.42, 0.72, 0.9),
+            Vec3::new(0.06, 0.0, -0.08),
+        ),
         ShopView::Bench | ShopView::Studio => return None,
     };
     Some(Transform::from_translation(origin + eye).looking_at(origin + target, Vec3::Y))
@@ -602,6 +615,7 @@ fn outline_hovered_station(view: Res<ShopView>, hovered: Res<HoveredStation>, mu
     let outline = match hovered.station {
         Some(ShopView::TableSaw) => block_transform(table_saw::BOUNDS, table_saw::ORIGIN),
         Some(ShopView::MiterSaw) => block_transform(miter_saw::BOUNDS, miter_saw::ORIGIN),
+        Some(ShopView::Jointer) => block_transform(jointer::BOUNDS, jointer::ORIGIN),
         Some(ShopView::Bench) => block_transform(bench::BOUNDS, bench::ORIGIN),
         _ => return,
     };

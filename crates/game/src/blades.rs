@@ -1,6 +1,7 @@
-//! Saw blades running. Each saw's blade spins up when the saw's switched on and coasts to a
-//! stop after (`Motor`), drawn with its teeth while they can be followed and as a blur once
-//! they can't, and a cut throws sawdust up where the teeth come out of the wood (`Sawing`).
+//! Saw blades running, and the jointer's cutterhead. Each saw's blade spins up when the saw's
+//! switched on and coasts to a stop after (`Motor`), drawn with its teeth while they can be
+//! followed and as a blur once they can't, and a cut throws sawdust up where the teeth come out
+//! of the wood (`Sawing`).
 //!
 //! A blade turns about its own x, from up toward +z: the top of a table saw's blade runs
 //! toward you and its front teeth down into the board, and a miter saw's front teeth come down
@@ -10,7 +11,7 @@
 use std::f32::consts::TAU;
 
 use bevy::{light::NotShadowCaster, prelude::*};
-use woodsim::Blade;
+use woodsim::{Blade, Jointer};
 
 use crate::{
     meshes::{BladeShape, saw_blade, spinning_plate, spinning_teeth},
@@ -170,6 +171,71 @@ pub fn spawn_blade(
             blade.spawn((
                 Mesh3d(meshes.add(spinning_teeth(&shape))),
                 MeshMaterial3d(teeth),
+                Transform::default(),
+                Visibility::Hidden,
+                Pickable::IGNORE,
+                NotShadowCaster,
+                Blurred,
+            ));
+        })
+        .id()
+}
+
+/// Spawns a jointer's cutterhead, turning about its x with `motor` turning it, its middle at
+/// the entity's origin: a drum as long as the knives, with three knives set into it, drawn as a
+/// see-through blur once it's going too fast to follow them.
+pub fn spawn_cutterhead(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    jointer: Jointer,
+    motor: Motor,
+) -> Entity {
+    let radius = jointer.radius().as_meters_f32();
+    let length = jointer.knives.as_meters_f32();
+    // Steel glows a little with its own color, so it stays bright in the gap between the tables.
+    let steel = |color: Color, alpha_mode: AlphaMode| StandardMaterial {
+        base_color: color,
+        emissive: LinearRgba::from(color) * 0.6,
+        perceptual_roughness: 0.35,
+        alpha_mode,
+        ..default()
+    };
+    let drum = materials.add(steel(Color::srgb(0.62, 0.66, 0.72), AlphaMode::Opaque));
+    let edge = materials.add(steel(Color::srgb(0.9, 0.92, 0.95), AlphaMode::Opaque));
+    let blur = materials.add(steel(
+        Color::srgba(0.85, 0.88, 0.93, 0.45),
+        AlphaMode::Blend,
+    ));
+    let along_x = Quat::from_rotation_z(std::f32::consts::FRAC_PI_2);
+    let cylinder = |radius: f32| Mesh::from(Cylinder::new(radius, length)).rotated_by(along_x);
+    commands
+        .spawn((Transform::default(), Visibility::default(), motor))
+        .with_children(|head| {
+            head.spawn((
+                Mesh3d(meshes.add(cylinder(radius * 0.86))),
+                MeshMaterial3d(drum),
+                Transform::default(),
+                Pickable::IGNORE,
+            ));
+            // Each knife stands out of a slot in the drum to the circle its edge cuts.
+            let depth = radius * 0.3;
+            for k in 0..3 {
+                let around = Quat::from_rotation_x(TAU * k as f32 / 3.0);
+                let knife = Mesh::from(Cuboid::new(length, depth, radius * 0.12))
+                    .translated_by(Vec3::Y * (radius - depth / 2.0))
+                    .rotated_by(around);
+                head.spawn((
+                    Mesh3d(meshes.add(knife)),
+                    MeshMaterial3d(edge.clone()),
+                    Transform::default(),
+                    Pickable::IGNORE,
+                    Sharp,
+                ));
+            }
+            head.spawn((
+                Mesh3d(meshes.add(cylinder(radius))),
+                MeshMaterial3d(blur),
                 Transform::default(),
                 Visibility::Hidden,
                 Pickable::IGNORE,

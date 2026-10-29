@@ -232,8 +232,13 @@ impl Board {
     /// swept all the wood between them: resaws from both edges that meet split it into layers,
     /// as do grooves from both faces whose depths together go through. A slot that goes
     /// through what's left divides that in turn. Wood the slots took entirely is sawdust. Each
-    /// piece is trimmed to its wood, and in order by where its corner was.
+    /// piece is trimmed to its wood, and in order by where its corner was. A slot that took
+    /// all the wood on one side of where its blade reached, as a jointer's cutterhead does,
+    /// trims the board there first (`trim`).
     pub(crate) fn pieces(&self) -> Vec<Piece> {
+        if let Some(pieces) = self.trimmed() {
+            return pieces;
+        }
         let across_face = self.face_pieces();
         let mut changed = !matches!(across_face.as_slice(), [whole] if whole.board == *self);
         let mut pieces = Vec::new();
@@ -277,10 +282,132 @@ impl Board {
         self.held_together(wood)
     }
 
+    /// The slot that trims the board, if one does, and the side of the plane it trims it to,
+    /// with the wood that's left behind it: a slot whose faces take in all of the board's wood,
+    /// and whose blade swept all of the wood on its center's side of where it reached, as its
+    /// circle's edge ran straight along its path. That's a jointer's cutterhead, as wide as its
+    /// knives, fed all the way across: it takes everything below the outfeed table off whatever
+    /// lay on the infeed one. With the board lying square, the plane is exactly where the blade
+    /// reached; turned any other way, the blade's plane is up some long whole-number direction,
+    /// so the plane is up the nearest short one square to the slot's faces, within 1/16,000,000
+    /// of a radian, through the whole number just past where the blade reached across from the
+    /// middle of the wood.
+    fn trim(&self) -> Option<(usize, Edge)> {
+        let thickness = self.thickness;
+        let corners = self.corners();
+        let span = |direction: Vector| {
+            corners
+                .iter()
+                .map(|&[l, w, t]| direction.dot(l, w, t))
+                .fold((i128::MAX, i128::MIN), |(low, high), x| {
+                    (low.min(x), high.max(x))
+                })
+        };
+        let float = |v: Vector| [v.l, v.w, v.t].map(|c| c as f64);
+        let dot = |a: [f64; 3], b: [f64; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+        let middle = corners
+            .iter()
+            .map(|p| p.map(|length| length.as_nm() as f64 / corners.len() as f64))
+            .fold([0.0; 3], |sum, p| [0, 1, 2].map(|k| sum[k] + p[k]));
+        self.kerfs.iter().enumerate().find_map(|(index, kerf)| {
+            let (least, most) = span(kerf.normal);
+            if !(kerf.near.as_nm() as i128 <= least && most <= kerf.far.as_nm() as i128) {
+                return None;
+            }
+            // Up the blade's plane, where its circle reached either side of its path, across
+            // from the middle of the wood.
+            let up = kerf.up();
+            let short = [up.l, up.w, up.t].iter().all(|c| c.abs() <= 1 << 28);
+            let toward = if short {
+                up
+            } else {
+                kerf.normal.nearest_square(float(up))
+            };
+            let unit = float(up).map(|c| c / up.scale());
+            let reached = |side: f64| {
+                let off = kerf.center as f64 / up.scale() + side * kerf.radius.as_nm() as f64
+                    - dot(unit, middle);
+                dot(float(toward), [0, 1, 2].map(|k| middle[k] + off * unit[k]))
+            };
+            let (top, bottom) = (reached(1.0).ceil() as i128, reached(-1.0).floor() as i128);
+            let (low, high) = span(toward);
+            // The blade's side of the plane, and the side the wood's left on.
+            let (blade, keep) = if bottom <= low && high > top {
+                (toward.edge(top), toward.reversed().edge(-top))
+            } else if high <= top && low < bottom {
+                (toward.reversed().edge(-bottom), toward.edge(bottom))
+            } else {
+                return None;
+            };
+            // All the wood the blade's side is where its circle's edge ran straight.
+            let scale = kerf.along.scale();
+            let (start, end) = (
+                kerf.start.as_nm() as f64 - scale,
+                kerf.end.as_nm() as f64 + scale,
+            );
+            let swept = self.face.iter().all(|region| {
+                region.solid(thickness).clip(blade).is_none_or(|under| {
+                    under.solid(thickness).corners().into_iter().all(|corner| {
+                        let [l, w, t] = corner.position();
+                        let along = kerf.along;
+                        let at = along.l as f64 * l + along.w as f64 * w + along.t as f64 * t;
+                        start <= at && at <= end
+                    })
+                })
+            });
+            swept.then_some((index, keep))
+        })
+    }
+
+    /// The pieces a slot that trims the board (`trim`) leaves it in, if one does: what's left
+    /// behind the plane it trims it to, divided by its other slots as `pieces` divides a board.
+    /// None, if the slot took all of it.
+    fn trimmed(&self) -> Option<Vec<Piece>> {
+        let (index, keep) = self.trim()?;
+        let mut rest = self.clone();
+        rest.kerfs.remove(index);
+        let wood: Vec<Region> = self
+            .face
+            .iter()
+            .filter_map(|region| region.solid(self.thickness).clip(keep))
+            .collect();
+        let mut pieces = Vec::new();
+        for trimmed in rest.trimmed_to(rest.joined(wood)) {
+            for part in trimmed.board.pieces() {
+                pieces.push(Piece {
+                    board: part.board,
+                    l: trimmed.l + part.l,
+                    w: trimmed.w + part.w,
+                    t: trimmed.t + part.t,
+                });
+            }
+        }
+        pieces.sort_by_key(|piece| (piece.l, piece.w, piece.t));
+        Some(pieces)
+    }
+
     /// The pieces `wood`, what's left of this board's regions, is in: regions that share a
     /// stretch of face hold together, and each piece is trimmed to its wood. The board itself,
     /// if it's still one piece as big as ever.
     fn held_together(&self, wood: Vec<Region>) -> Vec<Piece> {
+        let pieces = self.joined(wood);
+        let whole = [
+            (Length::ZERO, self.length),
+            (Length::ZERO, self.width),
+            (Length::ZERO, self.thickness),
+        ];
+        if let [regions] = pieces.as_slice()
+            && self.bounds_of(regions) == whole
+        {
+            // Still in one piece and as big as ever: the slots are just slots.
+            return vec![Piece::whole(self.clone())];
+        }
+        self.trimmed_to(pieces)
+    }
+
+    /// `wood`, what's left of this board's regions, sorted into the groups that hold together:
+    /// regions that share a stretch of face.
+    fn joined(&self, wood: Vec<Region>) -> Vec<Vec<Region>> {
         let thickness = self.thickness;
 
         // Regions of wood that share a stretch of edge hold together.
@@ -312,32 +439,27 @@ impl Board {
                 }
             }
         }
+        pieces
+    }
 
-        let bounds = |regions: &[Region]| {
-            let far = (Length::from_nm(i64::MAX), Length::from_nm(i64::MIN));
-            regions
-                .iter()
-                .map(|region| region.solid(thickness).bounds())
-                .fold([far; 3], |around, bounds| {
-                    [0, 1, 2].map(|k| (around[k].0.min(bounds[k].0), around[k].1.max(bounds[k].1)))
-                })
-        };
-        let whole = [
-            (Length::ZERO, self.length),
-            (Length::ZERO, self.width),
-            (Length::ZERO, thickness),
-        ];
-        if let [regions] = pieces.as_slice()
-            && bounds(regions) == whole
-        {
-            // Still in one piece and as big as ever: the slots are just slots.
-            return vec![Piece::whole(self.clone())];
-        }
+    /// The smallest box of whole nanometers around `regions` of this board's wood.
+    fn bounds_of(&self, regions: &[Region]) -> [(Length, Length); 3] {
+        let far = (Length::from_nm(i64::MAX), Length::from_nm(i64::MIN));
+        regions
+            .iter()
+            .map(|region| region.solid(self.thickness).bounds())
+            .fold([far; 3], |around, bounds| {
+                [0, 1, 2].map(|k| (around[k].0.min(bounds[k].0), around[k].1.max(bounds[k].1)))
+            })
+    }
 
+    /// Each group of regions as a board of its own, trimmed to its wood, with the slots that
+    /// still take some of it, and where its corner was on this board.
+    fn trimmed_to(&self, pieces: Vec<Vec<Region>>) -> Vec<Piece> {
         let mut pieces: Vec<Piece> = pieces
             .into_iter()
             .map(|regions| {
-                let [(l0, l1), (w0, w1), (t0, t1)] = bounds(&regions);
+                let [(l0, l1), (w0, w1), (t0, t1)] = self.bounds_of(&regions);
                 let mut board = Board::new(l1 - l0, w1 - w0, t1 - t0);
                 // Moved to the piece's corner, a side along a face it now has is no side.
                 board.face = merge_all(

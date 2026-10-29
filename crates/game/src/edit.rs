@@ -13,12 +13,15 @@
 use std::sync::Arc;
 
 use bevy::{ecs::system::SystemParam, prelude::*};
-use woodsim::{Angle, Length, MAX_GAUGE, MAX_TILT, Operation, Refusal, Remake, Tool};
+use woodsim::{
+    Angle, Length, MAX_FENCE_TILT, MAX_GAUGE, MAX_TILT, Operation, Refusal, Remake, Tool,
+};
 
 use crate::{
     chop::{DEPTH_STOP_MAX, MITER_STOPS, MiterSawStation, STOP_MAX, STOP_MIN},
     controls::{Action, Actions, Step},
     copy::Notice,
+    dress::{self, JointerStation},
     feed::{FENCE_MAX, FENCE_MIN, GAUGE_STOP_MAX, GAUGE_STOP_MIN, HEIGHT_MAX, TableSawStation},
     hand::{Hand, Workpiece},
     inventory::{Inventory, InventorySystems, Shelf},
@@ -43,6 +46,8 @@ pub enum Knob {
     Stop,
     Miter,
     Depth,
+    /// The jointer's depth of cut.
+    Cut,
 }
 
 /// The settings of `tool` that can be changed, in the order the saw's cards have them.
@@ -53,6 +58,7 @@ pub fn knobs(tool: Tool) -> Vec<Knob> {
         }
         Tool::TableSaw { .. } => vec![Knob::Fence, Knob::Height, Knob::Tilt],
         Tool::MiterSaw { .. } => vec![Knob::Stop, Knob::Miter, Knob::Depth],
+        Tool::Jointer { .. } => vec![Knob::Cut, Knob::Fence, Knob::Tilt],
     }
 }
 
@@ -78,6 +84,19 @@ pub fn reading(tool: Tool, knob: Knob) -> (&'static str, String) {
                 tilt => tilt.to_string(),
             },
         ),
+        (Knob::Cut, Tool::Jointer { jointer, .. }) => {
+            ("Depth of cut", measured(jointer.depth).to_string())
+        }
+        (Knob::Fence, Tool::Jointer { jointer, .. }) => {
+            ("Fence", measured(jointer.fence).to_string())
+        }
+        (Knob::Tilt, Tool::Jointer { jointer, .. }) => (
+            "Fence tilt",
+            match jointer.tilt {
+                Angle::ZERO => "square".to_string(),
+                tilt => tilt.to_string(),
+            },
+        ),
         (Knob::Stop, Tool::MiterSaw { length, .. }) => ("Length", measured(length).to_string()),
         (Knob::Miter, Tool::MiterSaw { saw, .. }) => ("Miter", describe_miter(saw.miter)),
         (Knob::Depth, Tool::MiterSaw { bottom, .. }) => (
@@ -98,8 +117,8 @@ fn depth(bottom: Length) -> Option<Length> {
 }
 
 /// `tool` with `knob` stepped as `step` says, the way the saw's own card steps it: lengths
-/// 1/16" (big, 1", or 1/4" up and down), angles 1° (big, to the next place the saw clicks
-/// into), and only as far as the saw goes.
+/// 1/16" (big, 1", or 1/4" up and down; the jointer's depth of cut 1/64", big 1/16"), angles 1°
+/// (big, to the next place the saw clicks into), and only as far as the saw goes.
 pub fn stepped(tool: Tool, knob: Knob, step: Step) -> Tool {
     let sixteenth = Length::from_inch_fraction(1, 16);
     let length = |now: Length, big: Length, least: Length, most: Length| {
@@ -139,7 +158,7 @@ pub fn stepped(tool: Tool, knob: Knob, step: Step) -> Tool {
                 }
                 Knob::Height => saw.height = length(saw.height, quarter, Length::ZERO, HEIGHT_MAX),
                 Knob::Tilt => saw.tilt = angle(saw.tilt, Angle::ZERO, MAX_TILT),
-                Knob::Stop | Knob::Miter | Knob::Depth => {}
+                Knob::Stop | Knob::Miter | Knob::Depth | Knob::Cut => {}
             }
             Tool::TableSaw { saw, lie, travel }
         }
@@ -172,6 +191,33 @@ pub fn stepped(tool: Tool, knob: Knob, step: Step) -> Tool {
                 lie,
                 length: stop,
                 bottom,
+            }
+        }
+        Tool::Jointer {
+            mut jointer,
+            lie,
+            travel,
+        } => {
+            match knob {
+                Knob::Cut => {
+                    let by = Length::from_inch_fraction(1, if step.big { 16 } else { 64 });
+                    let to = if step.more {
+                        jointer.depth + by
+                    } else {
+                        jointer.depth - by
+                    };
+                    jointer.depth = to.clamp(Length::ZERO, dress::DEPTH_MAX);
+                }
+                Knob::Fence => {
+                    jointer.fence = length(jointer.fence, inch, dress::FENCE_MIN, dress::FENCE_MAX);
+                }
+                Knob::Tilt => jointer.tilt = angle(jointer.tilt, Angle::ZERO, MAX_FENCE_TILT),
+                _ => {}
+            }
+            Tool::Jointer {
+                jointer,
+                lie,
+                travel,
             }
         }
     }
@@ -249,6 +295,7 @@ struct Wood<'w> {
     hand: ResMut<'w, Hand>,
     table_saw: ResMut<'w, TableSawStation>,
     miter_saw: ResMut<'w, MiterSawStation>,
+    jointer: ResMut<'w, JointerStation>,
     bench: ResMut<'w, BenchStation>,
     inventory: ResMut<'w, Inventory>,
     saved: Res<'w, Saved>,
@@ -260,6 +307,7 @@ impl Wood<'_> {
             hand: &self.hand,
             table_saw: &self.table_saw,
             miter_saw: &self.miter_saw,
+            jointer: &self.jointer,
             bench: &self.bench,
             inventory: &self.inventory,
             saved: &self.saved,
@@ -282,6 +330,7 @@ impl Wood<'_> {
             }
             changed += usize::from(self.table_saw.remake(remake, apply)?);
             changed += usize::from(self.miter_saw.remake(remake, apply)?);
+            changed += usize::from(self.jointer.remake(remake, apply)?);
             changed += self.bench.remake(remake, apply)?;
             let mut made = Vec::new();
             for item in self.inventory.items() {
@@ -456,6 +505,7 @@ mod tests {
         world.init_resource::<Hand>();
         world.init_resource::<TableSawStation>();
         world.init_resource::<MiterSawStation>();
+        world.init_resource::<JointerStation>();
         world.init_resource::<BenchStation>();
         world.init_resource::<Inventory>();
         world.init_resource::<Saved>();
@@ -578,6 +628,7 @@ mod tests {
         let places = |world: &World| -> Option<Workpiece> {
             let wood = match view {
                 ShopView::TableSaw => world.resource::<TableSawStation>().wood(),
+                ShopView::Jointer => world.resource::<JointerStation>().wood(),
                 _ => world.resource::<MiterSawStation>().wood(),
             };
             wood.into_iter()
@@ -638,6 +689,22 @@ mod tests {
         change_the_cut_on(&mut world, ShopView::TableSaw, Knob::Fence);
         let wood = world.resource::<TableSawStation>().wood();
         assert_eq!(width(&wood[0].1), Length::from_inches(7));
+
+        // Jointed 1/32" off a face, then made again 1/16" deeper.
+        let mut world = shop(ShopView::Jointer);
+        let mut jointer = world.resource_mut::<JointerStation>();
+        jointer.load(Workpiece::Board(Board::new(
+            Length::from_inches(24),
+            Length::from_inch_fraction(7, 2),
+            Length::from_inch_fraction(3, 4),
+        )));
+        jointer.push(10.0);
+        change_the_cut_on(&mut world, ShopView::Jointer, Knob::Cut);
+        let wood = world.resource::<JointerStation>().wood();
+        let Workpiece::Board(board) = &wood[0].1 else {
+            panic!("a board");
+        };
+        assert_eq!(board.thickness(), Length::from_inch_fraction(21, 32));
     }
 
     #[test]

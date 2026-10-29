@@ -20,6 +20,7 @@ use crate::{
     chop::MiterSawStation,
     controls::{Action, Actions},
     cutting,
+    dress::JointerStation,
     feed::TableSawStation,
     hand::{Hand, Workpiece},
     inventory::{self, Inventory, LUMBER, Shelf, lumber},
@@ -97,6 +98,7 @@ pub enum Heading {
     Hand,
     TableSaw,
     MiterSaw,
+    Jointer,
     Bench,
     Parts,
     Offcuts,
@@ -105,10 +107,11 @@ pub enum Heading {
 }
 
 impl Heading {
-    const ALL: [Heading; 8] = [
+    const ALL: [Heading; 9] = [
         Heading::Hand,
         Heading::TableSaw,
         Heading::MiterSaw,
+        Heading::Jointer,
         Heading::Bench,
         Heading::Parts,
         Heading::Offcuts,
@@ -121,6 +124,7 @@ impl Heading {
             Heading::Hand => "In hand",
             Heading::TableSaw => "Table saw",
             Heading::MiterSaw => "Miter saw",
+            Heading::Jointer => "Jointer",
             Heading::Bench => "Workbench",
             Heading::Parts => "Parts shelf",
             Heading::Offcuts => "Offcuts shelf",
@@ -133,7 +137,9 @@ impl Heading {
     fn empty(self) -> &'static str {
         match self {
             Heading::Hand | Heading::Lumber => "",
-            Heading::TableSaw | Heading::MiterSaw | Heading::Bench => "Nothing on it.",
+            Heading::TableSaw | Heading::MiterSaw | Heading::Jointer | Heading::Bench => {
+                "Nothing on it."
+            }
             Heading::Parts => "Pieces you cut to size, glue-ups, and boards you put away go here.",
             Heading::Offcuts => "What's left over from a cut goes here.",
             Heading::Saved => "Parts you save go here, and stay after a restart.",
@@ -177,11 +183,12 @@ pub struct DetailLine {
     pub changes: bool,
 }
 
-/// What a pass or joint line is: a pass of one saw or the other, or a joint.
+/// What a pass or joint line is: a pass of a saw or the jointer, or a joint.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     TableSaw,
     MiterSaw,
+    Jointer,
     Joint,
 }
 
@@ -233,6 +240,7 @@ impl Tree {
         let heading = match entry.at {
             Where::Hand => Heading::Hand,
             Where::Saw(ShopView::MiterSaw, _) => Heading::MiterSaw,
+            Where::Saw(ShopView::Jointer, _) => Heading::Jointer,
             Where::Saw(..) => Heading::TableSaw,
             Where::Bench(_) => Heading::Bench,
             Where::Shelf(_) => Heading::Parts,
@@ -289,6 +297,7 @@ pub struct Places<'a> {
     pub hand: &'a Hand,
     pub table_saw: &'a TableSawStation,
     pub miter_saw: &'a MiterSawStation,
+    pub jointer: &'a JointerStation,
     pub bench: &'a BenchStation,
     pub inventory: &'a Inventory,
     pub saved: &'a Saved,
@@ -316,6 +325,7 @@ impl Places<'_> {
             Where::Hand => self.hand.0.clone(),
             Where::Saw(ShopView::TableSaw, part) => on_saw(self.table_saw.wood(), part),
             Where::Saw(ShopView::MiterSaw, part) => on_saw(self.miter_saw.wood(), part),
+            Where::Saw(ShopView::Jointer, part) => on_saw(self.jointer.wood(), part),
             Where::Saw(..) => None,
             Where::Bench(index) => self.bench.wood(index),
             Where::Shelf(id) => self.inventory.get(id).map(|item| item.work.clone()),
@@ -349,9 +359,10 @@ impl Places<'_> {
             Where::Saw(view, part) => {
                 let saw = match view {
                     ShopView::MiterSaw => "on the miter saw",
+                    ShopView::Jointer => "on the jointer",
                     _ => "on the table saw",
                 };
-                match role(part) {
+                match role(view, part) {
                     Some(role) => format!("{saw}, the {role}"),
                     None => saw.to_string(),
                 }
@@ -413,7 +424,7 @@ impl Places<'_> {
             wood.into_iter()
                 .map(|(part, work)| {
                     let mut line = at(Where::Saw(view, part), work);
-                    if let Some(role) = role(part) {
+                    if let Some(role) = role(view, part) {
                         line.notes = join(role, &line.notes);
                     }
                     line
@@ -429,6 +440,7 @@ impl Places<'_> {
                 .collect(),
             Heading::TableSaw => on_saw(ShopView::TableSaw, self.table_saw.wood()),
             Heading::MiterSaw => on_saw(ShopView::MiterSaw, self.miter_saw.wood()),
+            Heading::Jointer => on_saw(ShopView::Jointer, self.jointer.wood()),
             Heading::Bench => (0..self.bench.groups.len())
                 .filter_map(|index| Some(at(Where::Bench(index), self.bench.wood(index)?)))
                 .collect(),
@@ -481,12 +493,12 @@ impl Places<'_> {
     }
 }
 
-/// What a side of a saw's cut is called.
-fn role(part: Part) -> Option<&'static str> {
-    match part {
-        Part::Whole => None,
-        Part::Piece => Some("measured piece"),
-        Part::Offcut => Some("offcut"),
+/// What a side of a saw's cut is called. What a jointer pass leaves is just the board, thinner.
+fn role(view: ShopView, part: Part) -> Option<&'static str> {
+    match (view, part) {
+        (_, Part::Whole) | (ShopView::Jointer, Part::Piece) => None,
+        (_, Part::Piece) => Some("measured piece"),
+        (_, Part::Offcut) => Some("offcut"),
     }
 }
 
@@ -604,6 +616,9 @@ pub fn through_glue_up(tool: Tool) -> bool {
         } | Tool::MiterSaw {
             lie: Lie::GlueUp(_),
             ..
+        } | Tool::Jointer {
+            lie: Lie::GlueUp(_),
+            ..
         }
     )
 }
@@ -629,6 +644,7 @@ fn passes(entry: Entry, board: &woodsim::Board, changes: bool) -> Vec<Line> {
                 kind: match operation.tool {
                     Tool::TableSaw { .. } => Kind::TableSaw,
                     Tool::MiterSaw { .. } => Kind::MiterSaw,
+                    Tool::Jointer { .. } => Kind::Jointer,
                 },
                 name: cutting::verb(operation.tool).to_string(),
                 notes: format!(
@@ -709,6 +725,7 @@ mod tests {
         hand: Hand,
         table_saw: TableSawStation,
         miter_saw: MiterSawStation,
+        jointer: JointerStation,
         bench: BenchStation,
         inventory: Inventory,
         saved: Saved,
@@ -720,6 +737,7 @@ mod tests {
                 hand: Hand::default(),
                 table_saw: TableSawStation::default(),
                 miter_saw: MiterSawStation::default(),
+                jointer: JointerStation::default(),
                 bench: BenchStation::default(),
                 inventory: Inventory::default(),
                 saved: Saved::default(),
@@ -731,6 +749,7 @@ mod tests {
                 hand: &self.hand,
                 table_saw: &self.table_saw,
                 miter_saw: &self.miter_saw,
+                jointer: &self.jointer,
                 bench: &self.bench,
                 inventory: &self.inventory,
                 saved: &self.saved,
@@ -772,6 +791,7 @@ mod tests {
             [
                 (Heading::TableSaw, 1),
                 (Heading::MiterSaw, 0),
+                (Heading::Jointer, 0),
                 (Heading::Bench, 0),
                 (Heading::Parts, 1),
                 (Heading::Offcuts, 0),

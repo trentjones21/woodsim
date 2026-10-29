@@ -12,8 +12,9 @@ use bevy::{
     prelude::*,
 };
 use woodsim::{
-    Assembly, Cut, CutError, GlueUpCut, GlueUpPass, Length, Lie, MiterSaw, Motion, Operation,
-    Orientation, Pass, Refusal, Remake, Surface, TableSaw, Unsteady, Wood, outline, surfaces,
+    Assembly, Cut, CutError, GlueUpCut, GlueUpPass, Jointer, Length, Lie, MiterSaw, Motion,
+    Operation, Orientation, Pass, Refusal, Remake, Surface, TableSaw, Unsteady, Wood, outline,
+    surfaces,
 };
 
 use crate::{
@@ -90,6 +91,29 @@ pub fn chop(
     }
 }
 
+/// Feeds `work`, lying against the fence as `lie` says, across a jointer's cutterhead while its
+/// center travels from `start` to `end` along it, as `Jointer::feed` does a board.
+pub fn joint(
+    jointer: &Jointer,
+    work: &Workpiece,
+    lie: Orientation,
+    start: Length,
+    end: Length,
+) -> Result<Passed, CutError> {
+    match work {
+        Workpiece::Board(board) => jointer.feed(board, lie, start, end).map(Passed::of_board),
+        Workpiece::GlueUp(glue_up) => jointer
+            .feed_glue_up(glue_up, lie.rotation(), start, end)
+            .map(Passed::of_glue_up),
+    }
+}
+
+/// Where a jointer's knives end, across its tables from the near side of the box `work` fills
+/// lying against the fence as `lie` says, leaning with it (`Jointer::knives_end`).
+pub fn knives_end(jointer: &Jointer, work: &Workpiece, lie: Orientation) -> Length {
+    jointer.knives_end(&glue_up_of(work), lie.rotation())
+}
+
 /// `work` made again as `remake` makes it: `None` if it's as it was.
 pub fn remade(remake: &mut Remake, work: &Workpiece) -> Result<Option<Workpiece>, Refusal> {
     Ok(match work {
@@ -135,7 +159,8 @@ pub fn lying(work: &Workpiece, lie: Orientation) -> Lie {
 }
 
 /// Choosing what something on a saw rests on: the surface to put down on the table, then the
-/// one to go against the fence, each picked with a click.
+/// one to go against the fence, each picked with a click. At the jointer, just the surface to go
+/// against the fence: what it then rests on is what the knives take off.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Rest {
     /// What the next click picks, while choosing.
@@ -152,21 +177,34 @@ pub enum Choosing {
     /// The surface to go against the fence, resting on this one (a board's place in what's on
     /// the saw, and its surface).
     Fence((usize, Surface)),
+    /// At the jointer, the surface to go flat against the fence, on its own.
+    Against,
 }
 
 impl Rest {
     /// Starts choosing, or stops.
     pub fn toggle(&mut self) {
+        self.toggle_from(Choosing::Down);
+    }
+
+    /// Starts choosing just the surface to go against a jointer's fence, or stops.
+    pub fn toggle_against(&mut self) {
+        self.toggle_from(Choosing::Against);
+    }
+
+    fn toggle_from(&mut self, first: Choosing) {
         self.choosing = match self.choosing {
             Some(_) => None,
-            None => Some(Choosing::Down),
+            None => Some(first),
         };
         self.refused = None;
     }
 
     /// Picks `surface` of `work`'s `member` (0 for a board), which lies as `lie` says: how it
     /// lies now, if that picks how it rests. Picked to rest on, it turns whichever surface it
-    /// can to the fence that leaves it most nearly as it lay; picked for the fence, that one.
+    /// can to the fence that leaves it most nearly as it lay; picked for the fence, that one; at
+    /// the jointer, it turns the least it can to bring that one to the fence
+    /// (`Assembly::against_fence`).
     pub fn pick(
         &mut self,
         work: &Workpiece,
@@ -176,6 +214,7 @@ impl Rest {
         let resting = match self.choosing? {
             Choosing::Down => rest_on(work, picked, lie),
             Choosing::Fence(down) => glue_up_of(work).resting(down, picked),
+            Choosing::Against => glue_up_of(work).against_fence(picked, lie.rotation()),
         };
         match resting {
             Ok(rest) => {
@@ -213,6 +252,10 @@ impl Rest {
             Choosing::Down => "Click the surface to rest it on, flat on the table.",
             Choosing::Fence(_) => {
                 "Click the surface to go against the fence, or carry on with it as it is."
+            }
+            Choosing::Against => {
+                "Click the surface to go flat against the fence. Whatever it then rests on is \
+                 what the knives take off."
             }
         };
         Some(format!("{}{next}", refused.unwrap_or_default()))
@@ -474,6 +517,22 @@ impl Parted {
                     .unwrap_or_default()
             }
             _ => Vec::new(),
+        }
+    }
+
+    /// The piece, where it is on the saw: as `whole` was, lying as `lie` says, so it can be fed
+    /// again just as it lies. A glue-up the cut left a single board of is that board, lying the
+    /// way it lay in the glue-up.
+    pub fn piece_in_place(&self, lie: Orientation) -> (Workpiece, Orientation) {
+        match self {
+            Parted::Board(cut) => (Workpiece::Board(cut.piece.board.clone()), lie),
+            Parted::GlueUp(cut) => match cut.piece.members() {
+                [member] => (
+                    Workpiece::Board(member.board.clone()),
+                    Orientation::from_rotation(member.rotation.then(lie.rotation())),
+                ),
+                _ => (Workpiece::GlueUp(cut.piece.clone()), lie),
+            },
         }
     }
 

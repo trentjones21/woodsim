@@ -18,6 +18,7 @@ use woodsim::{Recipe, Wood};
 use crate::{
     chop::MiterSawStation,
     controls::{Action, Actions},
+    dress::JointerStation,
     feed::TableSawStation,
     hand::Hand,
     join::BenchStation,
@@ -49,6 +50,7 @@ pub fn to_copy(
     hand: &Hand,
     table_saw: &TableSawStation,
     miter_saw: &MiterSawStation,
+    jointer: &JointerStation,
     bench: &BenchStation,
 ) -> Option<(String, Recipe)> {
     if let Some(work) = &hand.0 {
@@ -66,6 +68,10 @@ pub fn to_copy(
         ShopView::MiterSaw => Some((
             format!("on the miter saw. {}", miter_saw.status()),
             miter_saw.recipe()?,
+        )),
+        ShopView::Jointer => Some((
+            format!("on the jointer. {}", jointer.status()),
+            jointer.recipe()?,
         )),
         ShopView::Bench => {
             let group = match bench.picked {
@@ -95,6 +101,7 @@ struct Copyable<'w> {
     hand: Res<'w, Hand>,
     table_saw: Res<'w, TableSawStation>,
     miter_saw: Res<'w, MiterSawStation>,
+    jointer: Res<'w, JointerStation>,
     bench: Res<'w, BenchStation>,
 }
 
@@ -112,6 +119,7 @@ fn copy_wood(
         &copyable.hand,
         &copyable.table_saw,
         &copyable.miter_saw,
+        &copyable.jointer,
         &copyable.bench,
     );
     let message = match found {
@@ -210,6 +218,7 @@ mod tests {
             &Hand::default(),
             &table_saw,
             &MiterSawStation::default(),
+            &JointerStation::default(),
             &BenchStation::default(),
         )
         .expect("a board on the saw");
@@ -221,6 +230,39 @@ mod tests {
             panic!("expected the table saw");
         };
         assert_eq!(saw, table_saw.saw);
+        assert!(travel.1 > travel.0);
+    }
+
+    #[test]
+    fn whats_on_the_jointer_is_copied_with_how_its_set_and_reads_back() {
+        let mut jointer = JointerStation::default();
+        jointer.load(Workpiece::Board(Board::new(
+            Length::from_inches(24),
+            Length::from_inches(3),
+            Length::from_inch_fraction(3, 4),
+        )));
+        jointer.push(0.2);
+        let (about, recipe) = to_copy(
+            ShopView::Jointer,
+            &Hand::default(),
+            &TableSawStation::default(),
+            &MiterSawStation::default(),
+            &jointer,
+            &BenchStation::default(),
+        )
+        .expect("a board on the jointer");
+        assert!(about.starts_with("on the jointer."), "{about}");
+        let read = Recipe::read(&recipe.write()).unwrap();
+        assert_eq!(read, recipe);
+        let Some(woodsim::Tool::Jointer {
+            jointer: set,
+            travel,
+            ..
+        }) = read.saw
+        else {
+            panic!("expected the jointer");
+        };
+        assert_eq!(set, jointer.jointer);
         assert!(travel.1 > travel.0);
     }
 
@@ -237,6 +279,7 @@ mod tests {
             &hand,
             &TableSawStation::default(),
             &MiterSawStation::default(),
+            &JointerStation::default(),
             &BenchStation::default(),
         )
         .expect("what's in hand");
@@ -248,6 +291,7 @@ mod tests {
                 &Hand::default(),
                 &TableSawStation::default(),
                 &MiterSawStation::default(),
+                &JointerStation::default(),
                 &BenchStation::default(),
             )
             .is_none()

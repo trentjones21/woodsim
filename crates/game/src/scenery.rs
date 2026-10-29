@@ -739,7 +739,7 @@ fn spawn_furnishings(
         ));
     }
 
-    // A shop vac by the table saw, ready for the sawdust.
+    // A shop vac behind the table saw, ready for the sawdust.
     for (material, radius, height, y) in [
         (&blue, 0.2, 0.42, 0.25),
         (&charcoal, 0.21, 0.1, 0.51),
@@ -748,7 +748,7 @@ fn spawn_furnishings(
         commands.spawn((
             Mesh3d(meshes.add(Cylinder::new(radius, height))),
             MeshMaterial3d(material.clone()),
-            Transform::from_xyz(1.35, y, -1.5),
+            Transform::from_xyz(0.35, y, -2.1),
             Pickable::IGNORE,
         ));
     }
@@ -776,10 +776,11 @@ fn spawn_furnishings(
         ));
     }
 
-    // Anti-fatigue mats where the operator stands at each saw.
+    // Anti-fatigue mats where the operator stands at each saw, and beside the jointer.
     for (min, max) in [
         (Vec3::new(-0.5, 0.0, 0.5), Vec3::new(0.65, 0.015, 1.1)),
         (Vec3::new(-2.3, 0.0, 0.42), Vec3::new(-0.9, 0.015, 0.95)),
+        (Vec3::new(1.2, 0.0, -0.8), Vec3::new(1.75, 0.015, -0.22)),
     ] {
         spawn_box(&mut commands, &mut meshes, &mat_color, min, max);
     }

@@ -777,6 +777,63 @@ impl Assembly {
         Ok(Orientation::from_rotation(rotation))
     }
 
+    /// How it lies against a jointer's fence with `against` flat against it, from lying as `lie`
+    /// lays it: turned the least it can be to bring that surface square to the fence (as you'd
+    /// tip a board up onto its edge to put a face to the fence, or turn it end for end if the
+    /// surface faces straight away), and resting on whatever then reaches lowest, which is what
+    /// the knives take off, flat or not. A surface other wood reaches past, toward the fence, is
+    /// refused (`Blocked`): that wood would meet the fence first.
+    pub fn against_fence(
+        &self,
+        against: (usize, Surface),
+        lie: Rotation,
+    ) -> Result<Orientation, Unsteady> {
+        let (member, surface) = against;
+        let to = self
+            .members
+            .get(member)
+            .and_then(|member| member.patch(surface))
+            .ok_or(Unsteady::NoSurface)?;
+        let toward = unit(to.normal);
+        let reach = |corners: &mut dyn Iterator<Item = [f64; 3]>| {
+            corners.map(|p| dot(p, toward)).fold(f64::MIN, f64::max)
+        };
+        let mut corners = self.members.iter().flat_map(|member| {
+            member
+                .board
+                .corners()
+                .into_iter()
+                .map(|[l, w, t]| member.point(l, w, t).map(|length| length.as_nm() as f64))
+        });
+        // Within a micron, so a surface cut at a slant whole-number directions only come near
+        // counts.
+        const MICRON: f64 = 1_000.0;
+        if reach(&mut corners) > reach(&mut to.corners.iter().copied()) + MICRON {
+            return Err(Unsteady::Blocked);
+        }
+        // Turned about the line square to both the way it faces and the fence, from one to the
+        // other; or, facing straight away from the fence, end for end about the up.
+        let facing = unit(lie.apply(to.normal));
+        let fence = [0.0, 1.0, 0.0];
+        let axis = cross(facing, fence);
+        let (sin, cos) = (dot(axis, axis).sqrt(), dot(facing, fence));
+        let turn = if sin < 1e-12 && cos > 0.0 {
+            Rotation::NONE
+        } else if sin < 1e-12 {
+            Rotation::quarter_turns(2, 2)
+        } else {
+            let k = axis.map(|c| c / sin);
+            // Rodrigues: `v cos + (k × v) sin + k (k · v)(1 - cos)`, for each axis `v`.
+            let turned = |v: [f64; 3]| {
+                let across = cross(k, v);
+                let along = dot(k, v) * (1.0 - cos);
+                [0, 1, 2].map(|i| v[i] * cos + across[i] * sin + k[i] * along)
+            };
+            Rotation::from_columns([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]].map(turned))
+        };
+        Ok(Orientation::from_rotation(lie.then(turn)))
+    }
+
     pub fn fit(&self) -> Vec<Contact> {
         self.contacts(|_, _| true)
     }

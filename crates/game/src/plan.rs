@@ -2212,6 +2212,62 @@ mod tests {
     }
 
     #[test]
+    fn jointer_passes_are_steps_of_their_own_with_pictures() {
+        let jointer = |depth: i64, tilt: i32| woodsim::Jointer {
+            depth: Length::from_inch_fraction(depth, 16),
+            tilt: Angle::from_degrees(tilt),
+            ..woodsim::Jointer::six_inch()
+        };
+        let jointed = |pass: Result<Pass, woodsim::CutError>| match pass {
+            Ok(Pass::Cut(cut)) => cut.piece.board,
+            other => panic!("expected a layer off it, got {other:?}"),
+        };
+        // A 1x4's face jointed twice, then an edge beveled with the fence tilted, then ripped.
+        let flat = Orientation::default();
+        let mut board = Board::new(
+            Length::from_inches(24),
+            Length::from_inch_fraction(7, 2),
+            Length::from_inch_fraction(3, 4),
+        );
+        for _ in 0..2 {
+            board = jointed(jointer(1, 0).joint(&board, flat));
+        }
+        board = jointed(jointer(1, 45).joint(&board, flat.tipped()));
+        let saw = woodsim::TableSaw {
+            blade: woodsim::Blade {
+                diameter: Length::from_inches(10),
+                kerf: woodsim::Blade::FULL_KERF,
+            },
+            fence: Length::from_inches(3),
+            height: Length::from_inches(1),
+            miter_gauge: None,
+            gauge_angle: Angle::ZERO,
+            tilt: Angle::ZERO,
+        };
+        let Ok(Pass::Cut(cut)) = saw.rip(&board, flat) else {
+            panic!("expected it ripped");
+        };
+        let page = Plan::of(Assembly::of(cut.piece.board)).page();
+        assert!(
+            page.contains(
+                "Jointer, 1/16\" deep: Joint a new 1x4, 3/4\" x 3-1/2\" x 24\" two times, \
+                 taking 1/8\" off in all. Keep the 1x4 for step 2."
+            ),
+            "{page}"
+        );
+        assert!(
+            page.contains(
+                "Jointer, 1/16\" deep, fence tilted 45°, the board on edge: Stand the 1x4 from \
+                 step 1 on edge, then joint it."
+            ),
+            "{page}"
+        );
+        assert!(page.contains("Table saw, rip fence at 3\""), "{page}");
+        // A picture beside each step: the jointer's two, and the table saw's.
+        assert_eq!(page.matches("class=\"setup\"").count(), 3, "{page}");
+    }
+
+    #[test]
     fn a_single_part_has_no_steps() {
         let board = Board::new(
             Length::from_inches(24),

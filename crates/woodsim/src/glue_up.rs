@@ -58,6 +58,10 @@ pub(crate) struct Sweep {
     pub travel: (Length, Length),
     pub through: [Length; 3],
     pub radius: Length,
+    /// Which way what the cut leaves is sorted, and where, when it isn't by the slot's faces:
+    /// for a jointer, up, from the top of its knives' circle. Nothing's left on the measured
+    /// side, below.
+    pub split: Option<([i64; 3], Length)>,
 }
 
 /// What's on a saw: `lie` turns its axes onto the saw's (along the table, across it toward the
@@ -277,6 +281,14 @@ impl<'a> Laid<'a> {
         }))
     }
 
+    /// How far its wood reaches `toward` (a unit vector in the saw's axes), in nanometers from
+    /// the near corner of the box it fills.
+    pub(crate) fn furthest(&self, toward: [f64; 3]) -> f64 {
+        self.on_saw(self.glue_up)
+            .map(|p| p[0] * toward[0] + p[1] * toward[1] + p[2] * toward[2])
+            .fold(f64::MIN, f64::max)
+    }
+
     /// Where `part`'s corners are in the saw's axes, in nanometers.
     fn on_saw(&self, part: &Assembly) -> impl Iterator<Item = [f64; 3]> {
         part.members()
@@ -292,7 +304,8 @@ impl<'a> Laid<'a> {
 
     /// Whether `part` is past the middle of the slot `sweep` cuts, the way its normal points.
     fn ahead(&self, part: &Assembly, sweep: &Sweep) -> bool {
-        let normal = sweep.normal.map(|v| v as f64);
+        let normal = sweep.split.map_or(sweep.normal, |(toward, _)| toward);
+        let normal = normal.map(|v| v as f64);
         let size = (normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]).sqrt();
         let on = |point: [f64; 3]| {
             (point[0] * normal[0] + point[1] * normal[1] + point[2] * normal[2]) / size
@@ -303,12 +316,17 @@ impl<'a> Laid<'a> {
             .fold((f64::MAX, f64::MIN), |(low, high), x| {
                 (low.min(x), high.max(x))
             });
-        let face = on(sweep.face.map(|length| length.as_nm() as f64));
-        let half = sweep.kerf.as_nm() as f64 / 2.0;
-        let middle = if sweep.measured_ahead {
-            face - half
-        } else {
-            face + half
+        let middle = match sweep.split {
+            Some((_, at)) => at.as_nm() as f64,
+            None => {
+                let face = on(sweep.face.map(|length| length.as_nm() as f64));
+                let half = sweep.kerf.as_nm() as f64 / 2.0;
+                if sweep.measured_ahead {
+                    face - half
+                } else {
+                    face + half
+                }
+            }
         };
         (low + high) / 2.0 > middle
     }

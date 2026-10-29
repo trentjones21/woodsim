@@ -15,7 +15,7 @@ use crate::{
 pub enum Action {
     /// Back out to the whole shop.
     Back,
-    /// On around the stations: the table saw, the miter saw, the workbench.
+    /// On around the stations: the table saw, the miter saw, the jointer, the workbench.
     NextStation,
     /// Straight to a station, or the whole shop.
     GoTo(ShopView),
@@ -34,16 +34,20 @@ pub enum Action {
     /// At a saw: choosing what the board rests on, and what goes against the fence, by
     /// clicking them.
     Rest,
-    /// The table saw's guide: the rip fence or the miter gauge, and moving it.
+    /// The table saw's guide: the rip fence or the miter gauge, and moving it; or the jointer's
+    /// fence.
     SwitchGuide,
     Guide(Step),
     Blade(Step),
-    /// Tilting the table saw's blade further from square, or back toward it.
+    /// Tilting the table saw's blade further from square, or back toward it; or the jointer's
+    /// fence.
     Tilt(Step),
-    /// Feeding the board into the table saw's blade, held, and bringing it back around.
+    /// Feeding the board into the table saw's blade, or across the jointer's cutterhead, held,
+    /// and bringing it back around.
     Push,
     BringBack,
-    /// The miter saw's stop, its angle, its depth stop, and lowering its blade, held.
+    /// The miter saw's stop, its angle, its depth stop (the jointer's depth of cut), and
+    /// lowering its blade, held.
     Stop(Step),
     Miter(Step),
     Depth(Step),
@@ -151,7 +155,7 @@ impl Action {
 pub fn bound(view: ShopView, key: KeyCode, shift: bool) -> Option<Action> {
     use Action::*;
     use KeyCode::*;
-    use ShopView::{Bench, MiterSaw, Overview, Studio, TableSaw};
+    use ShopView::{Bench, Jointer, MiterSaw, Overview, Studio, TableSaw};
     let step = |more| Step { more, big: shift };
     let arrow = match key {
         ArrowLeft => Some(Arrow::Left),
@@ -162,12 +166,12 @@ pub fn bound(view: ShopView, key: KeyCode, shift: bool) -> Option<Action> {
     };
     Some(match (view, key) {
         (_, Tab) => NextStation,
-        (TableSaw | MiterSaw | Bench | Studio, Escape) => Back,
+        (TableSaw | MiterSaw | Jointer | Bench | Studio, Escape) => Back,
         (_, KeyH) => Action::Help,
         (_, KeyI) => Inventory,
         (_, KeyX) => PutAway,
         (_, KeyY) => Action::Copy,
-        (TableSaw | MiterSaw | Bench, KeyC) => Store,
+        (TableSaw | MiterSaw | Jointer | Bench, KeyC) => Store,
         (TableSaw | MiterSaw, KeyA) => CutAgain,
         (Overview, KeyW | ArrowUp) => Pan(Arrow::Up),
         (Overview, KeyS | ArrowDown) => Pan(Arrow::Down),
@@ -202,14 +206,17 @@ pub fn bound(view: ShopView, key: KeyCode, shift: bool) -> Option<Action> {
         (_, KeyQ) => TurnLeft,
         (_, KeyE) => TurnRight,
         (_, KeyF) => Flip,
-        (TableSaw | MiterSaw, KeyV) => StandUp,
-        (TableSaw | MiterSaw, KeyR) => Rest,
+        (TableSaw | MiterSaw | Jointer, KeyV) => StandUp,
+        (TableSaw | MiterSaw | Jointer, KeyR) => Rest,
         (TableSaw, KeyG) => SwitchGuide,
         (TableSaw, ArrowLeft | ArrowRight) => Guide(step(key == ArrowRight)),
         (TableSaw, ArrowUp | ArrowDown) => Blade(step(key == ArrowUp)),
         (TableSaw, Comma | Period) => Tilt(step(key == Comma)),
-        (TableSaw, Space) => Push,
-        (TableSaw, KeyB) => BringBack,
+        (TableSaw | Jointer, Space) => Push,
+        (TableSaw | Jointer, KeyB) => BringBack,
+        (Jointer, ArrowLeft | ArrowRight) => Guide(step(key == ArrowRight)),
+        (Jointer, ArrowUp | ArrowDown) => Depth(step(key == ArrowUp)),
+        (Jointer, Comma | Period) => Tilt(step(key == Comma)),
         (MiterSaw, ArrowLeft | ArrowRight) => Stop(step(key == ArrowRight)),
         (MiterSaw, ArrowUp | ArrowDown) => Depth(step(key == ArrowUp)),
         (TableSaw | MiterSaw, BracketLeft | BracketRight) => Miter(step(key == BracketRight)),
