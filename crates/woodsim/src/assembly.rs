@@ -4,7 +4,7 @@
 //! across the joint it sits. Where surfaces meet or nearly do, the assembly measures how well:
 //! tight, open, or running into each other.
 
-use crate::{Board, Length, face::Edge};
+use crate::{Board, Length, face::Edge, history::next_number};
 
 /// A turn in space, as where it turns each of three axes: whole numbers over 2^40, so quarter
 /// turns are exact and any other turn is within a trillionth of a radian.
@@ -128,12 +128,24 @@ pub struct Member {
 }
 
 /// Two surfaces held together.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug)]
 pub struct Joint {
     /// Which members, by their place in the assembly, and which of their surfaces.
     pub between: [(usize, Surface); 2],
     pub fastener: Fastener,
+    /// When it was fastened, in the order saw passes and joints happen: every joint fastened at
+    /// once (where a part went on, and wherever else it met flush) has the same number.
+    pub number: u64,
 }
+
+/// The same joint is the same surfaces held the same way, whenever it was made.
+impl PartialEq for Joint {
+    fn eq(&self, other: &Joint) -> bool {
+        (self.between, self.fastener) == (other.between, other.fastener)
+    }
+}
+
+impl Eq for Joint {}
 
 /// Where two members' surfaces meet or nearly do, and how far apart they are across where they
 /// overlap: from `least` to `most`. Negative where one runs into the other.
@@ -355,13 +367,15 @@ impl Assembly {
                 between: joint
                     .between
                     .map(|(member, surface)| (member + first, surface)),
-                fastener: joint.fastener,
+                ..*joint
             }
         }));
         let chosen = [onto, (surface.0 + first, surface.1)];
+        let number = next_number();
         self.joints.push(Joint {
             between: chosen,
             fastener,
+            number,
         });
         let flush: Vec<Joint> = self
             .contacts(|i, j| i < first && j >= first)
@@ -370,6 +384,7 @@ impl Assembly {
             .map(|contact| Joint {
                 between: contact.between,
                 fastener,
+                number,
             })
             .collect();
         self.joints.extend(flush);

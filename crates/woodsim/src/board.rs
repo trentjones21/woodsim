@@ -1,8 +1,13 @@
-use std::fmt;
+use std::{
+    fmt,
+    hash::{Hash, Hasher},
+    sync::Arc,
+};
 
 use crate::{
     Angle, Axis, Kerf, Length,
     face::{Direction, Edge, Region, merge_all},
+    history::{Operation, Origin, Part},
     kerf::Across,
 };
 
@@ -12,13 +17,47 @@ use crate::{
 ///
 /// Positions on a board are in its own coordinates: `l` along its length from one end, `w`
 /// across its width from one edge, and `t` up through its thickness from its bottom face.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+///
+/// A board also knows where it came from (`origin`), which doesn't change what it is: boards
+/// the same size and shape are equal however they were made.
+#[derive(Clone)]
 pub struct Board {
     length: Length,
     width: Length,
     thickness: Length,
     face: Vec<Region>,
     kerfs: Vec<Kerf>,
+    origin: Origin,
+}
+
+impl PartialEq for Board {
+    fn eq(&self, other: &Board) -> bool {
+        (self.length, self.width, self.thickness) == (other.length, other.width, other.thickness)
+            && self.face == other.face
+            && self.kerfs == other.kerfs
+    }
+}
+
+impl Eq for Board {}
+
+impl Hash for Board {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        (self.length, self.width, self.thickness).hash(state);
+        self.face.hash(state);
+        self.kerfs.hash(state);
+    }
+}
+
+impl fmt::Debug for Board {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Board")
+            .field("length", &self.length)
+            .field("width", &self.width)
+            .field("thickness", &self.thickness)
+            .field("face", &self.face)
+            .field("kerfs", &self.kerfs)
+            .finish()
+    }
 }
 
 impl Board {
@@ -37,7 +76,34 @@ impl Board {
                 (Length::ZERO, width),
             )],
             kerfs: Vec::new(),
+            origin: Origin::new_stock(length, width, thickness),
         }
+    }
+
+    /// Where the board came from: new lumber, or a piece of another board a saw cut.
+    pub fn origin(&self) -> &Origin {
+        &self.origin
+    }
+
+    /// Cuts `kerf` into the board, as `operation` did: the board with the slot in it, and the
+    /// pieces that leaves it in, each knowing it came from this board by this cut. A slot that
+    /// doesn't cut the board apart leaves it one piece, the slotted board itself.
+    pub(crate) fn sawn(&self, kerf: Kerf, operation: &Arc<Operation>) -> (Board, Vec<Piece>) {
+        let mut kerfed = self.with_kerf(kerf);
+        let zero = [Length::ZERO; 3];
+        kerfed.origin = Origin::sawn(operation, &self.origin, kerf, Part::Whole, zero);
+        let mut pieces = kerfed.pieces();
+        if let [whole] = pieces.as_mut_slice()
+            && whole.board == kerfed
+        {
+            whole.board.origin = kerfed.origin.clone();
+            return (kerfed, pieces);
+        }
+        for (n, piece) in pieces.iter_mut().enumerate() {
+            let at = [piece.l, piece.w, piece.t];
+            piece.board.origin = Origin::sawn(operation, &self.origin, kerf, Part::Piece(n), at);
+        }
+        (kerfed, pieces)
     }
 
     /// How far the board reaches along its length: from long point to long point, if its ends

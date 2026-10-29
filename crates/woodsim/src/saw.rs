@@ -3,6 +3,7 @@ use std::fmt;
 use crate::{
     Angle, Assembly, Axis, Board, Direction, Kerf, Length, Orientation, Piece, Rotation,
     glue_up::{GlueUpPass, Laid, Path},
+    history::{Lie, Operation, Tool},
     kerf::Across,
 };
 
@@ -118,6 +119,11 @@ impl TableSaw {
             start <= end,
             "the blade's travel runs backward: {start} to {end}"
         );
+        let tool = Tool::TableSaw {
+            saw: *self,
+            lie: Lie::Board(lie),
+            travel: (start, end),
+        };
         let (across, across_backward) = lie.across();
         let (along, along_backward) = lie.along();
         let (up, up_backward) = lie.up();
@@ -154,8 +160,7 @@ impl TableSaw {
         if !board.touched_by(&kerf) {
             return Ok(Pass::Missed);
         }
-        let kerfed = board.with_kerf(kerf);
-        let pieces = kerfed.pieces();
+        let (kerfed, pieces) = board.sawn(kerf, &Operation::new(tool));
         if let [whole] = pieces.as_slice()
             && whole.board == kerfed
         {
@@ -226,6 +231,11 @@ impl TableSaw {
         let slot = self.slot(laid.extent[1])?;
         let radius = self.blade.radius();
         Ok(laid.cut(&Path {
+            tool: Tool::TableSaw {
+                saw: *self,
+                lie: Lie::GlueUp(lie),
+                travel: (start, end),
+            },
             across: (0, 1),
             face: [Length::ZERO, slot.1],
             kerf: self.blade.kerf,
@@ -387,8 +397,13 @@ impl MiterSaw {
         if !board.touched_by(&kerf) {
             return Ok(Pass::Missed);
         }
-        let kerfed = board.with_kerf(kerf);
-        let pieces = kerfed.pieces();
+        let tool = Tool::MiterSaw {
+            saw: *self,
+            lie: Lie::Board(lie),
+            length,
+            bottom,
+        };
+        let (kerfed, pieces) = board.sawn(kerf, &Operation::new(tool));
         if let [whole] = pieces.as_slice()
             && whole.board == kerfed
         {
@@ -445,6 +460,12 @@ impl MiterSaw {
         let (out, height) = self.center(bottom);
         let at = [total - length, span];
         Ok(laid.cut(&Path {
+            tool: Tool::MiterSaw {
+                saw: *self,
+                lie: Lie::GlueUp(lie),
+                length,
+                bottom,
+            },
             across: (cos, sin),
             face: at,
             kerf: self.blade.kerf,
@@ -526,8 +547,13 @@ impl MiterSaw {
         if !board.touched_by(&kerf) {
             return Ok(Pass::Missed);
         }
-        let kerfed = board.with_kerf(kerf);
-        let pieces = kerfed.pieces();
+        let tool = Tool::MiterSaw {
+            saw: *self,
+            lie: Lie::Board(lie),
+            length,
+            bottom,
+        };
+        let (kerfed, pieces) = board.sawn(kerf, &Operation::new(tool));
         if let [whole] = pieces.as_slice()
             && whole.board == kerfed
         {

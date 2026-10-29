@@ -10,6 +10,7 @@
 use crate::{
     Assembly, CutError, Direction, Length, Rotation,
     assembly::{Joint, Member, Surface, outline},
+    history::{Operation, Tool},
     kerf::{Across, Kerf},
     saw::scaled,
 };
@@ -40,6 +41,8 @@ pub struct GlueUpCut {
 /// it. Positions are along the table and across it toward the fence, from the near corner of
 /// the box what's on the saw fills.
 pub(crate) struct Path {
+    /// The saw and its settings, and how the glue-up lay on it, to record with each cut.
+    pub tool: Tool,
     /// The way out of the slot through one of its faces, square to them: whole numbers along
     /// the table and across it.
     pub across: (i64, i64),
@@ -171,6 +174,8 @@ impl<'a> Laid<'a> {
 
     /// Runs the blade along `path` through every board, and sorts out what's left.
     pub(crate) fn cut(&self, path: &Path) -> GlueUpPass {
+        // One pass, through every board it touches.
+        let operation = Operation::new(path.tool);
         let mut members = Vec::new();
         // Which of the glue-up's boards each new member came from.
         let mut from = Vec::new();
@@ -183,7 +188,7 @@ impl<'a> Laid<'a> {
                 continue;
             }
             touched = true;
-            for piece in member.board.with_kerf(kerf).pieces() {
+            for piece in member.board.sawn(kerf, &operation).1 {
                 members.push(Member {
                     board: piece.board,
                     rotation: member.rotation,
@@ -196,27 +201,24 @@ impl<'a> Laid<'a> {
             return GlueUpPass::Missed;
         }
 
-        // Pieces of boards that were fastened together still are wherever they meet flush.
-        let fastener = |a: usize, b: usize| {
-            self.glue_up
-                .joints()
-                .iter()
-                .find(|joint| {
-                    let [x, y] = joint.between.map(|(member, _)| member);
-                    (x, y) == (a, b) || (x, y) == (b, a)
-                })
-                .map(|joint| joint.fastener)
+        // Pieces of boards that were fastened together still are wherever they meet flush,
+        // with the joint they were fastened by.
+        let fastened = |a: usize, b: usize| {
+            self.glue_up.joints().iter().copied().find(|joint| {
+                let [x, y] = joint.between.map(|(member, _)| member);
+                (x, y) == (a, b) || (x, y) == (b, a)
+            })
         };
         let pieces = Assembly::from_parts(members, Vec::new());
         let joints: Vec<Joint> = pieces
-            .contacts(|i, j| fastener(from[i], from[j]).is_some())
+            .contacts(|i, j| fastened(from[i], from[j]).is_some())
             .into_iter()
             .filter(|contact| contact.is_tight())
             .filter_map(|contact| {
                 let [(i, _), (j, _)] = contact.between;
                 Some(Joint {
                     between: contact.between,
-                    fastener: fastener(from[i], from[j])?,
+                    ..fastened(from[i], from[j])?
                 })
             })
             .collect();
@@ -343,7 +345,7 @@ fn held_together(members: &[Member], joints: &[Joint]) -> Vec<Assembly> {
                     let [(a, sa), (b, sb)] = joint.between;
                     Some(Joint {
                         between: [(renumber(a)?, sa), (renumber(b)?, sb)],
-                        fastener: joint.fastener,
+                        ..*joint
                     })
                 })
                 .collect();
