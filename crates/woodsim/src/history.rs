@@ -16,7 +16,7 @@ use std::{
     },
 };
 
-use crate::{Board, Kerf, Length, MiterSaw, Orientation, Rotation, TableSaw};
+use crate::{Board, Kerf, Length, MiterSaw, Orientation, Piece, Rotation, TableSaw};
 
 static NEXT: AtomicU64 = AtomicU64::new(1);
 
@@ -221,6 +221,26 @@ impl Origin {
                 [l + at[0], w + at[1], t + at[2]]
             }
         }
+    }
+
+    /// The board the cut that made it cut, and everything that cut left of it, each where it
+    /// was on that board: the pieces it was cut apart into, this one among them, in the order
+    /// `Part::Piece` counts them, or the board with the slot in it, if it held together. `None`
+    /// for new lumber.
+    pub fn cut_from(&self) -> Option<(Board, Vec<Piece>)> {
+        let Source::Sawn {
+            from, kerf, part, ..
+        } = self.source()
+        else {
+            return None;
+        };
+        let board = from.replay();
+        let kerfed = board.with_kerf(*kerf);
+        let pieces = match part {
+            Part::Whole => vec![Piece::whole(kerfed)],
+            Part::Piece(_) => kerfed.pieces(),
+        };
+        Some((board, pieces))
     }
 
     /// The board, made again: the new lumber it started as, cut as it was cut. It comes out

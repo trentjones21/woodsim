@@ -835,7 +835,7 @@ pub struct Piece {
 
 impl Piece {
     /// All of `board`, as a piece of itself.
-    fn whole(board: Board) -> Piece {
+    pub(crate) fn whole(board: Board) -> Piece {
         Piece {
             board,
             l: Length::ZERO,

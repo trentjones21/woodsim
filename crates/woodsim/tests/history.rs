@@ -138,6 +138,35 @@ fn the_two_sides_of_a_cut_share_it() {
 }
 
 #[test]
+fn a_piece_knows_everything_its_cut_left() {
+    let stock = one_by_two();
+    let cut = table_saw(fraction(3, 4), inches(1))
+        .rip(&stock, Orientation::default())
+        .cut_apart();
+    let offcut = cut.offcut.as_ref().unwrap();
+    for side in [&cut.piece, offcut] {
+        let (board, pieces) = side.board.origin().cut_from().expect("sawn");
+        assert_eq!(board, stock);
+        // Both sides of the cut, each where it was on the board.
+        assert_eq!(pieces.len(), 2);
+        for piece in [&cut.piece, offcut] {
+            assert!(pieces.iter().any(|other| other.board == piece.board
+                && [other.l, other.w, other.t] == [piece.l, piece.w, piece.t]));
+        }
+    }
+    // A slot that leaves the board in one piece leaves just the board.
+    let Ok(Pass::Kerfed(grooved)) =
+        table_saw(fraction(1, 2), fraction(1, 4)).rip(&stock, Orientation::default())
+    else {
+        panic!("expected a groove");
+    };
+    let (_, pieces) = grooved.origin().cut_from().expect("sawn");
+    assert_eq!(pieces.len(), 1);
+    assert_eq!(pieces[0].board, grooved);
+    assert!(stock.origin().cut_from().is_none());
+}
+
+#[test]
 fn a_slot_that_doesnt_go_through_is_recorded_on_the_whole_board() {
     let Ok(Pass::Kerfed(grooved)) =
         table_saw(fraction(1, 2), fraction(1, 4)).rip(&one_by_two(), Orientation::default())

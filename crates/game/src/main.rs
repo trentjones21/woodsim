@@ -20,6 +20,7 @@ mod plan;
 mod rest;
 mod saved;
 mod scenery;
+mod setup;
 mod shoot;
 mod shop;
 mod studio;

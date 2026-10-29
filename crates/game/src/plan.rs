@@ -38,7 +38,7 @@ const TOWARD_VIEWER: Vec3 = [0.62, -1.0, 0.85];
 /// Where the light comes from, to shade the faces so the drawings read as solid.
 const TOWARD_LIGHT: Vec3 = [-0.45, -0.7, 1.0];
 
-type Vec3 = [f64; 3];
+pub type Vec3 = [f64; 3];
 type Vec2 = [f64; 2];
 
 /// Plans for an assembly, lying as it lay on the bench.
@@ -197,7 +197,7 @@ impl Plan {
                         "cut",
                         self.cutting
                             .describe(listing, members, &self.labels, &step_of),
-                        String::new(),
+                        self.cutting.picture(listing, members, &self.labels),
                     ),
                     Built::Joined(index) => {
                         let step = &self.steps[index];
@@ -323,111 +323,225 @@ impl Plan {
         labeled: &[usize],
         size: (f64, f64),
     ) -> String {
-        let toward = unit(TOWARD_VIEWER);
-        let right = unit(cross([0.0, 0.0, 1.0], toward));
-        let up = cross(toward, right);
         let solids: Vec<Solid> = shown
             .iter()
-            .map(|&member| Solid::of(&self.assembly.members()[member], member))
+            .map(|&member| {
+                let paint = match highlighted.contains(&member) {
+                    true => Paint::Picked,
+                    false => Paint::Wood,
+                };
+                let label = labeled
+                    .contains(&member)
+                    .then(|| self.labels[member].clone());
+                Solid::of(&self.assembly.members()[member], paint, label)
+            })
             .collect();
-        let flat = |p: Vec3| [dot(p, right), -dot(p, up)];
-        let (mut low, mut high) = ([f64::MAX; 2], [f64::MIN; 2]);
-        for solid in &solids {
-            for &corner in &solid.corners {
-                let [x, y] = flat(corner);
-                low = [low[0].min(x), low[1].min(y)];
-                high = [high[0].max(x), high[1].max(y)];
-            }
-        }
-        const MARGIN: f64 = 16.0;
-        let scale = ((size.0 - 2.0 * MARGIN) / (high[0] - low[0]).max(1.0))
-            .min((size.1 - 2.0 * MARGIN) / (high[1] - low[1]).max(1.0));
-        let width = (high[0] - low[0]) * scale + 2.0 * MARGIN;
-        let height = (high[1] - low[1]) * scale + 2.0 * MARGIN;
-        let screen = |p: Vec3| {
-            let [x, y] = flat(p);
-            [(x - low[0]) * scale + MARGIN, (y - low[1]) * scale + MARGIN]
-        };
-        let points = |polygon: &[Vec3]| {
-            polygon
-                .iter()
-                .map(|&p| {
-                    let [x, y] = screen(p);
-                    format!("{x:.1},{y:.1}")
-                })
-                .collect::<Vec<_>>()
-                .join(" ")
-        };
-        let mut svg = format!(
-            "<svg class=\"assembly\" viewBox=\"0 0 {width:.0} {height:.0}\" width=\"{width:.0}\" \
-             height=\"{height:.0}\" xmlns=\"http://www.w3.org/2000/svg\">"
-        );
-        for index in drawing_order(&solids, toward, &flat) {
-            let solid = &solids[index];
-            let lit = highlighted.contains(&solid.member);
-            let mut sides: Vec<&Face> = solid
-                .faces
-                .iter()
-                .filter(|face| !face.flat && dot(face.normal, toward) > 1e-9)
-                .collect();
-            sides.sort_by(|a, b| a.depth(toward).total_cmp(&b.depth(toward)));
-            for face in sides {
-                let _ = write!(
-                    svg,
-                    "<polygon class=\"side\" fill=\"{}\" points=\"{}\"/>",
-                    shade(face.normal, lit),
-                    points(&face.points)
-                );
-            }
-            // The face toward the viewer, top or bottom, is nearest of all the board's: the top
-            // if the board's face up, the bottom if it's been turned over.
-            let top = dot(solid.up, toward) >= 0.0;
-            for face in solid
-                .faces
-                .iter()
-                .filter(|face| face.flat && dot(face.normal, toward) >= 0.0)
-            {
-                let fill = shade(face.normal, lit);
-                let _ = write!(
-                    svg,
-                    "<polygon class=\"flat\" fill=\"{fill}\" stroke=\"{fill}\" points=\"{}\"/>",
-                    points(&face.points)
-                );
-            }
-            let outline = if top {
-                &solid.top_edges
-            } else {
-                &solid.bottom_edges
-            };
-            let path: String = outline
-                .iter()
-                .map(|[a, b]| {
-                    let ([ax, ay], [bx, by]) = (screen(*a), screen(*b));
-                    format!("M{ax:.1} {ay:.1}L{bx:.1} {by:.1}")
-                })
-                .collect();
-            let _ = write!(svg, "<path class=\"edge\" d=\"{path}\"/>");
-        }
-        for solid in solids
+        draw(&solids, &Overlay::default(), "assembly", size)
+    }
+}
+
+/// What a solid in a drawing is painted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Paint {
+    Wood,
+    /// Wood picked out: what goes on at a joint, or what a cut keeps.
+    Picked,
+    /// A saw's table, fence, and stops.
+    Saw,
+    Blade,
+}
+
+/// What's drawn over a drawing, after the solids: dimensions, and lines hidden behind them,
+/// dashed.
+#[derive(Default)]
+pub struct Overlay {
+    pub dimensions: Vec<Dimension>,
+    pub hidden: Vec<[Vec3; 2]>,
+}
+
+/// A dimension: extension lines out from the two places it measures between, `from`, to the
+/// ends of the line it's drawn on, `to`, and what it measures beside that line.
+pub struct Dimension {
+    pub from: [Vec3; 2],
+    pub to: [Vec3; 2],
+    pub text: String,
+}
+
+/// `solids` drawn from above and to one side, as `TOWARD_VIEWER` looks, nearer ones over
+/// farther ones, each labeled in its middle if it has a label, and `overlay` over them, as an
+/// SVG of `class` fitted into `size` pixels.
+pub fn draw(solids: &[Solid], overlay: &Overlay, class: &str, size: (f64, f64)) -> String {
+    let toward = unit(TOWARD_VIEWER);
+    let right = unit(cross([0.0, 0.0, 1.0], toward));
+    let up = cross(toward, right);
+    let flat = |p: Vec3| [dot(p, right), -dot(p, up)];
+    let (mut low, mut high) = ([f64::MAX; 2], [f64::MIN; 2]);
+    let dimensioned = overlay
+        .dimensions
+        .iter()
+        .flat_map(|dimension| dimension.from.iter().chain(&dimension.to));
+    for &corner in solids
+        .iter()
+        .flat_map(|solid| &solid.corners)
+        .chain(dimensioned)
+    {
+        let [x, y] = flat(corner);
+        low = [low[0].min(x), low[1].min(y)];
+        high = [high[0].max(x), high[1].max(y)];
+    }
+    // Room for a dimension's words past the end of its line, too.
+    let margin = if overlay.dimensions.is_empty() {
+        16.0
+    } else {
+        34.0
+    };
+    let scale = ((size.0 - 2.0 * margin) / (high[0] - low[0]).max(1.0))
+        .min((size.1 - 2.0 * margin) / (high[1] - low[1]).max(1.0));
+    let width = (high[0] - low[0]) * scale + 2.0 * margin;
+    let height = (high[1] - low[1]) * scale + 2.0 * margin;
+    let screen = |p: Vec3| {
+        let [x, y] = flat(p);
+        [(x - low[0]) * scale + margin, (y - low[1]) * scale + margin]
+    };
+    let points = |polygon: &[Vec3]| {
+        polygon
             .iter()
-            .filter(|solid| labeled.contains(&solid.member))
-        {
-            let middle = solid
-                .corners
-                .iter()
-                .fold([0.0; 3], |sum, &p| add(sum, p))
-                .map(|x| x / solid.corners.len() as f64);
-            let [x, y] = screen(middle);
+            .map(|&p| {
+                let [x, y] = screen(p);
+                format!("{x:.1},{y:.1}")
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let lines = |lines: &mut dyn Iterator<Item = [Vec3; 2]>| -> String {
+        lines
+            .map(|[a, b]| {
+                let ([ax, ay], [bx, by]) = (screen(a), screen(b));
+                format!("M{ax:.1} {ay:.1}L{bx:.1} {by:.1}")
+            })
+            .collect()
+    };
+    let mut svg = format!(
+        "<svg class=\"{class}\" viewBox=\"0 0 {width:.0} {height:.0}\" width=\"{width:.0}\" \
+         height=\"{height:.0}\" xmlns=\"http://www.w3.org/2000/svg\">"
+    );
+    for index in drawing_order(solids, toward, &flat) {
+        let solid = &solids[index];
+        let mut sides: Vec<&Face> = solid
+            .faces
+            .iter()
+            .filter(|face| !face.flat && dot(face.normal, toward) > 1e-9)
+            .collect();
+        sides.sort_by(|a, b| a.depth(toward).total_cmp(&b.depth(toward)));
+        for face in sides {
             let _ = write!(
                 svg,
-                "<g class=\"label\"><circle cx=\"{x:.1}\" cy=\"{y:.1}\" r=\"11\"/>\
-                 <text x=\"{x:.1}\" y=\"{y:.1}\">{}</text></g>",
-                self.labels[solid.member]
+                "<polygon class=\"side\" fill=\"{}\" points=\"{}\"/>",
+                shade(face.normal, solid.paint),
+                points(&face.points)
             );
         }
-        svg.push_str("</svg>");
-        svg
+        // The face toward the viewer, top or bottom, is nearest of all the board's: the top
+        // if the board's face up, the bottom if it's been turned over.
+        let top = dot(solid.up, toward) >= 0.0;
+        for face in solid
+            .faces
+            .iter()
+            .filter(|face| face.flat && dot(face.normal, toward) >= 0.0)
+        {
+            let fill = shade(face.normal, solid.paint);
+            let _ = write!(
+                svg,
+                "<polygon class=\"flat\" fill=\"{fill}\" stroke=\"{fill}\" points=\"{}\"/>",
+                points(&face.points)
+            );
+        }
+        let outline = if top {
+            &solid.top_edges
+        } else {
+            &solid.bottom_edges
+        };
+        let path = lines(&mut outline.iter().copied());
+        let _ = write!(svg, "<path class=\"edge\" d=\"{path}\"/>");
     }
+    if !overlay.hidden.is_empty() {
+        let path = lines(&mut overlay.hidden.iter().copied());
+        let _ = write!(svg, "<path class=\"hidden\" d=\"{path}\"/>");
+    }
+    for dimension in &overlay.dimensions {
+        svg.push_str(&dimension_svg(dimension, &screen));
+    }
+    for solid in solids {
+        let Some(label) = &solid.label else {
+            continue;
+        };
+        let middle = solid
+            .corners
+            .iter()
+            .fold([0.0; 3], |sum, &p| add(sum, p))
+            .map(|x| x / solid.corners.len() as f64);
+        let [x, y] = screen(middle);
+        let _ = write!(
+            svg,
+            "<g class=\"label\"><circle cx=\"{x:.1}\" cy=\"{y:.1}\" r=\"11\"/>\
+             <text x=\"{x:.1}\" y=\"{y:.1}\">{label}</text></g>"
+        );
+    }
+    svg.push_str("</svg>");
+    svg
+}
+
+/// A dimension on the page, as `screen` puts each point: its extension lines, a little past
+/// the line it's drawn on, the line, with a tick across each end, and its words beside the
+/// line's middle, away from what it measures.
+fn dimension_svg(dimension: &Dimension, screen: &dyn Fn(Vec3) -> Vec2) -> String {
+    let [from, to] = [dimension.from, dimension.to].map(|ends| ends.map(screen));
+    let mut path = String::new();
+    for k in 0..2 {
+        let (a, b) = (from[k], to[k]);
+        let long = (b[0] - a[0]).hypot(b[1] - a[1]);
+        if long > 0.5 {
+            let past = 4.0 / long;
+            let end = [b[0] + (b[0] - a[0]) * past, b[1] + (b[1] - a[1]) * past];
+            let _ = write!(path, "M{:.1} {:.1}L{:.1} {:.1}", a[0], a[1], end[0], end[1]);
+        }
+    }
+    let [a, b] = to;
+    let _ = write!(
+        path,
+        "M{:.1} {:.1}L{:.1} {:.1}M{:.1} {:.1}l8 -8M{:.1} {:.1}l8 -8",
+        a[0],
+        a[1],
+        b[0],
+        b[1],
+        a[0] - 4.0,
+        a[1] + 4.0,
+        b[0] - 4.0,
+        b[1] + 4.0
+    );
+    // Out from the middle of the line, away from where it measures, past the ticks.
+    let middle = [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0];
+    let measured = [
+        (from[0][0] + from[1][0]) / 2.0,
+        (from[0][1] + from[1][1]) / 2.0,
+    ];
+    let along = [b[0] - a[0], b[1] - a[1]];
+    let size = along[0].hypot(along[1]).max(1e-9);
+    let mut out = [-along[1] / size, along[0] / size];
+    if out[0] * (middle[0] - measured[0]) + out[1] * (middle[1] - measured[1]) < 0.0 {
+        out = [-out[0], -out[1]];
+    }
+    let (x, y) = (middle[0] + out[0] * 12.0, middle[1] + out[1] * 12.0);
+    let anchor = match out[0] {
+        x if x > 0.5 => "start",
+        x if x < -0.5 => "end",
+        _ => "middle",
+    };
+    format!(
+        "<g class=\"dimension\"><path d=\"{path}\"/><text x=\"{x:.1}\" y=\"{y:.1}\" \
+         text-anchor=\"{anchor}\" dominant-baseline=\"middle\">{}</text></g>",
+        dimension.text
+    )
 }
 
 /// The joints in the order they went together, a step for each that brought two parts (or
@@ -617,9 +731,11 @@ fn span(points: &[Vec3], direction: Vec3) -> (f64, f64) {
     })
 }
 
-/// A member as the drawings see it: its faces and corners, in its assembly, in nanometers.
-struct Solid {
-    member: usize,
+/// Something solid as the drawings see it: its faces and corners, in nanometers, how it's
+/// painted, and what it's labeled, if anything. A member of an assembly, or a part of a saw.
+pub struct Solid {
+    paint: Paint,
+    label: Option<String>,
     /// Which way its top faces.
     up: Vec3,
     faces: Vec<Face>,
@@ -633,7 +749,8 @@ struct Solid {
 struct Face {
     points: Vec<Vec3>,
     normal: Vec3,
-    /// Whether it's the board's top or bottom, rather than a side.
+    /// Whether it's the board's top or bottom, rather than a side: drawn without a line around
+    /// it, its outline drawn over it instead.
     flat: bool,
 }
 
@@ -645,7 +762,7 @@ impl Face {
 }
 
 impl Solid {
-    fn of(member: &Member, index: usize) -> Solid {
+    pub fn of(member: &Member, paint: Paint, label: Option<String>) -> Solid {
         let mut faces = Vec::new();
         let (mut top_edges, mut bottom_edges) = (Vec::new(), Vec::new());
         let thickness = member.board.thickness();
@@ -683,13 +800,74 @@ impl Solid {
             .flat_map(|face| face.points.iter().copied())
             .collect();
         Solid {
-            member: index,
+            paint,
+            label,
             up: member.axes()[2],
             faces,
             corners,
             top_edges,
             bottom_edges,
         }
+    }
+
+    /// A convex solid with `faces`, each a polygon in nanometers, going around either way: a part
+    /// of a saw. `outline`, if it has one, is drawn over its faces in place of a line around each,
+    /// so a solid cut in pieces doesn't show where.
+    pub fn convex(faces: Vec<Vec<Vec3>>, paint: Paint, outline: Option<Vec<[Vec3; 2]>>) -> Solid {
+        let corners: Vec<Vec3> = faces.iter().flatten().copied().collect();
+        let middle = corners
+            .iter()
+            .fold([0.0; 3], |sum, &p| add(sum, p))
+            .map(|x| x / corners.len() as f64);
+        let faces = faces
+            .into_iter()
+            .map(|mut points| {
+                // Newell's normal, turned out of the solid.
+                let n = points.len();
+                let mut normal = [0.0; 3];
+                for i in 0..n {
+                    let (a, b) = (points[i], points[(i + 1) % n]);
+                    normal = add(
+                        normal,
+                        [
+                            (a[1] - b[1]) * (a[2] + b[2]),
+                            (a[2] - b[2]) * (a[0] + b[0]),
+                            (a[0] - b[0]) * (a[1] + b[1]),
+                        ],
+                    );
+                }
+                let mut normal = unit(normal);
+                if dot(normal, add(points[0], scaled(middle, -1.0))) < 0.0 {
+                    normal = scaled(normal, -1.0);
+                    points.reverse();
+                }
+                Face {
+                    points,
+                    normal,
+                    flat: outline.is_some(),
+                }
+            })
+            .collect();
+        let edges = outline.unwrap_or_default();
+        Solid {
+            paint,
+            label: None,
+            up: [0.0, 0.0, 1.0],
+            faces,
+            corners,
+            top_edges: edges.clone(),
+            bottom_edges: edges,
+        }
+    }
+
+    #[cfg(test)]
+    pub fn paint(&self) -> Paint {
+        self.paint
+    }
+
+    #[cfg(test)]
+    pub fn corners(&self) -> &[Vec3] {
+        &self.corners
     }
 
     /// Whether `other` is in front of this one as seen from `toward`, if a plane through one
@@ -780,13 +958,14 @@ fn drawing_order(solids: &[Solid], toward: Vec3, flat: &dyn Fn(Vec3) -> Vec2) ->
 }
 
 /// The paint for a face turned `normal`: lit by the light over the viewer's shoulder, warm if
-/// it's picked out.
-fn shade(normal: Vec3, lit: bool) -> String {
+/// it's picked out, gray if it's the saw.
+fn shade(normal: Vec3, paint: Paint) -> String {
     let light = 0.74 + 0.26 * dot(normal, unit(TOWARD_LIGHT)).max(0.0);
-    let base = if lit {
-        [1.0, 0.8, 0.55]
-    } else {
-        [1.0, 1.0, 1.0]
+    let base = match paint {
+        Paint::Wood => [1.0, 1.0, 1.0],
+        Paint::Picked => [1.0, 0.8, 0.55],
+        Paint::Saw => [0.84, 0.86, 0.89],
+        Paint::Blade => [0.6, 0.66, 0.74],
     };
     let [r, g, b] = base.map(|c| (c * light * 255.0).round() as u8);
     format!("#{r:02x}{g:02x}{b:02x}")
@@ -1323,11 +1502,11 @@ pub fn open(path: &Path) -> io::Result<()> {
     command.arg(path).spawn().map(|_| ())
 }
 
-fn dot(a: Vec3, b: Vec3) -> f64 {
+pub fn dot(a: Vec3, b: Vec3) -> f64 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 
-fn cross(a: Vec3, b: Vec3) -> Vec3 {
+pub fn cross(a: Vec3, b: Vec3) -> Vec3 {
     [
         a[1] * b[2] - a[2] * b[1],
         a[2] * b[0] - a[0] * b[2],
@@ -1335,15 +1514,15 @@ fn cross(a: Vec3, b: Vec3) -> Vec3 {
     ]
 }
 
-fn add(a: Vec3, b: Vec3) -> Vec3 {
+pub fn add(a: Vec3, b: Vec3) -> Vec3 {
     [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
 }
 
-fn scaled(v: Vec3, by: f64) -> Vec3 {
+pub fn scaled(v: Vec3, by: f64) -> Vec3 {
     v.map(|x| x * by)
 }
 
-fn unit(v: Vec3) -> Vec3 {
+pub fn unit(v: Vec3) -> Vec3 {
     scaled(v, 1.0 / dot(v, v).sqrt())
 }
 
@@ -1374,8 +1553,10 @@ svg text { font: 12px -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif; f
 .steps .cut .number { background: #c4581a; }
 .steps .what { flex: 1; }
 .steps p { margin: 0; }
-.recipe { margin: 6px 0 0; padding-left: 20px; }
-.recipe li { display: list-item; border: none; padding: 2px 0; }
+.recipe { margin: 6px 0 0; padding: 0; counter-reset: cut; }
+.recipe li { border: none; padding: 2px 0; }
+.recipe li::before { flex: none; counter-increment: cut; content: counter(cut) \".\"; }
+.recipe li span { flex: 1; }
 .steps svg { flex: none; width: 260px; }
 .cut-part { fill: #fbf6ee; stroke: #1d2026; stroke-width: 1.2; stroke-linejoin: round; }
 .stock { stroke: #8a7a62; stroke-width: 1; }
@@ -1383,6 +1564,10 @@ svg text { font: 12px -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif; f
 .side { stroke: #1d2026; stroke-width: 1.2; stroke-linejoin: round; }
 .flat { stroke-width: 0.6; stroke-linejoin: round; }
 .edge { fill: none; stroke: #1d2026; stroke-width: 1.4; stroke-linecap: round; }
+.hidden { fill: none; stroke: #1d2026; stroke-width: 0.8; stroke-dasharray: 3 2; }
+.setup .dimension path { stroke: #c4581a; }
+.setup .dimension text { font-weight: 700; fill: #c4581a; paint-order: stroke; stroke: #fff;
+  stroke-width: 3px; stroke-linejoin: round; }
 .label circle { fill: #fff; stroke: #c4581a; stroke-width: 1.5; }
 .label text { font-weight: 600; font-size: 11px; fill: #c4581a; text-anchor: middle;
   dominant-baseline: central; }
@@ -1743,14 +1928,29 @@ mod tests {
             "<p>Table saw, rip fence at 2-3/8\", blade 1\" high: Rip four 2-3/8\" strips off a \
              new 1x12, 3/4\" x 11-1/4\" x 24\". Keep them for step 2.</p>"
         );
+        // Each cut has its picture beside it.
+        let each = say(1);
+        assert_eq!(each.matches("<svg class=\"setup\"").count(), 2);
         assert_eq!(
-            say(1),
+            words(&each),
             "<p>For each 2-3/8\" strip from step 1, to make A1, A2, A3, and A4:</p>\
              <ol class=\"recipe\">\
-             <li>Miter saw at 45° left, stop at 14-1/4\": Cut it to 14-1/4\".</li>\
-             <li>Miter saw at 45° left, stop at 14-1/4\": Turn it end for end, then cut it to \
-             14-1/4\".</li></ol>"
+             <li><span>Miter saw at 45° left, stop at 14-1/4\": Cut it to 14-1/4\".</span></li>\
+             <li><span>Miter saw at 45° left, stop at 14-1/4\": Turn it end for end, then cut \
+             it to 14-1/4\".</span></li></ol>"
         );
+    }
+
+    /// `html` without its pictures.
+    fn words(html: &str) -> String {
+        let mut words = String::new();
+        let mut rest = html;
+        while let Some(start) = rest.find("<svg") {
+            words.push_str(&rest[..start]);
+            let end = rest[start..].find("</svg>").expect("a whole picture");
+            rest = &rest[start + end + "</svg>".len()..];
+        }
+        words + rest
     }
 
     #[test]
@@ -1791,8 +1991,10 @@ mod tests {
         assert_eq!(page.matches("<figure class=\"part\">").count(), 2);
         assert_eq!(page.matches("<li class=\"cut\">").count(), 4);
         assert_eq!(page.matches("<li class=\"join\">").count(), 3);
-        // A drawing of it all, the board's diagram, the part, and each joint.
-        assert_eq!(page.matches("<svg").count(), 6);
+        // A drawing of it all, the board's diagram, the part, and each joint, and a picture of
+        // each cut but the ones made again, which are with the steps they repeat.
+        assert_eq!(page.matches("<svg").count(), 9);
+        assert_eq!(page.matches("<svg class=\"setup\"").count(), 3);
         // What the rip left on the far side of the blade never went into the frame.
         assert!(!page.contains("2-5/8"), "{page}");
         assert!(page.contains("A4"));
@@ -1985,8 +2187,7 @@ mod tests {
         let solids: Vec<Solid> = assembly
             .members()
             .iter()
-            .enumerate()
-            .map(|(index, member)| Solid::of(member, index))
+            .map(|member| Solid::of(member, Paint::Wood, None))
             .collect();
         let back = if solids[1].depth(toward) < solids[0].depth(toward) {
             1
@@ -2027,7 +2228,7 @@ mod tests {
             add(&mut frame, onto, &piece, miter(&piece, false));
         }
         for (index, member) in frame.members().iter().enumerate() {
-            let solid = Solid::of(member, index);
+            let solid = Solid::of(member, Paint::Wood, None);
             let height = |p: Vec3| dot(p, solid.up);
             let top: Vec<&Face> = solid
                 .faces
@@ -2075,7 +2276,7 @@ mod tests {
             let plan = Plan::of(Assembly::of(board.clone()).moved(over));
             let drawing = plan.drawing(&[0], &[], &[], (300.0, 200.0));
             // Face up or turned over, the face you see is lit from above.
-            let lit = shade([0.0, 0.0, 1.0], false);
+            let lit = shade([0.0, 0.0, 1.0], Paint::Wood);
             assert!(
                 drawing.contains(&format!("class=\"flat\" fill=\"{lit}\"")),
                 "{turns}: {drawing}"

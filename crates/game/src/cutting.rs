@@ -12,6 +12,7 @@ use woodsim::{
 use crate::{
     inventory::LUMBER,
     join::name,
+    setup,
     shop::{describe_kerf, describe_miter, describe_size, measured},
 };
 
@@ -331,6 +332,42 @@ impl Cutting {
             Listing::Again { first, runs } => format!("<p>{}</p>", say.again(first, runs)),
             Listing::EachOf(tails) => say.each_of(tails),
         }
+    }
+
+    /// A picture of a listing's cut on its saw, as SVG: its first cut, with what it keeps
+    /// picked out and the parts it makes labeled; of passes one after another, the piece the
+    /// first takes off. Cuts made again have theirs with the steps they repeat, and the same
+    /// cuts made to several pieces have one beside each cut.
+    pub fn picture(&self, listing: usize, members: &[Member], labels: &[String]) -> String {
+        match &self.listings[listing] {
+            Listing::Cut(cut) => self.picture_of(*cut, members, labels, true, false),
+            Listing::Passes(cuts) => self.picture_of(cuts[0], members, labels, true, true),
+            Listing::Again { .. } | Listing::EachOf(_) => String::new(),
+        }
+    }
+
+    /// A picture of a cut on its saw, with what it keeps picked out (only the measured piece,
+    /// if `measured`), and the parts it made labeled if `labeled`; nothing for a cut through a
+    /// glue-up.
+    fn picture_of(
+        &self,
+        cut: usize,
+        members: &[Member],
+        labels: &[String],
+        labeled: bool,
+        measured: bool,
+    ) -> String {
+        let picked = |out: &Origin, led_to: &[usize]| {
+            if measured && out.side() != Some(Side::Measured) {
+                return None;
+            }
+            let label = finished_as(out, led_to, members)
+                .first()
+                .filter(|_| labeled)
+                .map(|&member| labels[member].clone());
+            Some(label)
+        };
+        setup::picture(&self.cuts[cut], &picked).unwrap_or_default()
     }
 
     /// A short name for a board on its way into the project: the lumber it was, a strip a rip
@@ -678,8 +715,10 @@ impl Say<'_> {
             };
             let _ = write!(
                 html,
-                "<li>{}: {line}.</li>",
-                settings(&self.cutting.cuts[cut])
+                "<li><span>{}: {line}.</span>{}</li>",
+                settings(&self.cutting.cuts[cut]),
+                self.cutting
+                    .picture_of(cut, self.members, self.labels, false, false)
             );
         }
         html.push_str("</ol>");
