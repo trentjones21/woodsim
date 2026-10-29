@@ -4,12 +4,7 @@
 //! each part is and where it goes come from the assembly; how it was cut, from where each board
 //! came from (`cutting`).
 
-use std::{
-    fmt::Write as _,
-    fs, io,
-    path::{Path, PathBuf},
-    process::Command,
-};
+use std::fmt::Write as _;
 
 use woodsim::{
     Angle, Assembly, Board, Edge, Fastener, Joint, Length, Member, Opening, Region, Surface,
@@ -18,11 +13,8 @@ use woodsim::{
 
 use crate::{
     cutting::Cutting,
-    shop::{describe_board, describe_size, measured},
+    words::{describe_board, describe_size, measured},
 };
-
-/// Where plans are saved, from where the game runs.
-pub const FOLDER: &str = "plans";
 
 /// Nanometers in an inch, and in the 64th of one that lengths are rounded to.
 const NM_PER_INCH: f64 = 25_400_000.0;
@@ -1497,33 +1489,6 @@ fn close(a: Vec2, b: Vec2) -> bool {
     (a[0] - b[0]).abs() < TOUCHING && (a[1] - b[1]).abs() < TOUCHING
 }
 
-/// Saves `page` as the next unused `plan-N.html` in `folder`, making the folder if it isn't
-/// there.
-pub fn save(page: &str, folder: &Path) -> io::Result<PathBuf> {
-    fs::create_dir_all(folder)?;
-    let path = (1..)
-        .map(|n| folder.join(format!("plan-{n}.html")))
-        .find(|path| !path.exists())
-        .expect("a free name");
-    fs::write(&path, page)?;
-    Ok(path)
-}
-
-/// Opens a saved page in the browser, to read or print.
-pub fn open(path: &Path) -> io::Result<()> {
-    #[cfg(target_os = "macos")]
-    let mut command = Command::new("open");
-    #[cfg(target_os = "windows")]
-    let mut command = {
-        let mut command = Command::new("cmd");
-        command.args(["/C", "start", ""]);
-        command
-    };
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    let mut command = Command::new("xdg-open");
-    command.arg(path).spawn().map(|_| ())
-}
-
 pub fn dot(a: Vec3, b: Vec3) -> f64 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
@@ -2440,17 +2405,5 @@ mod tests {
                 "{turns}: {drawing}"
             );
         }
-    }
-
-    #[test]
-    fn plans_are_saved_to_the_next_free_page() {
-        let folder = std::env::temp_dir().join(format!("woodshop-plans-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&folder);
-        let first = save("one", &folder).unwrap();
-        let second = save("two", &folder).unwrap();
-        assert_eq!(first.file_name().unwrap(), "plan-1.html");
-        assert_eq!(second.file_name().unwrap(), "plan-2.html");
-        assert_eq!(fs::read_to_string(&first).unwrap(), "one");
-        fs::remove_dir_all(&folder).unwrap();
     }
 }

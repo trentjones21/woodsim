@@ -19,17 +19,16 @@ use bevy::prelude::*;
 use crate::{
     chop::MiterSawStation,
     controls::{Action, Actions},
-    cutting,
     dress::JointerStation,
     feed::TableSawStation,
     hand::{Hand, Workpiece},
-    inventory::{self, Inventory, LUMBER, Shelf, lumber},
+    inventory::{self, Inventory, Shelf, lumber},
     join::{self, BenchStation},
-    plan,
     saved::Saved,
-    shop::{Part, ShopView, describe_board, describe_size},
+    shop::{Part, ShopView},
     thickness::PlanerStation,
 };
+use plans::{LUMBER, cutting, describe_board, describe_size, plan};
 use woodsim::{Lie, Operation, Origin, Side, Source, Tool};
 
 /// Where a piece of wood is.

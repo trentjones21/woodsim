@@ -1,0 +1,9 @@
+[package]
+name = "plans"
+version = "0.1.0"
+description = "Plans to print, drawn up from what woodsim says was cut and put together."
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+woodsim.workspace = true

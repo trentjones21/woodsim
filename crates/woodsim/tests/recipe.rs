@@ -217,6 +217,38 @@ fn a_recipe_that_doesnt_read_says_where() {
     assert!(why.contains("expected one `board` line"), "{why}");
 }
 
+#[test]
+fn a_recipe_says_which_version_it_is_and_reads_without_one() {
+    let board = Recipe {
+        wood: Wood::Board(Board::new(inches(24), inches(3), fraction(3, 4))),
+        saw: None,
+    };
+    let text = board.write();
+    assert_eq!(text.lines().next(), Some("version 1"), "{text}");
+    // Saved before there was a version line, it reads as version 1.
+    let unversioned: String = text
+        .lines()
+        .skip(1)
+        .map(|line| format!("{line}\n"))
+        .collect();
+    assert_eq!(Recipe::read(&unversioned), Ok(board));
+    // Comments can come before it.
+    assert!(Recipe::read(&format!("# a part\n{text}")).is_ok());
+
+    let newer = text.replacen("version 1", "version 2", 1);
+    let why = Recipe::read(&newer).unwrap_err();
+    assert!(
+        why.starts_with("line 1: it's version 2, from a newer woodsim"),
+        "{why}"
+    );
+    let why = Recipe::read(&format!("{unversioned}version 1\n")).unwrap_err();
+    assert!(
+        why.contains("`version` comes before everything else"),
+        "{why}"
+    );
+    assert!(Recipe::read(&text.replacen("version 1", "version 0", 1)).is_err());
+}
+
 proptest! {
     #[test]
     fn any_cuts_read_back_exactly(

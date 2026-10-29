@@ -11,6 +11,7 @@ use bevy::{
     math::{DQuat, DVec2, DVec3},
     prelude::*,
 };
+use plans::{describe_board, describe_cut};
 use woodsim::{
     Assembly, Cut, CutError, GlueUpCut, GlueUpPass, Jointer, Length, Lie, MiterSaw, Motion,
     Operation, Orientation, Pass, Planer, Refusal, Remake, Surface, TableSaw, Unsteady, Wood,
@@ -19,7 +20,7 @@ use woodsim::{
 
 use crate::{
     hand::{Workpiece, describe_glue_up},
-    shop::{Part, Placed, describe_board, describe_cut},
+    shop::{Part, Placed},
 };
 
 /// What a pass of a saw did to what was on it.

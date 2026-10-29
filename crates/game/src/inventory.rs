@@ -10,7 +10,7 @@
 //! cut leaves when you take one side, strips a cut sets loose, and what you put away.
 
 use bevy::{ecs::system::SystemParam, prelude::*};
-use woodsim::Length;
+use plans::{LUMBER, describe_board, describe_size};
 
 use crate::{
     chop::MiterSawStation,
@@ -21,7 +21,7 @@ use crate::{
     join::BenchStation,
     parts::{Entry, Places, Tree, Where},
     saved::Saved,
-    shop::{Part, ShopView, describe_board, describe_size},
+    shop::{Part, ShopView},
     thickness::PlanerStation,
 };
 
@@ -42,45 +42,6 @@ impl Shelf {
         }
     }
 }
-
-/// The lumber the rack stocks: its name, thickness, and width. New boards are 24" long.
-pub const LUMBER: [(&str, Length, Length); 7] = [
-    (
-        "1x3",
-        Length::from_inch_fraction(3, 4),
-        Length::from_inch_fraction(5, 2),
-    ),
-    (
-        "1x4",
-        Length::from_inch_fraction(3, 4),
-        Length::from_inch_fraction(7, 2),
-    ),
-    (
-        "1x6",
-        Length::from_inch_fraction(3, 4),
-        Length::from_inch_fraction(11, 2),
-    ),
-    (
-        "1x8",
-        Length::from_inch_fraction(3, 4),
-        Length::from_inch_fraction(29, 4),
-    ),
-    (
-        "1x10",
-        Length::from_inch_fraction(3, 4),
-        Length::from_inch_fraction(37, 4),
-    ),
-    (
-        "1x12",
-        Length::from_inch_fraction(3, 4),
-        Length::from_inch_fraction(45, 4),
-    ),
-    (
-        "2x4",
-        Length::from_inch_fraction(3, 2),
-        Length::from_inch_fraction(7, 2),
-    ),
-];
 
 /// A new board of the `index`th size of lumber.
 pub fn lumber(index: usize) -> Option<Workpiece> {
@@ -514,7 +475,7 @@ fn use_inventory(
 #[cfg(test)]
 mod tests {
     use bevy::ecs::system::RunSystemOnce;
-    use woodsim::Board;
+    use woodsim::{Board, Length};
 
     use super::*;
 

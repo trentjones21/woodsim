@@ -21,6 +21,7 @@ use bevy::{
     ui::{InteractionDisabled, Pressed},
     ui_widgets::{Activate, Button, ControlOrientation, Scrollbar, ScrollbarThumb},
 };
+use plans::{LUMBER, describe_miter, plan};
 use std::time::Duration;
 use woodsim::Fastener;
 
@@ -35,13 +36,12 @@ use crate::{
     flights::{HandPicture, InventoryButton, LastPress, ListArea, RowOf},
     hand::{self, Hand, Workpiece},
     icons::{Icon, Icons, picture},
-    inventory::{self, Inventory, LUMBER, Shelf},
+    inventory::{self, Inventory, Shelf},
     join::BenchStation,
     parts::{self, DetailLine, Entry, Heading, Kind, Line, Places, Tree, Where, WoodLine},
-    plan,
     saved::Saved,
     shoot::Studio,
-    shop::{HoveredStation, SawView, ShopView, describe_miter},
+    shop::{HoveredStation, SawView, ShopView},
     thickness::PlanerStation,
 };
 

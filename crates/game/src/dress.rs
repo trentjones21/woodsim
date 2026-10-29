@@ -8,13 +8,14 @@
 //! and leans with the fence when it's tilted (`Jointer::leaned`), resting on its lowest edge.
 
 use bevy::prelude::*;
+use plans::{describe_kerf, describe_size, measured};
 use woodsim::{Angle, Axis, CutError, Jointer, Length, Lie, MAX_FENCE_TILT, Orientation, Tool};
 
 use crate::{
     chop::MITER_STOPS,
     hand::Workpiece,
     infeed::{Infeed, Machine},
-    shop::{Placed, describe_kerf, describe_size, measured},
+    shop::Placed,
     work::{self, Choosing, Passed},
 };
 
@@ -183,13 +184,11 @@ impl JointerStation {
                     self.surface_down()
                 );
                 if let Workpiece::Board(board) = &piece {
-                    let shaped: Vec<String> = [
-                        crate::shop::describe_bevels(board),
-                        crate::shop::describe_tapers(board),
-                    ]
-                    .into_iter()
-                    .flatten()
-                    .collect();
+                    let shaped: Vec<String> =
+                        [plans::describe_bevels(board), plans::describe_tapers(board)]
+                            .into_iter()
+                            .flatten()
+                            .collect();
                     if !shaped.is_empty() {
                         words.push_str(&format!(" It's {}.", shaped.join(" and ")));
                     }
@@ -278,10 +277,9 @@ impl JointerStation {
 /// What's on the jointer, for its status: "Board on the jointer: 3/4" x 6" x 24"".
 fn on_the_jointer(work: &Workpiece) -> String {
     match work {
-        Workpiece::Board(board) => format!(
-            "Board on the jointer: {}",
-            crate::shop::describe_board(board)
-        ),
+        Workpiece::Board(board) => {
+            format!("Board on the jointer: {}", plans::describe_board(board))
+        }
         Workpiece::GlueUp(_) => format!("On the jointer: {}", work::describe(work)),
     }
 }

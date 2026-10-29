@@ -8,15 +8,12 @@ use bevy::{
     picking::{PickingSystems, pointer::PointerButton},
     prelude::*,
 };
+use plans::{describe_size, measured};
 use woodsim::{Assembly, Board, Length};
 
 use crate::{
-    chop::MiterSawStation,
-    dress::JointerStation,
-    feed::TableSawStation,
-    join::BenchStation,
-    shop::{ShopView, describe_size, measured},
-    thickness::PlanerStation,
+    chop::MiterSawStation, dress::JointerStation, feed::TableSawStation, join::BenchStation,
+    shop::ShopView, thickness::PlanerStation,
 };
 
 /// Wood to carry or set aside: one board, or boards fastened together.

@@ -12,6 +12,7 @@
 use std::sync::Arc;
 
 use bevy::prelude::*;
+use plans::describe_kerf;
 use woodsim::{
     Angle, Axis, Blade, Board, CutError, Length, MAX_GAUGE, MAX_TILT, Orientation, Recipe, Refusal,
     Remake, Surface, TableSaw, Tool,
@@ -22,7 +23,7 @@ use crate::{
     chop::MITER_STOPS,
     hand::Workpiece,
     inventory::Shelf,
-    shop::{Part, Placed, SawBoards, describe_kerf},
+    shop::{Part, Placed, SawBoards},
     work::{self, Passed, Rest},
 };
 

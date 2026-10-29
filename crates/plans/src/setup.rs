@@ -12,7 +12,7 @@ use woodsim::{Kerf, Length, Lie, Member, Origin, Part, Rotation, Source, Tool, V
 use crate::{
     cutting::CutStep,
     plan::{Dimension, Overlay, Paint, Solid, Vec3, add, cross, dot, draw, scaled, unit},
-    shop::measured,
+    words::measured,
 };
 
 /// Nanometers in an inch.

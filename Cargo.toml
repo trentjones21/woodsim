@@ -9,6 +9,7 @@ rust-version = "1.98"
 [workspace.dependencies]
 bevy = "0.20.0"
 proptest = "1.12.0"
+plans = { path = "crates/plans" }
 woodsim = { path = "crates/woodsim" }
 
 # Bevy's recommended dev settings: optimize dependencies so the game runs smoothly,

@@ -10,13 +10,16 @@
 //! 2^40, by column:
 //!
 //! ```text
+//! version 1
 //! stock s0 609600000 63500000 19050000
 //! pass p0 7 table-saw 254000000 3175000 25400000 25400000 none 0 1500 board 1099511627776 0 0 0 1099511627776 0 0 0 1099511627776 -127000000 736600000
 //! sawn s1 s0 p0 0 -16777216 4495441 ... piece 0 0 0 0 measured
 //! board s1
 //! ```
 //!
-//! `stock` names new lumber: its length, width, and thickness. `pass` names a saw pass: its
+//! `version` comes first: which way of writing wood this is (`Recipe::VERSION`). A recipe
+//! with no `version` line is from before there was one, and reads as version 1; one from a
+//! newer woodsim than this doesn't read. `stock` names new lumber: its length, width, and thickness. `pass` names a saw pass: its
 //! number, then the saw (`table-saw`: blade diameter and kerf, fence, height, the miter gauge's
 //! stop or `none`, its angle, and the tilt; `miter-saw`: blade diameter and kerf, miter, the
 //! furthest it turns, the pivot behind the fence and up, the arm, and the stroke's top and
@@ -59,9 +62,16 @@ pub struct Recipe {
 }
 
 impl Recipe {
+    /// Which way of writing wood `write` writes, and the newest `read` reads. Recipes are kept
+    /// (saved parts, plans put online), so bump it whenever one already written would read
+    /// back differently, as a change to which piece a `sawn` line's number picks out of what
+    /// `Board::pieces` leaves would, and keep reading the versions before it.
+    pub const VERSION: u32 = 1;
+
     /// The recipe as text, every board's history written once and shared as it's shared.
     pub fn write(&self) -> String {
         let mut writer = Writer::default();
+        writer.line(format!("version {}", Recipe::VERSION));
         match &self.wood {
             Wood::Board(board) => {
                 let id = writer.origin(board.origin());
@@ -343,6 +353,8 @@ fn kerf_words(kerf: &Kerf) -> String {
 /// Reads lines one after another, each naming what later ones use.
 #[derive(Default)]
 struct Reader {
+    /// Whether any line's been read, since a `version` line has to come before them all.
+    started: bool,
     origins: HashMap<String, Origin>,
     passes: HashMap<String, Arc<Operation>>,
     board: Option<Board>,
@@ -513,7 +525,24 @@ impl Reader {
 
     fn line(&mut self, line: &str) -> Result<(), String> {
         let mut words = Words(line.split_whitespace());
+        let first = !std::mem::replace(&mut self.started, true);
         match words.word()? {
+            "version" => {
+                let version: u32 = words.number()?;
+                if !first {
+                    return Err("`version` comes before everything else".to_string());
+                }
+                if version > Recipe::VERSION {
+                    return Err(format!(
+                        "it's version {version}, from a newer woodsim than this one, which reads \
+                         up to version {}",
+                        Recipe::VERSION
+                    ));
+                }
+                if version == 0 {
+                    return Err("there's no version 0".to_string());
+                }
+            }
             "stock" => {
                 let id = words.word()?.to_string();
                 let origin = Origin::new_stock(words.length()?, words.length()?, words.length()?);

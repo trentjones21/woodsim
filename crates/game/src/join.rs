@@ -7,6 +7,7 @@
 //! of what's on the bench and where, and puts it into words.
 
 use bevy::{math::DVec3, prelude::*};
+use plans::name;
 use woodsim::{
     Assembly, Board, Contact, Fastener, Length, Mating, Member, Motion, Refusal, Remake, Rotation,
     Surface, slot_bottoms, slot_surfaces, surfaces,
@@ -1011,25 +1012,6 @@ pub fn name_on(board: &Board, surface: Surface) -> &'static str {
         Surface::Slot(plane) if slot_bottoms(board).contains(&plane) => "slot bottom",
         Surface::Slot(_) => "slot side",
         surface => name(surface),
-    }
-}
-
-/// What a board's surface is called: a face, an edge, an end, or a mitered end, any of the
-/// sides beveled, a face that tapers, or a slot (`name_on` says which of its surfaces).
-pub fn name(surface: Surface) -> &'static str {
-    match surface {
-        Surface::Slot(_) => "slot",
-        Surface::Bottom => "bottom face",
-        Surface::Top => "top face",
-        Surface::Side(edge) if edge.tapers() => "tapered face",
-        Surface::Side(edge) if edge.leans() && edge.out.l != 0 && edge.out.w != 0 => {
-            "beveled miter"
-        }
-        Surface::Side(edge) if edge.leans() && edge.out.l != 0 => "beveled end",
-        Surface::Side(edge) if edge.leans() => "beveled edge",
-        Surface::Side(edge) if edge.out.l != 0 && edge.out.w != 0 => "mitered end",
-        Surface::Side(edge) if edge.out.l != 0 => "end",
-        Surface::Side(_) => "edge",
     }
 }
 

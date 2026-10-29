@@ -2,7 +2,12 @@
 //! they're fastened together. The surface under the pointer lights up, and clicking picks it:
 //! first the surface that moves, then the one it goes against.
 
-use std::{f32::consts::PI, path::Path};
+use std::{
+    f32::consts::PI,
+    fs, io,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 use bevy::{
     asset::RenderAssetUsages,
@@ -17,6 +22,7 @@ use bevy::{
     prelude::*,
     render::render_resource::PrimitiveTopology,
 };
+use plans::Plan;
 use woodsim::{Board, Rotation, Surface, exposed};
 
 use crate::{
@@ -25,7 +31,6 @@ use crate::{
     hud::OnHud,
     join::{BenchStation, HALF_TOP, Spot, assembly_point, surface_at},
     meshes::{Grain, board_mesh, lumber_mesh},
-    plan::{self, Plan},
     shoot::Studio,
     shop::{
         Block, Placed, Shape, ShopAssets, ShopCamera, ShopView, inches, rounded_block, station_part,
@@ -44,6 +49,9 @@ pub const BOUNDS: Block = Block {
 };
 
 const TOP_THICKNESS: f32 = inches(1.75);
+
+/// Where plans are saved, from where the game runs.
+const PLANS: &str = "plans";
 
 /// How far the sheet that lights up a surface stands off it, so it shows over the wood, and
 /// how far in from the surface's edges it stops, so it never pokes out past them.
@@ -397,8 +405,8 @@ fn draw_up_plans(bench: &mut BenchStation, under_pointer: Option<usize>) {
         return;
     };
     let page = Plan::of(assembly).page();
-    let note = match plan::save(&page, Path::new(plan::FOLDER)) {
-        Ok(path) => match plan::open(&path) {
+    let note = match save_plans(&page, Path::new(PLANS)) {
+        Ok(path) => match open_in_browser(&path) {
             Ok(()) => format!("Drew up plans in {}, opened to print.", path.display()),
             Err(error) => format!(
                 "Drew up plans in {}, but couldn't open them: {error}.",
@@ -408,6 +416,33 @@ fn draw_up_plans(bench: &mut BenchStation, under_pointer: Option<usize>) {
         Err(error) => format!("Couldn't save the plans: {error}."),
     };
     bench.note(note);
+}
+
+/// Saves `page` as the next unused `plan-N.html` in `folder`, making the folder if it isn't
+/// there.
+fn save_plans(page: &str, folder: &Path) -> io::Result<PathBuf> {
+    fs::create_dir_all(folder)?;
+    let path = (1..)
+        .map(|n| folder.join(format!("plan-{n}.html")))
+        .find(|path| !path.exists())
+        .expect("a free name");
+    fs::write(&path, page)?;
+    Ok(path)
+}
+
+/// Opens a saved page in the browser, to read or print.
+fn open_in_browser(path: &Path) -> io::Result<()> {
+    #[cfg(target_os = "macos")]
+    let mut command = Command::new("open");
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut command = Command::new("cmd");
+        command.args(["/C", "start", ""]);
+        command
+    };
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let mut command = Command::new("xdg-open");
+    command.arg(path).spawn().map(|_| ())
 }
 
 /// A part drawn on the bench, with what `draw_bench` keeps up to date on it.
@@ -795,6 +830,18 @@ pub fn reading(bench: &BenchStation) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plans_are_saved_to_the_next_free_page() {
+        let folder = std::env::temp_dir().join(format!("woodshop-plans-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&folder);
+        let first = save_plans("one", &folder).unwrap();
+        let second = save_plans("two", &folder).unwrap();
+        assert_eq!(first.file_name().unwrap(), "plan-1.html");
+        assert_eq!(second.file_name().unwrap(), "plan-2.html");
+        assert_eq!(fs::read_to_string(&first).unwrap(), "one");
+        fs::remove_dir_all(&folder).unwrap();
+    }
 
     #[test]
     fn arrows_slide_the_way_the_joint_runs_on_screen() {

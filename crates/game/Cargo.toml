@@ -7,6 +7,7 @@ rust-version.workspace = true
 
 [dependencies]
 bevy.workspace = true
+plans.workspace = true
 woodsim.workspace = true
 
 [features]

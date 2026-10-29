@@ -6,12 +6,13 @@
 //! it, and y = 0 is the bed's top, where the wood rests.
 
 use bevy::prelude::*;
+use plans::{describe_board, describe_kerf, describe_size, measured};
 use woodsim::{CutError, Length, Lie, Orientation, Planer, Tool};
 
 use crate::{
     hand::Workpiece,
     infeed::{Infeed, Machine},
-    shop::{Placed, describe_board, describe_kerf, describe_size, inches, measured},
+    shop::{Placed, inches},
     work::{self, Choosing, Passed},
 };
 

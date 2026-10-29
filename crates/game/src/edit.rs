@@ -13,6 +13,7 @@
 use std::sync::Arc;
 
 use bevy::{ecs::system::SystemParam, prelude::*};
+use plans::{describe_miter, measured};
 use woodsim::{
     Angle, Length, MAX_FENCE_TILT, MAX_GAUGE, MAX_TILT, Operation, Refusal, Remake, Tool,
 };
@@ -28,7 +29,7 @@ use crate::{
     join::BenchStation,
     parts::{Detail, Entry, Places, Tree, Where, through_glue_up},
     saved::Saved,
-    shop::{ShopView, describe_miter, measured},
+    shop::ShopView,
     thickness::PlanerStation,
     work,
 };

@@ -12,6 +12,7 @@
 use std::{f32::consts::FRAC_PI_2, sync::Arc};
 
 use bevy::prelude::*;
+use plans::describe_kerf;
 use woodsim::{
     Angle, CutError, Length, MiterSaw, Orientation, Recipe, Refusal, Remake, Surface, Tool,
 };
@@ -21,7 +22,7 @@ use crate::{
     feed::shelf,
     hand::Workpiece,
     inventory::Shelf,
-    shop::{Part, SawBoards, describe_kerf},
+    shop::{Part, SawBoards},
     work::{self, Parted, Passed, Rest},
 };
 

@@ -10,11 +10,48 @@ use woodsim::{
 };
 
 use crate::{
-    inventory::LUMBER,
-    join::name,
     setup,
-    shop::{describe_kerf, describe_miter, describe_size, measured},
+    words::{describe_kerf, describe_miter, describe_size, measured, name},
 };
+
+/// The lumber the rack stocks: its name, thickness, and width. New boards are 24" long.
+pub const LUMBER: [(&str, Length, Length); 7] = [
+    (
+        "1x3",
+        Length::from_inch_fraction(3, 4),
+        Length::from_inch_fraction(5, 2),
+    ),
+    (
+        "1x4",
+        Length::from_inch_fraction(3, 4),
+        Length::from_inch_fraction(7, 2),
+    ),
+    (
+        "1x6",
+        Length::from_inch_fraction(3, 4),
+        Length::from_inch_fraction(11, 2),
+    ),
+    (
+        "1x8",
+        Length::from_inch_fraction(3, 4),
+        Length::from_inch_fraction(29, 4),
+    ),
+    (
+        "1x10",
+        Length::from_inch_fraction(3, 4),
+        Length::from_inch_fraction(37, 4),
+    ),
+    (
+        "1x12",
+        Length::from_inch_fraction(3, 4),
+        Length::from_inch_fraction(45, 4),
+    ),
+    (
+        "2x4",
+        Length::from_inch_fraction(3, 2),
+        Length::from_inch_fraction(7, 2),
+    ),
+];
 
 /// The lumber a project came out of, and the cuts that made its parts.
 pub struct Cutting {
