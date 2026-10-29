@@ -7,7 +7,7 @@ use std::{
 use crate::{
     Angle, Axis, Kerf, Length,
     face::{Direction, Edge, Region, merge_all},
-    history::{Operation, Origin, Part},
+    history::{Operation, Origin, Part, Side},
     kerf::Across,
 };
 
@@ -91,7 +91,14 @@ impl Board {
     pub(crate) fn sawn(&self, kerf: Kerf, operation: &Arc<Operation>) -> (Board, Vec<Piece>) {
         let mut kerfed = self.with_kerf(kerf);
         let zero = [Length::ZERO; 3];
-        kerfed.origin = Origin::sawn(operation, &self.origin, kerf, Part::Whole, zero);
+        kerfed.origin = Origin::sawn(
+            operation,
+            &self.origin,
+            kerf,
+            Part::Whole,
+            zero,
+            Side::Whole,
+        );
         let mut pieces = kerfed.pieces();
         if let [whole] = pieces.as_mut_slice()
             && whole.board == kerfed
@@ -101,9 +108,16 @@ impl Board {
         }
         for (n, piece) in pieces.iter_mut().enumerate() {
             let at = [piece.l, piece.w, piece.t];
-            piece.board.origin = Origin::sawn(operation, &self.origin, kerf, Part::Piece(n), at);
+            // Which side of the cut each piece is on, the saw sorts out.
+            let part = Part::Piece(n);
+            piece.board.origin = Origin::sawn(operation, &self.origin, kerf, part, at, Side::Loose);
         }
         (kerfed, pieces)
+    }
+
+    /// Notes which side of the cut that made it the board was on.
+    pub(crate) fn set_side(&mut self, side: Side) {
+        self.origin = self.origin.on_side(side);
     }
 
     /// How far the board reaches along its length: from long point to long point, if its ends

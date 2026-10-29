@@ -3,7 +3,7 @@ use std::fmt;
 use crate::{
     Angle, Assembly, Axis, Board, Direction, Kerf, Length, Orientation, Piece, Rotation,
     glue_up::{GlueUpPass, Laid, Path},
-    history::{Lie, Operation, Tool},
+    history::{Lie, Operation, Side, Tool},
     kerf::Across,
 };
 
@@ -614,9 +614,13 @@ fn sort_out(
     if near.is_empty() {
         std::mem::swap(&mut near, &mut far);
     }
-    let piece = take_biggest(&mut near, toward_fence).expect("a cut leaves some wood");
-    let offcut = take_biggest(&mut far, toward_fence);
+    let mut piece = take_biggest(&mut near, toward_fence).expect("a cut leaves some wood");
+    let mut offcut = take_biggest(&mut far, toward_fence);
     near.append(&mut far);
+    piece.board.set_side(Side::Measured);
+    if let Some(offcut) = &mut offcut {
+        offcut.board.set_side(Side::Offcut);
+    }
     Cut {
         piece,
         offcut,

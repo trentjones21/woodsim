@@ -10,7 +10,7 @@
 use crate::{
     Assembly, CutError, Direction, Length, Rotation,
     assembly::{Joint, Member, Surface, outline},
-    history::{Operation, Tool},
+    history::{Operation, Side, Tool},
     kerf::{Across, Kerf},
     saw::scaled,
 };
@@ -236,6 +236,9 @@ impl<'a> Laid<'a> {
         let piece = take_biggest(&mut near).expect("a cut leaves some wood");
         let offcut = take_biggest(&mut far);
         near.append(&mut far);
+        // Each board the blade cut is on the side of the cut its part of the glue-up is.
+        let piece = on_side(piece, Side::Measured);
+        let offcut = offcut.map(|offcut| on_side(offcut, Side::Offcut));
         GlueUpPass::Cut(GlueUpCut {
             piece,
             offcut,
@@ -369,6 +372,23 @@ fn size(part: &Assembly) -> i128 {
                 .product::<i128>()
         })
         .sum()
+}
+
+/// `part` with each board the cut made noted as on `side` of it. Boards the blade didn't touch
+/// keep where they came from.
+fn on_side(part: Assembly, side: Side) -> Assembly {
+    let members = part
+        .members()
+        .iter()
+        .map(|member| {
+            let mut member = member.clone();
+            if member.board.origin().side() == Some(Side::Loose) {
+                member.board.set_side(side);
+            }
+            member
+        })
+        .collect();
+    Assembly::from_parts(members, part.joints().to_vec())
 }
 
 /// Removes and returns the biggest part.

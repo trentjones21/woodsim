@@ -49,8 +49,8 @@ pub struct Plan {
     cutting: Cutting,
 }
 
-/// A step of building it, in the order things were done: a cut, or parts going together, by
-/// their place in `Cutting::cuts` and `Plan::steps`.
+/// A step of building it, in the order things were done: cutting, or parts going together, by
+/// their place in `Cutting::listings` and `Plan::steps`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Built {
     Cut(usize),
@@ -112,12 +112,8 @@ impl Plan {
 
     /// Every cut and every joint, in the order they were made.
     fn build_steps(&self) -> Vec<Built> {
-        let mut built: Vec<(u64, Built)> = self
-            .cutting
-            .cuts
-            .iter()
-            .enumerate()
-            .map(|(index, cut)| (cut.number, Built::Cut(index)))
+        let mut built: Vec<(u64, Built)> = (0..self.cutting.listings.len())
+            .map(|listing| (self.cutting.number(listing), Built::Cut(listing)))
             .chain(
                 self.steps
                     .iter()
@@ -186,17 +182,18 @@ impl Plan {
                  to fit.</p>\n<ol class=\"steps\">\n",
             );
             // The number each cut has on the page, for steps that keep a piece for a later one.
-            let step_of = |cut: usize| {
+            let step_of = |listing: usize| {
                 built
                     .iter()
-                    .position(|&step| step == Built::Cut(cut))
+                    .position(|&step| step == Built::Cut(listing))
                     .map_or(0, |at| at + 1)
             };
             for (number, step) in built.iter().enumerate() {
                 let (class, words, drawing) = match *step {
-                    Built::Cut(cut) => (
+                    Built::Cut(listing) => (
                         "cut",
-                        self.cutting.describe(cut, members, &self.labels, &step_of),
+                        self.cutting
+                            .describe(listing, members, &self.labels, &step_of),
                         String::new(),
                     ),
                     Built::Joined(index) => {
@@ -207,7 +204,7 @@ impl Plan {
                             .collect();
                         (
                             "join",
-                            self.describe_step(step),
+                            format!("<p>{}</p>", self.describe_step(step)),
                             self.drawing(&step.together, &step.added, &named, (260.0, 170.0)),
                         )
                     }
@@ -215,7 +212,7 @@ impl Plan {
                 let _ = writeln!(
                     page,
                     "<li class=\"{class}\"><span class=\"number\">{}</span>\
-                     <p>{words}</p>{drawing}</li>",
+                     <div class=\"what\">{words}</div>{drawing}</li>",
                     number + 1
                 );
             }
@@ -379,12 +376,13 @@ impl Plan {
                     points(&face.points)
                 );
             }
-            // The face toward the viewer, top or bottom, is nearest of all the board's.
+            // The face toward the viewer, top or bottom, is nearest of all the board's: the top
+            // if the board's face up, the bottom if it's been turned over.
             let top = dot(solid.up, toward) >= 0.0;
             for face in solid
                 .faces
                 .iter()
-                .filter(|face| face.flat && (dot(face.normal, toward) >= 0.0) == top)
+                .filter(|face| face.flat && dot(face.normal, toward) >= 0.0)
             {
                 let fill = shade(face.normal, lit);
                 let _ = write!(
@@ -1202,7 +1200,10 @@ svg text { font: 12px -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif; f
 .steps .number { flex: none; width: 28px; height: 28px; border-radius: 14px; background: #1d2026;
   color: #fff; font-weight: 700; display: flex; align-items: center; justify-content: center; }
 .steps .cut .number { background: #c4581a; }
-.steps p { margin: 0; flex: 1; }
+.steps .what { flex: 1; }
+.steps p { margin: 0; }
+.recipe { margin: 6px 0 0; padding-left: 20px; }
+.recipe li { display: list-item; border: none; padding: 2px 0; }
 .steps svg { flex: none; width: 260px; }
 .cut-part { fill: #fbf6ee; stroke: #1d2026; stroke-width: 1.2; stroke-linejoin: round; }
 .stock { stroke: #8a7a62; stroke-width: 1; }
@@ -1451,41 +1452,121 @@ mod tests {
     }
 
     #[test]
-    fn a_frame_cut_from_one_board_buys_it_and_builds_it_cut_by_cut() {
+    fn a_frame_cut_from_one_board_buys_it_and_repeats_the_cuts_for_each_piece() {
         let plan = Plan::of(frame_from_a_one_by_four());
         assert_eq!(plan.cutting.stock.len(), 1);
         assert_eq!(plan.cutting.stock[0].members, [0, 1, 2, 3]);
-        // The rip, then a trim and a cut for each piece; then three joints.
+        // The rip, the first piece's trim and cut, the same again for the rest; then three
+        // joints.
         let built = plan.build_steps();
-        assert_eq!(built.len(), 12);
-        assert!(built[..9].iter().all(|step| matches!(step, Built::Cut(_))));
+        assert_eq!(built.len(), 7);
+        assert!(built[..4].iter().all(|step| matches!(step, Built::Cut(_))));
         assert!(
-            built[9..]
+            built[4..]
                 .iter()
                 .all(|step| matches!(step, Built::Joined(_)))
         );
-        let step_of = |cut: usize| cut + 1;
         let members = plan.assembly.members();
-        let say = |cut: usize| plan.cutting.describe(cut, members, &plan.labels, &step_of);
+        let say = |listing: usize| {
+            plan.cutting
+                .describe(listing, members, &plan.labels, &|listing| listing + 1)
+        };
         assert_eq!(
             say(0),
-            "Table saw, rip fence at 3/4\", blade 1\" high: Rip a new 1x4, 3/4\" x 3-1/2\" x \
-             24\". Keep the 3/4\" strip for step 2."
+            "<p>Table saw, rip fence at 3/4\", blade 1\" high: Rip a new 1x4, 3/4\" x 3-1/2\" x \
+             24\". Keep the 3/4\" strip for step 2.</p>"
         );
         assert_eq!(
             say(1),
-            "Miter saw at 45° left, stop at 1\": Trim the end off the 3/4\" strip from step 1. \
-             Keep the rest of the 3/4\" strip for step 3."
+            "<p>Miter saw at 45° left, stop at 1\": Trim the end off the 3/4\" strip from step \
+             1. Keep the rest of the 3/4\" strip for step 3.</p>"
         );
         assert_eq!(
             say(2),
-            "Miter saw at 45° right, stop at 4\": Cut A1 off the rest of the 3/4\" strip from \
-             step 2. Keep the rest of the 3/4\" strip for step 4."
+            "<p>Miter saw at 45° right, stop at 4\": Cut A1 off the rest of the 3/4\" strip \
+             from step 2. Keep the rest of the 3/4\" strip for step 4.</p>"
         );
         assert_eq!(
-            say(8),
-            "Miter saw at 45° right, stop at 4\": Cut A4 off the rest of the 3/4\" strip from \
-             step 8."
+            say(3),
+            "<p>Repeat steps 2 and 3 three more times on the rest of the 3/4\" strip, making A2, \
+             A3, and A4.</p>"
+        );
+    }
+
+    /// Four pieces made alike: a 1x12 ripped into four 2-3/8" strips, one after another, then
+    /// each strip cut to 14-1/4" at 45°, turned end for end, and cut to 14-1/4" at 45° again,
+    /// mitering both ends; the four glued up.
+    fn frame_from_a_one_by_twelve() -> Assembly {
+        let table_saw = woodsim::TableSaw {
+            blade: woodsim::Blade {
+                diameter: Length::from_inches(10),
+                kerf: woodsim::Blade::FULL_KERF,
+            },
+            fence: Length::from_inch_fraction(19, 8),
+            height: Length::from_inches(1),
+            miter_gauge: None,
+        };
+        let mut rest = Board::new(
+            Length::from_inches(24),
+            Length::from_inch_fraction(45, 4),
+            Length::from_inch_fraction(3, 4),
+        );
+        let mut strips = Vec::new();
+        for _ in 0..4 {
+            let Ok(Pass::Cut(rip)) = table_saw.rip(&rest, Orientation::default()) else {
+                panic!("expected a strip ripped off");
+            };
+            strips.push(rip.piece.board);
+            rest = rip.offcut.unwrap().board;
+        }
+        let saw = MiterSaw {
+            miter: Angle::from_degrees(-45),
+            ..MiterSaw::twelve_inch()
+        };
+        let length = Length::from_inch_fraction(57, 4);
+        let pieces: Vec<Board> = strips
+            .iter()
+            .map(|strip| {
+                let Ok(Pass::Cut(first)) = saw.crosscut(strip, Orientation::default(), length)
+                else {
+                    panic!("expected the strip cut to length");
+                };
+                let turned = Orientation::default().turned_left().turned_left();
+                let Ok(Pass::Cut(second)) = saw.crosscut(&first.piece.board, turned, length) else {
+                    panic!("expected the other end cut");
+                };
+                second.piece.board
+            })
+            .collect();
+        // Stacked, just to put them together: the plan's cutting doesn't care how.
+        let mut glue_up = Assembly::of(pieces[0].clone());
+        for (last, piece) in pieces.iter().enumerate().skip(1).map(|(k, p)| (k - 1, p)) {
+            add(&mut glue_up, (last, Surface::Top), piece, Surface::Bottom);
+        }
+        glue_up
+    }
+
+    #[test]
+    fn strips_ripped_one_after_another_and_cut_alike_are_two_steps() {
+        let plan = Plan::of(frame_from_a_one_by_twelve());
+        assert_eq!(plan.cutting.listings.len(), 2);
+        let members = plan.assembly.members();
+        let say = |listing: usize| {
+            plan.cutting
+                .describe(listing, members, &plan.labels, &|listing| listing + 1)
+        };
+        assert_eq!(
+            say(0),
+            "<p>Table saw, rip fence at 2-3/8\", blade 1\" high: Rip four 2-3/8\" strips off a \
+             new 1x12, 3/4\" x 11-1/4\" x 24\". Keep them for step 2.</p>"
+        );
+        assert_eq!(
+            say(1),
+            "<p>For each 2-3/8\" strip from step 1, to make A1, A2, A3, and A4:</p>\
+             <ol class=\"recipe\">\
+             <li>Miter saw at 45° left, stop at 14-1/4\": Cut it to 14-1/4\".</li>\
+             <li>Miter saw at 45° left, stop at 14-1/4\": Turn it end for end, then cut it to \
+             14-1/4\".</li></ol>"
         );
     }
 
@@ -1512,7 +1593,7 @@ mod tests {
         assert_eq!(
             plan.cutting
                 .describe(0, plan.assembly.members(), &plan.labels, &|cut| cut + 1),
-            "Miter saw, square, stop at 10\": Cut A off a new 1x4, 3/4\" x 3-1/2\" x 24\"."
+            "<p>Miter saw, square, stop at 10\": Cut A off a new 1x4, 3/4\" x 3-1/2\" x 24\".</p>"
         );
     }
 
@@ -1525,7 +1606,7 @@ mod tests {
         assert!(page.contains("<td>1x4, 3/4\" x 3-1/2\" x 24\"</td><td>1</td>"));
         // The part, and the board it comes out of.
         assert_eq!(page.matches("<figure class=\"part\">").count(), 2);
-        assert_eq!(page.matches("<li class=\"cut\">").count(), 9);
+        assert_eq!(page.matches("<li class=\"cut\">").count(), 4);
         assert_eq!(page.matches("<li class=\"join\">").count(), 3);
         // A drawing of it all, the board's diagram, the part, and each joint.
         assert_eq!(page.matches("<svg").count(), 6);
@@ -1573,6 +1654,29 @@ mod tests {
         };
         let flat = |p: Vec3| [p[0] - p[1], p[2] + p[1]];
         assert_eq!(drawing_order(&solids, toward, &flat)[0], back);
+    }
+
+    #[test]
+    fn a_part_turned_over_is_drawn_with_the_face_toward_you_lit() {
+        let board = Board::new(
+            Length::from_inches(10),
+            Length::from_inches(4),
+            Length::from_inch_fraction(3, 4),
+        );
+        for turns in [0, 2] {
+            let over = woodsim::Motion {
+                rotation: woodsim::Rotation::quarter_turns(0, turns),
+                shift: [Length::ZERO; 3],
+            };
+            let plan = Plan::of(Assembly::of(board.clone()).moved(over));
+            let drawing = plan.drawing(&[0], &[], &[], (300.0, 200.0));
+            // Face up or turned over, the face you see is lit from above.
+            let lit = shade([0.0, 0.0, 1.0], false);
+            assert!(
+                drawing.contains(&format!("class=\"flat\" fill=\"{lit}\"")),
+                "{turns}: {drawing}"
+            );
+        }
     }
 
     #[test]

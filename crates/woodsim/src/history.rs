@@ -41,14 +41,30 @@ pub enum Source {
     },
     /// Sawn from the board `from` says: `operation` cut `kerf` into it, which left it in one
     /// piece with a slot in it, or split it, and this is one of the pieces, with its corner at
-    /// `at` on that board, along its length, width, and thickness.
+    /// `at` on that board, along its length, width, and thickness, on the `side` of the cut it
+    /// was.
     Sawn {
         operation: Arc<Operation>,
         from: Origin,
         kerf: Kerf,
         part: Part,
         at: [Length; 3],
+        side: Side,
     },
+}
+
+/// Which side of a cut a piece was on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Side {
+    /// The board with a slot in it, still in one piece.
+    Whole,
+    /// The measured piece: against the fence, or the gauge's or the miter saw's stop, the size
+    /// the saw was set to.
+    Measured,
+    /// What was on the blade's other side.
+    Offcut,
+    /// A strip a slot already in the board set loose.
+    Loose,
 }
 
 /// Which of what a cut left a board is.
@@ -121,6 +137,7 @@ impl Origin {
         kerf: Kerf,
         part: Part,
         at: [Length; 3],
+        side: Side,
     ) -> Origin {
         Origin(Arc::new(Source::Sawn {
             operation: Arc::clone(operation),
@@ -128,7 +145,31 @@ impl Origin {
             kerf,
             part,
             at,
+            side,
         }))
+    }
+
+    /// The same, but on `side` of the cut: once the saw has sorted out which piece is which.
+    pub(crate) fn on_side(&self, side: Side) -> Origin {
+        match self.source() {
+            Source::Stock { .. } => self.clone(),
+            Source::Sawn {
+                operation,
+                from,
+                kerf,
+                part,
+                at,
+                ..
+            } => Origin::sawn(operation, from, *kerf, *part, *at, side),
+        }
+    }
+
+    /// Which side of the cut that made it the board was on, if a cut made it.
+    pub fn side(&self) -> Option<Side> {
+        match self.source() {
+            Source::Stock { .. } => None,
+            Source::Sawn { side, .. } => Some(*side),
+        }
     }
 
     pub fn source(&self) -> &Source {
@@ -220,11 +261,14 @@ impl fmt::Debug for Origin {
                 operation,
                 from,
                 part,
+                side,
                 ..
             } => {
                 match part {
                     Part::Whole => write!(f, "slotted by pass #{}", operation.number)?,
-                    Part::Piece(n) => write!(f, "piece {n} of pass #{}", operation.number)?,
+                    Part::Piece(n) => {
+                        write!(f, "piece {n} ({side:?}) of pass #{}", operation.number)?
+                    }
                 }
                 write!(f, ", from {from:?}")
             }

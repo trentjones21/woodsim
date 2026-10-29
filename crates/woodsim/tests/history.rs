@@ -11,7 +11,7 @@ use common::CutApart;
 use proptest::{prelude::*, sample::Index};
 use woodsim::{
     Angle, Assembly, Blade, Board, Fastener, Length, Lie, Mating, MiterSaw, Operation, Orientation,
-    Part, Pass, Rotation, Source, Surface, TableSaw, Tool, surfaces,
+    Part, Pass, Rotation, Side, Source, Surface, TableSaw, Tool, surfaces,
 };
 
 fn inches(n: i64) -> Length {
@@ -123,6 +123,9 @@ fn the_two_sides_of_a_cut_share_it() {
     };
     assert!(from.same(other));
     assert_ne!(part, other_part);
+    // The strip against the fence is the measured piece; the rest, the offcut.
+    assert_eq!(piece.origin().side(), Some(Side::Measured));
+    assert_eq!(offcut.origin().side(), Some(Side::Offcut));
     assert!(matches!(
         last(piece).tool,
         Tool::TableSaw { saw, .. } if saw.fence == fraction(3, 4)
@@ -227,6 +230,11 @@ fn a_cut_through_a_glue_up_is_one_pass_through_every_board() {
     // Glued before it was cut, and the joint keeps saying so.
     assert!(glued < pass.number);
     assert_eq!(cut.piece.joints()[0].number, glued);
+    assert!(
+        members
+            .iter()
+            .all(|member| member.board.origin().side() == Some(Side::Measured))
+    );
     for member in members {
         assert_eq!(member.board.origin().replay(), member.board);
     }
