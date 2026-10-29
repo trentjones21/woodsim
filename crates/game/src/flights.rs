@@ -320,18 +320,20 @@ fn fly(
             continue;
         }
         commands.entity(entity).despawn();
+        // The inventory may be rebuilt this same frame, taking the line or button with it
+        // before it lights up: then there's nothing to light.
         if let Spot::Item(id) = flight.to {
             match screen.line(id) {
                 Some(_) => {
                     for (row, of) in &rows {
                         if of.0.contains(&id) {
-                            commands.entity(row).insert(Flash(now));
+                            commands.entity(row).try_insert(Flash(now));
                         }
                     }
                 }
                 None => {
                     for button in &buttons {
-                        commands.entity(button).insert(Pulse(now));
+                        commands.entity(button).try_insert(Pulse(now));
                     }
                 }
             }
@@ -411,7 +413,7 @@ fn pulse(
         let scale = 1.0 + 0.2 * (std::f32::consts::PI * t).sin();
         *transform = UiTransform::from_scale(Vec2::splat(scale));
         if t >= 1.0 {
-            commands.entity(entity).remove::<Pulse>();
+            commands.entity(entity).try_remove::<Pulse>();
         }
     }
 }
@@ -426,7 +428,80 @@ fn flash(
         let t = ((time.elapsed_secs() - flash.0) / FLASH_SECONDS).clamp(0.0, 1.0);
         background.0 = ACCENT.with_alpha(0.3 * (1.0 - t));
         if t >= 1.0 {
-            commands.entity(entity).remove::<Flash>();
+            commands.entity(entity).try_remove::<Flash>();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+
+    /// A line of the inventory, inside the list so it can be seen, for wood with `id`.
+    fn line(world: &mut World, id: u64) -> Entity {
+        let size = ComputedNode {
+            size: Vec2::new(300.0, 30.0),
+            inverse_scale_factor: 1.0,
+            ..default()
+        };
+        world
+            .spawn((
+                RowOf(vec![id]),
+                UiGlobalTransform::default(),
+                size,
+                BackgroundColor::default(),
+            ))
+            .id()
+    }
+
+    /// Wood lands in two lines as the inventory is rebuilt the same frame, one of them gone by
+    /// the time it lights up: the line that's still there flashes, and the other is let go.
+    #[test]
+    fn wood_landing_in_a_line_rebuilt_away_lets_it_go() {
+        let mut world = World::new();
+        let mut time = Time::<()>::default();
+        time.advance_by(Duration::from_secs(1));
+        world.insert_resource(time);
+        world.init_resource::<LastPress>();
+        world.init_resource::<TableSawStation>();
+        world.init_resource::<MiterSawStation>();
+        world.init_resource::<BenchStation>();
+        world.spawn((Camera::default(), GlobalTransform::default(), ShopCamera));
+        world.spawn((
+            ListArea,
+            UiGlobalTransform::default(),
+            ComputedNode {
+                size: Vec2::splat(1000.0),
+                inverse_scale_factor: 1.0,
+                ..default()
+            },
+        ));
+        let (kept, rebuilt) = (line(&mut world, 1), line(&mut world, 2));
+        for id in [1, 2] {
+            world.spawn((
+                Flight {
+                    from: Vec2::ZERO,
+                    to: Spot::Item(id),
+                    started: 0.0,
+                },
+                Node::default(),
+                UiTransform::default(),
+            ));
+        }
+        let mut schedule = Schedule::default();
+        // Rebuilding the inventory and the landing go in the same frame, in no set order.
+        schedule.add_systems(
+            (
+                move |mut commands: Commands| commands.entity(rebuilt).despawn(),
+                fly,
+            )
+                .chain_ignore_deferred(),
+        );
+        schedule.run(&mut world);
+        assert!(world.get::<Flash>(kept).is_some());
+        assert!(world.get_entity(rebuilt).is_err());
+        assert_eq!(world.query::<&Flight>().iter(&world).count(), 0);
     }
 }

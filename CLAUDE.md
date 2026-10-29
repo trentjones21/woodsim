@@ -73,6 +73,7 @@ Examples of things that differ from older Bevy:
 - Text size is `TextFont { font_size: FontSize::Px(18.0), .. }`.
 - 0.20 has a new scene macro (`bsn!` / `bsn_list!`). This project uses plain `commands.spawn((...))`; don't mix in BSN without asking.
 - A spawned tuple can hold at most 15 components; add the rest with `.insert((...))`.
+- `insert` on an entity that's gone by the time commands apply panics the game (`remove` and `despawn` only warn). Inserting onto something another system may despawn the same frame, like a line of the inventory, which is rebuilt whenever it changes, uses `try_insert`.
 - Shadows respect `RenderLayers` but lighting doesn't: a light shades every mesh, whatever its layer.
 - `Screenshot::image` captures of an image render target came out black here; `main.rs` reads the image back with `ReadbackOnce::texture` instead. A camera that renders to an image also needs `IsDefaultUiCamera`, or the UI isn't drawn.
 - Runtime-made images have no mipmaps unless you build them (`textures::with_mipmaps`); without them, textures shimmer at a distance.
