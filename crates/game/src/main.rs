@@ -3,6 +3,7 @@
 mod bench;
 mod chop;
 mod controls;
+mod cutting;
 mod feed;
 mod flights;
 mod hand;

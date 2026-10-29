@@ -1,7 +1,8 @@
 //! Plans for what's been put together at the bench, as a page to print: a drawing of the whole
-//! thing, a cut list, a drawing of each part, and the steps to put it together. They come from
-//! the assembly alone, the way a woodworker draws a project up: what each part is and where it
-//! goes, not the order the saws happened to cut it in.
+//! thing, the lumber to buy, a cut list, where each part comes out of the lumber, a drawing of
+//! each part, and the steps to build it, every cut and joint in the order they were made. What
+//! each part is and where it goes come from the assembly; how it was cut, from where each board
+//! came from (`cutting`).
 
 use std::{
     fmt::Write as _,
@@ -12,7 +13,10 @@ use std::{
 
 use woodsim::{Across, Angle, Assembly, Board, Fastener, Joint, Length, Member, Surface, surfaces};
 
-use crate::shop::{describe_board, describe_size, measured};
+use crate::{
+    cutting::Cutting,
+    shop::{describe_board, describe_size, measured},
+};
 
 /// Where plans are saved, from where the game runs.
 pub const FOLDER: &str = "plans";
@@ -42,6 +46,15 @@ pub struct Plan {
     /// there are more than one.
     labels: Vec<String>,
     steps: Vec<Step>,
+    cutting: Cutting,
+}
+
+/// A step of building it, in the order things were done: a cut, or parts going together, by
+/// their place in `Cutting::cuts` and `Plan::steps`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Built {
+    Cut(usize),
+    Joined(usize),
 }
 
 /// One line of the cut list: parts that come out the same, however they're turned over.
@@ -87,12 +100,33 @@ impl Plan {
             }
         }
         let steps = steps(&assembly);
+        let cutting = Cutting::of(&assembly);
         Plan {
             assembly,
             parts,
             labels,
             steps,
+            cutting,
         }
+    }
+
+    /// Every cut and every joint, in the order they were made.
+    fn build_steps(&self) -> Vec<Built> {
+        let mut built: Vec<(u64, Built)> = self
+            .cutting
+            .cuts
+            .iter()
+            .enumerate()
+            .map(|(index, cut)| (cut.number, Built::Cut(index)))
+            .chain(
+                self.steps
+                    .iter()
+                    .enumerate()
+                    .map(|(index, step)| (step.joint.number, Built::Joined(index))),
+            )
+            .collect();
+        built.sort_by_key(|&(number, _)| number);
+        built.into_iter().map(|(_, step)| step).collect()
     }
 
     /// What it is, for the page's title: "a glue-up of 4 parts".
@@ -122,8 +156,10 @@ impl Plan {
             title = self.title(),
             drawing = self.drawing(&everything, &[], &everything, (680.0, 400.0)),
         );
+        page.push_str(&self.cutting.buy_list());
         page.push_str(&self.cut_list());
-        page.push_str(&self.lumber());
+        let members = self.assembly.members();
+        page.push_str(&self.cutting.diagrams(members, &self.labels));
         page.push_str("<section>\n<h2>Parts</h2>\n");
         for part in &self.parts {
             let _ = writeln!(
@@ -141,19 +177,46 @@ impl Plan {
             );
         }
         page.push_str("</section>\n");
-        if !self.steps.is_empty() {
-            page.push_str("<section>\n<h2>Putting it together</h2>\n<ol class=\"steps\">\n");
-            for (number, step) in self.steps.iter().enumerate() {
-                let named: Vec<usize> = std::iter::once(&step.joint)
-                    .chain(&step.also)
-                    .flat_map(|joint| joint.between.map(|(member, _)| member))
-                    .collect();
+        let built = self.build_steps();
+        if !built.is_empty() {
+            page.push_str(
+                "<section>\n<h2>Building it</h2>\n<p class=\"sub\">Every cut and joint, in the \
+                 order they were made. Your blade may not take exactly 1/8\" like the game's: \
+                 cut to the sizes here, set a stop block for parts that repeat, and cut miters \
+                 to fit.</p>\n<ol class=\"steps\">\n",
+            );
+            // The number each cut has on the page, for steps that keep a piece for a later one.
+            let step_of = |cut: usize| {
+                built
+                    .iter()
+                    .position(|&step| step == Built::Cut(cut))
+                    .map_or(0, |at| at + 1)
+            };
+            for (number, step) in built.iter().enumerate() {
+                let (class, words, drawing) = match *step {
+                    Built::Cut(cut) => (
+                        "cut",
+                        self.cutting.describe(cut, members, &self.labels, &step_of),
+                        String::new(),
+                    ),
+                    Built::Joined(index) => {
+                        let step = &self.steps[index];
+                        let named: Vec<usize> = std::iter::once(&step.joint)
+                            .chain(&step.also)
+                            .flat_map(|joint| joint.between.map(|(member, _)| member))
+                            .collect();
+                        (
+                            "join",
+                            self.describe_step(step),
+                            self.drawing(&step.together, &step.added, &named, (260.0, 170.0)),
+                        )
+                    }
+                };
                 let _ = writeln!(
                     page,
-                    "<li><h3>Step {}</h3>{}<p>{}</p></li>",
-                    number + 1,
-                    self.drawing(&step.together, &step.added, &named, (320.0, 200.0)),
-                    self.describe_step(step)
+                    "<li class=\"{class}\"><span class=\"number\">{}</span>\
+                     <p>{words}</p>{drawing}</li>",
+                    number + 1
                 );
             }
             page.push_str("</ol>\n</section>\n");
@@ -187,37 +250,6 @@ impl Plan {
         }
         list.push_str("</tbody>\n</table>\n</section>\n");
         list
-    }
-
-    /// How much of each thickness and width of stock the parts take, end to end.
-    fn lumber(&self) -> String {
-        let mut stock: Vec<((Length, Length), usize, Length)> = Vec::new();
-        for member in self.assembly.members() {
-            let board = &member.board;
-            let size = (measured(board.thickness()), measured(board.width()));
-            match stock.iter_mut().find(|(seen, ..)| *seen == size) {
-                Some((_, count, total)) => {
-                    *count += 1;
-                    *total = *total + board.length();
-                }
-                None => stock.push((size, 1, board.length())),
-            }
-        }
-        stock.sort_by_key(|&((thickness, width), ..)| (thickness, width));
-        let mut lumber = String::from(
-            "<section>\n<h2>Lumber</h2>\n<p class=\"sub\">The parts end to end, before \
-             allowing for saw kerfs and trimming ends square.</p>\n<table>\n<thead><tr>\
-             <th>Stock</th><th>Parts</th><th>Length in all</th></tr></thead>\n<tbody>\n",
-        );
-        for ((thickness, width), count, total) in stock {
-            let _ = writeln!(
-                lumber,
-                "<tr><td>{thickness} &times; {width}</td><td>{count}</td><td>{}</td></tr>",
-                measured(total)
-            );
-        }
-        lumber.push_str("</tbody>\n</table>\n</section>\n");
-        lumber
     }
 
     /// One step in words: what goes against what, and how it lines up.
@@ -1164,9 +1196,17 @@ svg text { font: 12px -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif; f
 .part figcaption { margin-bottom: 6px; }
 .part figcaption b { font-size: 16px; margin-right: 4px; }
 .notes { color: #444; margin: 4px 0 0; }
-.steps { list-style: none; padding: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
-.steps li { break-inside: avoid; border: 1px solid #ddd; border-radius: 8px; padding: 10px 12px; }
-.steps p { margin: 6px 0 0; }
+.steps { list-style: none; padding: 0; margin: 0; }
+.steps li { display: flex; align-items: center; gap: 14px; padding: 10px 0;
+  border-bottom: 1px solid #e4e4e4; break-inside: avoid; }
+.steps .number { flex: none; width: 28px; height: 28px; border-radius: 14px; background: #1d2026;
+  color: #fff; font-weight: 700; display: flex; align-items: center; justify-content: center; }
+.steps .cut .number { background: #c4581a; }
+.steps p { margin: 0; flex: 1; }
+.steps svg { flex: none; width: 260px; }
+.cut-part { fill: #fbf6ee; stroke: #1d2026; stroke-width: 1.2; stroke-linejoin: round; }
+.stock { stroke: #8a7a62; stroke-width: 1; }
+.diagram text { font-weight: 600; font-size: 11px; fill: #c4581a; }
 .side { stroke: #1d2026; stroke-width: 1.2; stroke-linejoin: round; }
 .flat { stroke-width: 0.6; stroke-linejoin: round; }
 .edge { fill: none; stroke: #1d2026; stroke-width: 1.4; stroke-linecap: round; }
@@ -1357,16 +1397,118 @@ mod tests {
         );
     }
 
+    /// A frame of four pieces mitered 45° at both ends, 4" long point to long point, made the
+    /// way you'd make it: a 1x4 ripped to 3/4", then from the strip, for each piece, the end
+    /// trimmed to a miter and the piece cut off it; then the pieces glued up into the frame.
+    /// The trim has to take more than the strip is wide: any less leaves a corner of the last
+    /// miter on the next piece.
+    fn frame_from_a_one_by_four() -> Assembly {
+        let stock = Board::new(
+            Length::from_inches(24),
+            Length::from_inch_fraction(7, 2),
+            Length::from_inch_fraction(3, 4),
+        );
+        let table_saw = woodsim::TableSaw {
+            blade: woodsim::Blade {
+                diameter: Length::from_inches(10),
+                kerf: woodsim::Blade::FULL_KERF,
+            },
+            fence: Length::from_inch_fraction(3, 4),
+            height: Length::from_inches(1),
+            miter_gauge: None,
+        };
+        let Ok(Pass::Cut(rip)) = table_saw.rip(&stock, Orientation::default()) else {
+            panic!("expected the 1x4 ripped");
+        };
+        let saw = |hundredths| MiterSaw {
+            miter: Angle::from_hundredths(hundredths),
+            ..MiterSaw::twelve_inch()
+        };
+        let mut strip = rip.piece.board;
+        let mut pieces = Vec::new();
+        for _ in 0..4 {
+            let Ok(Pass::Cut(trim)) =
+                saw(-4500).crosscut(&strip, Orientation::default(), Length::from_inches(1))
+            else {
+                panic!("expected the end trimmed");
+            };
+            let Ok(Pass::Cut(cut)) = saw(4500).crosscut(
+                &trim.offcut.unwrap().board,
+                Orientation::default(),
+                Length::from_inches(4),
+            ) else {
+                panic!("expected a frame piece");
+            };
+            pieces.push(cut.piece.board);
+            strip = cut.offcut.unwrap().board;
+        }
+        let mut frame = Assembly::of(pieces[0].clone());
+        for (last, piece) in pieces.iter().enumerate().skip(1).map(|(k, p)| (k - 1, p)) {
+            let onto = (last, miter(&frame.members()[last].board, true));
+            add(&mut frame, onto, piece, miter(piece, false));
+        }
+        frame
+    }
+
     #[test]
-    fn the_page_has_every_part_and_step() {
-        let page = Plan::of(ring(4, Length::from_inches(10))).page();
+    fn a_frame_cut_from_one_board_buys_it_and_builds_it_cut_by_cut() {
+        let plan = Plan::of(frame_from_a_one_by_four());
+        assert_eq!(plan.cutting.stock.len(), 1);
+        assert_eq!(plan.cutting.stock[0].members, [0, 1, 2, 3]);
+        // The rip, then a trim and a cut for each piece; then three joints.
+        let built = plan.build_steps();
+        assert_eq!(built.len(), 12);
+        assert!(built[..9].iter().all(|step| matches!(step, Built::Cut(_))));
+        assert!(
+            built[9..]
+                .iter()
+                .all(|step| matches!(step, Built::Joined(_)))
+        );
+        let step_of = |cut: usize| cut + 1;
+        let members = plan.assembly.members();
+        let say = |cut: usize| plan.cutting.describe(cut, members, &plan.labels, &step_of);
+        assert_eq!(
+            say(0),
+            "Table saw, rip fence at 3/4\", blade 1\" high: Rip a new 1x4, 3/4\" x 3-1/2\" x \
+             24\". Keep the 3/4\" x 3/4\" x 24\" for step 2."
+        );
+        assert!(
+            say(1).starts_with(
+                "Miter saw at 45° left, stop at 1\": Cut the 3/4\" x 3/4\" x 24\" from step 1. \
+                 Keep the 3/4\" x 3/4\""
+            ),
+            "{}",
+            say(1)
+        );
+        assert!(say(1).ends_with("for step 3."), "{}", say(1));
+        assert!(
+            say(2).starts_with("Miter saw at 45° right, stop at 4\": Cut the "),
+            "{}",
+            say(2)
+        );
+        assert!(
+            say(2).contains("Keep A1 and the 3/4\" x 3/4\""),
+            "{}",
+            say(2)
+        );
+        assert!(say(8).ends_with("Keep A4."), "{}", say(8));
+    }
+
+    #[test]
+    fn the_page_has_what_to_buy_and_every_part_and_step() {
+        let page = Plan::of(frame_from_a_one_by_four()).page();
         assert!(page.starts_with("<!doctype html>"));
         assert!(page.contains("<title>Plans for a glue-up of 4 parts</title>"));
         assert!(page.contains("mitered 45° at both ends"), "{page}");
-        assert_eq!(page.matches("<figure class=\"part\">").count(), 1);
-        assert_eq!(page.matches("<h3>Step").count(), 3);
-        // One drawing of it all, one of the part, one for each step.
-        assert_eq!(page.matches("<svg").count(), 5);
+        assert!(page.contains("<td>1x4, 3/4\" x 3-1/2\" x 24\"</td><td>1</td>"));
+        // The part, and the board it comes out of.
+        assert_eq!(page.matches("<figure class=\"part\">").count(), 2);
+        assert_eq!(page.matches("<li class=\"cut\">").count(), 9);
+        assert_eq!(page.matches("<li class=\"join\">").count(), 3);
+        // A drawing of it all, the board's diagram, the part, and each joint.
+        assert_eq!(page.matches("<svg").count(), 6);
+        // What the rip left on the far side of the blade never went into the frame.
+        assert!(!page.contains("2-5/8"), "{page}");
         assert!(page.contains("A4"));
     }
 
