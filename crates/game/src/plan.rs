@@ -648,6 +648,7 @@ impl Solid {
     fn of(member: &Member, index: usize) -> Solid {
         let mut faces = Vec::new();
         let (mut top_edges, mut bottom_edges) = (Vec::new(), Vec::new());
+        let thickness = member.board.thickness();
         for surface in surfaces(&member.board) {
             let normal = normal(member, surface);
             for polygon in woodsim::outline(&member.board, surface) {
@@ -656,8 +657,18 @@ impl Solid {
                     .map(|&[l, w, t]| member.point(l, w, t).map(|at| at.as_nm() as f64))
                     .collect();
                 if let Surface::Side(_) = surface {
-                    bottom_edges.push([points[0], points[1]]);
-                    top_edges.push([points[3], points[2]]);
+                    // Wherever a side meets the top or bottom along an edge. A leaning side
+                    // can have any number of corners, in any order, or not reach a face at all.
+                    let n = polygon.len();
+                    for i in 0..n {
+                        let j = (i + 1) % n;
+                        let (a, b) = (polygon[i][2], polygon[j][2]);
+                        if a == thickness && b == thickness {
+                            top_edges.push([points[i], points[j]]);
+                        } else if a == Length::ZERO && b == Length::ZERO {
+                            bottom_edges.push([points[i], points[j]]);
+                        }
+                    }
                 }
                 faces.push(Face {
                     points,
@@ -1401,12 +1412,17 @@ mod tests {
             Length::from_inch_fraction(3, 2),
             Length::from_inch_fraction(3, 4),
         );
+        mitered(&stock, length, hundredths)
+    }
+
+    /// A piece of `stock` `length` long point to long point, mitered `degrees` at both ends.
+    fn mitered(stock: &Board, length: Length, hundredths: i32) -> Board {
         let saw = |hundredths| MiterSaw {
             miter: Angle::from_hundredths(hundredths),
             ..MiterSaw::twelve_inch()
         };
         let Ok(Pass::Cut(trim)) =
-            saw(-hundredths).crosscut(&stock, Orientation::default(), Length::from_inches(2))
+            saw(-hundredths).crosscut(stock, Orientation::default(), Length::from_inches(2))
         else {
             panic!("expected the end trimmed");
         };
@@ -1979,6 +1995,69 @@ mod tests {
         };
         let flat = |p: Vec3| [p[0] - p[1], p[2] + p[1]];
         assert_eq!(drawing_order(&solids, toward, &flat)[0], back);
+    }
+
+    #[test]
+    fn a_beveled_part_is_outlined_all_the_way_around_the_face_toward_you() {
+        // A frame of pieces ripped with the blade tilted, so each has a leaning edge.
+        let saw = woodsim::TableSaw {
+            blade: woodsim::Blade {
+                diameter: Length::from_inches(10),
+                kerf: woodsim::Blade::FULL_KERF,
+            },
+            fence: Length::from_inch_fraction(19, 8),
+            height: Length::from_inches(1),
+            miter_gauge: None,
+            gauge_angle: Angle::ZERO,
+            tilt: Angle::from_degrees(10),
+        };
+        let stock = Board::new(
+            Length::from_inches(48),
+            Length::from_inch_fraction(29, 4),
+            Length::from_inch_fraction(3, 4),
+        );
+        let Ok(Pass::Cut(rip)) = saw.rip(&stock, Orientation::default()) else {
+            panic!("expected a beveled rip");
+        };
+        let piece = mitered(&rip.piece.board, Length::from_inches(16), 4500);
+        assert!(!piece.bevels().is_empty());
+        let mut frame = Assembly::of(piece.clone());
+        for last in 0..3 {
+            let onto = (last, miter(&frame.members()[last].board, true));
+            add(&mut frame, onto, &piece, miter(&piece, false));
+        }
+        for (index, member) in frame.members().iter().enumerate() {
+            let solid = Solid::of(member, index);
+            let height = |p: Vec3| dot(p, solid.up);
+            let top: Vec<&Face> = solid
+                .faces
+                .iter()
+                .filter(|face| face.flat && dot(face.normal, solid.up) > 0.0)
+                .collect();
+            let [face] = top[..] else {
+                panic!("expected one top face, got {}", top.len());
+            };
+            let level = height(face.points[0]);
+            // Every line of the outline is on the top face, none running down a side...
+            for [a, b] in &solid.top_edges {
+                assert!((height(*a) - level).abs() < 1.0, "{index}: {a:?}");
+                assert!((height(*b) - level).abs() < 1.0, "{index}: {b:?}");
+            }
+            // ...and they go all the way around it.
+            let long = |[a, b]: [Vec3; 2]| {
+                let d = super::add(b, scaled(a, -1.0));
+                dot(d, d).sqrt()
+            };
+            let n = face.points.len();
+            let around: f64 = (0..n)
+                .map(|i| long([face.points[i], face.points[(i + 1) % n]]))
+                .sum();
+            let outlined: f64 = solid.top_edges.iter().copied().map(long).sum();
+            assert!(
+                (outlined - around).abs() < 10.0,
+                "{index}: {outlined} vs {around}"
+            );
+        }
     }
 
     #[test]
