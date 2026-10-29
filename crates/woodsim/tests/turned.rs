@@ -34,6 +34,7 @@ fn table_saw(fence: Length, height: Length) -> TableSaw {
         fence,
         height,
         miter_gauge: None,
+        gauge_angle: woodsim::Angle::ZERO,
     }
 }
 
@@ -88,6 +89,7 @@ fn turned_the_other_way_the_piece_comes_off_the_other_end() {
 fn miter_gauge(stop: Length) -> TableSaw {
     TableSaw {
         miter_gauge: Some(stop),
+        gauge_angle: woodsim::Angle::ZERO,
         ..table_saw(inches(6), inches(1))
     }
 }

@@ -1009,6 +1009,7 @@ mod tests {
             fence: Length::from_inch_fraction(5, 16),
             height: Length::from_inches(3),
             miter_gauge: None,
+            gauge_angle: woodsim::Angle::ZERO,
         };
         let board = Board::new(
             Length::from_inches(24),

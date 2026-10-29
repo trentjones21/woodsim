@@ -133,7 +133,7 @@ pub fn bound(view: ShopView, key: KeyCode, shift: bool) -> Option<Action> {
         (TableSaw, KeyB) => BringBack,
         (MiterSaw, ArrowLeft | ArrowRight) => Stop(step(key == ArrowRight)),
         (MiterSaw, ArrowUp | ArrowDown) => Depth(step(key == ArrowUp)),
-        (MiterSaw, BracketLeft | BracketRight) => Miter(step(key == BracketRight)),
+        (TableSaw | MiterSaw, BracketLeft | BracketRight) => Miter(step(key == BracketRight)),
         (MiterSaw, Space) => Lower,
         (Bench, Digit1) => Use(Fastener::Glue),
         (Bench, Digit2) => Use(Fastener::Brads),

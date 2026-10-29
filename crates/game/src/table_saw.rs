@@ -72,6 +72,7 @@ impl Plugin for TableSawPlugin {
                     (
                         move_guide,
                         switch_guide,
+                        swing_gauge,
                         raise_blade,
                         turn_board,
                         push_board,
@@ -97,6 +98,11 @@ struct AtTableSaw;
 /// The miter gauge: it rides with the back of the board, and shows only while it's in use.
 #[derive(Component)]
 struct MiterGauge;
+
+/// The miter gauge's head, its auxiliary fence, and the stop on it: what turns as the gauge is
+/// set to an angle, while its bar stays in the slot.
+#[derive(Component)]
+struct GaugeHead;
 
 /// The stop block on the miter gauge's auxiliary fence.
 #[derive(Component)]
@@ -310,7 +316,15 @@ fn spawn_saw(
     let gauge = commands
         .spawn((Transform::default(), Visibility::Hidden, MiterGauge))
         .id();
-    for (material, min, max) in [
+    let head = commands
+        .spawn((
+            Transform::default(),
+            Visibility::Inherited,
+            GaugeHead,
+            ChildOf(gauge),
+        ))
+        .id();
+    for (index, (material, min, max)) in [
         (
             &dark_metal,
             Vec3::new(GAUGE_SLOT - inches(0.3), inches(-0.35), inches(-16.0)),
@@ -326,13 +340,17 @@ fn spawn_saw(
             Vec3::new(GAUGE_SLOT - inches(0.5), inches(2.25), inches(1.2)),
             Vec3::new(GAUGE_SLOT + inches(0.5), inches(3.0), inches(2.1)),
         ),
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        // The bar stays in the slot; the rest turns with the head.
         commands.spawn((
             Mesh3d(meshes.add(rounded_box(max - min))),
             MeshMaterial3d(material.clone()),
             Transform::from_translation(min),
             Pickable::IGNORE,
-            ChildOf(gauge),
+            ChildOf(if index == 0 { gauge } else { head }),
         ));
     }
     // The auxiliary fence reaches from just short of the blade out past the farthest stop.
@@ -341,7 +359,7 @@ fn spawn_saw(
         MeshMaterial3d(shop.maple.clone()),
         Transform::from_xyz(inches(-1.0) - AUX_FENCE.x, 0.0, 0.0),
         Pickable::IGNORE,
-        ChildOf(gauge),
+        ChildOf(head),
     ));
     let stop_color = materials.add(StandardMaterial {
         base_color: Color::srgb(1.0, 0.78, 0.15),
@@ -359,7 +377,7 @@ fn spawn_saw(
             MeshMaterial3d(stop_color.clone()),
             Transform::default(),
             GaugeStop { grab_offset: 0.0 },
-            ChildOf(gauge),
+            ChildOf(head),
         ))
         .observe(set_material_on::<PointerOver>(stop_hover))
         .observe(set_material_on::<PointerOut>(stop_color))
@@ -381,6 +399,22 @@ fn move_guide(actions: Res<Actions>, mut station: ResMut<TableSawStation>) {
         } else {
             let fence = station.saw.fence;
             station.set_fence(if right { fence + step } else { fence - step });
+        }
+    }
+}
+
+/// Swings the miter gauge's head 1°, or a big step to the next place it clicks into.
+fn swing_gauge(actions: Res<Actions>, mut station: ResMut<TableSawStation>) {
+    for action in actions.started() {
+        let Action::Miter(Step { more, big }) = action else {
+            continue;
+        };
+        if big {
+            station.swing_gauge_to_next_stop(more);
+        } else {
+            let step = woodsim::Angle::from_degrees(if more { 1 } else { -1 });
+            let angle = station.saw.gauge_angle + step;
+            station.set_gauge_angle(angle);
         }
     }
 }
@@ -408,7 +442,7 @@ fn grab_gauge_stop(
         )
         && let Ok(mut stop) = stops.get_mut(drag.entity)
     {
-        stop.grab_offset = point.x - ORIGIN.x - stop_face(&station);
+        stop.grab_offset = along_gauge(&station, point) - stop_face(&station);
     }
 }
 
@@ -429,10 +463,19 @@ fn drag_gauge_stop(
         && let Ok(stop) = stops.get(drag.entity)
     {
         // The stop's face is the gauge setting plus a kerf left of the blade's fence-side face.
-        let face = point.x - ORIGIN.x - stop.grab_offset;
+        let face = along_gauge(&station, point) - stop.grab_offset;
         let kerf = station.saw.blade.kerf.as_meters_f32();
         station.set_gauge_stop(snap_to_sixteenth(-face - kerf));
     }
+}
+
+/// How far across the table `point` is, along the gauge's auxiliary fence as its head is
+/// turned: where it would be if the head were square.
+fn along_gauge(station: &TableSawStation, point: Vec3) -> f32 {
+    let (z, turn) = station.gauge_pose();
+    let pivot = Vec3::new(-station.saw.blade.kerf.as_meters_f32(), 0.0, 0.0);
+    let local = point - (ORIGIN + Vec3::Z * z);
+    (turn.inverse() * (local - pivot) + pivot).x
 }
 
 /// Where the face of the gauge's stop block is across the table, in meters.
@@ -617,19 +660,26 @@ fn draw_fence(station: Res<TableSawStation>, mut fence: Single<&mut Transform, W
 fn draw_gauge(
     station: Res<TableSawStation>,
     gauge: Single<Entity, With<MiterGauge>>,
+    head: Single<Entity, With<GaugeHead>>,
     stop: Single<Entity, With<GaugeStop>>,
     mut parts: Query<(&mut Transform, &mut Visibility)>,
 ) {
     if !station.is_changed() {
         return;
     }
+    let (z, turn) = station.gauge_pose();
     if let Ok((mut transform, mut visibility)) = parts.get_mut(*gauge) {
         *visibility = if station.using_gauge() {
             Visibility::Inherited
         } else {
             Visibility::Hidden
         };
-        transform.translation = ORIGIN + Vec3::Z * station.trailing_edge();
+        transform.translation = ORIGIN + Vec3::Z * z;
+    }
+    // The head turns about where its face crosses the blade's stop-side face.
+    if let Ok((mut transform, _)) = parts.get_mut(*head) {
+        let pivot = Vec3::new(-station.saw.blade.kerf.as_meters_f32(), 0.0, 0.0);
+        *transform = Transform::from_translation(pivot - turn * pivot).with_rotation(turn);
     }
     // The block sits against the board's end, in front of the auxiliary fence.
     if let Ok((mut transform, _)) = parts.get_mut(*stop) {

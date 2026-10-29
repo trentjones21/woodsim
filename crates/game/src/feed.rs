@@ -10,9 +10,10 @@
 //! quarter turn, across it, crosscutting.
 
 use bevy::prelude::*;
-use woodsim::{Axis, Blade, Board, CutError, Length, Orientation, TableSaw};
+use woodsim::{Angle, Axis, Blade, Board, CutError, Length, MAX_GAUGE, Orientation, TableSaw};
 
 use crate::{
+    chop::MITER_STOPS,
     hand::Workpiece,
     inventory::Shelf,
     shop::{Part, SawBoards, describe_kerf},
@@ -77,6 +78,7 @@ impl Default for TableSawStation {
                 fence: Length::from_inches(6),
                 height: Length::from_inches(1),
                 miter_gauge: None,
+                gauge_angle: woodsim::Angle::ZERO,
             },
             board: Workpiece::Board(new_stock()),
             lie: Orientation::default(),
@@ -151,10 +153,69 @@ impl TableSawStation {
         }
     }
 
-    /// Where the back of the board is along the table, in meters: where the miter gauge pushes
-    /// it.
-    pub fn trailing_edge(&self) -> f32 {
-        (self.reach() - self.advance).as_meters_f32()
+    /// Turns the miter gauge's head, as far as it goes either way. It stays put while a board
+    /// is at the blade.
+    pub fn set_gauge_angle(&mut self, angle: Angle) {
+        if !self.at_blade() {
+            self.saw.gauge_angle = angle.clamp(-MAX_GAUGE, MAX_GAUGE);
+        }
+    }
+
+    /// Turns the gauge's head to the next place it clicks into, one way or the other, or as
+    /// far as it goes past the last one.
+    pub fn swing_gauge_to_next_stop(&mut self, more: bool) {
+        let now = self.saw.gauge_angle;
+        let stops = MITER_STOPS.iter().flat_map(|&stop| [stop, -stop]);
+        let next = if more {
+            stops.filter(|&stop| stop > now).min().unwrap_or(MAX_GAUGE)
+        } else {
+            stops.filter(|&stop| stop < now).max().unwrap_or(-MAX_GAUGE)
+        };
+        self.set_gauge_angle(next);
+    }
+
+    /// Whether the gauge's head can be turned: not while a board is at the blade.
+    pub fn can_swing_gauge(&self) -> bool {
+        !self.at_blade()
+    }
+
+    /// Where the miter gauge sits, in meters along the table, and how its head is turned: the
+    /// point where its face crosses the blade's stop-side face, and the turn about it.
+    pub fn gauge_pose(&self) -> (f32, Quat) {
+        let saw = self.pass.as_ref().map_or(self.saw, |pass| pass.saw);
+        match self.angled(saw) {
+            Some((rotation, pivot, shift)) => (pivot.z + shift, rotation),
+            None => (
+                (self.reach() - self.advance).as_meters_f32(),
+                Quat::IDENTITY,
+            ),
+        }
+    }
+
+    /// How the board, and the gauge's head with it, is turned and moved on the table while the
+    /// gauge holds it at an angle, as `woodsim` cuts it: turned about where the blade's
+    /// stop-side face crosses the gauge's face, at the board's trailing side, then slid along
+    /// the table so its leading corner is where the blade has fed it to. The turn, the point
+    /// it's about, and the slide, in meters; `None` while the gauge is square or not in use.
+    fn angled(&self, saw: TableSaw) -> Option<(Quat, Vec3, f32)> {
+        let stop = saw.miter_gauge?;
+        if saw.gauge_angle == Angle::ZERO || self.lie.on_edge() {
+            return None;
+        }
+        // The board's length across the table turns toward its trailing side as the blade's
+        // front swings toward the stop.
+        let rotation = Quat::from_rotation_y(-(saw.gauge_angle.radians() as f32));
+        let along = work::extent(&self.board, self.lie.along().0).as_meters_f32();
+        let across = self.span().as_meters_f32();
+        let near_side = (-saw.blade.kerf - stop).as_meters_f32();
+        let lead = (-self.advance).as_meters_f32();
+        let pivot = Vec3::new((-saw.blade.kerf).as_meters_f32(), 0.0, lead + along);
+        let leading = [0.0, across]
+            .into_iter()
+            .flat_map(|x| [0.0, along].map(|z| Vec3::new(near_side + x, 0.0, lead + z)))
+            .map(|corner| (pivot + rotation * (corner - pivot)).z)
+            .fold(f32::MAX, f32::min);
+        Some((rotation, pivot, lead - leading))
     }
 
     /// Raises or lowers the blade, from level with the table to as high as it goes. It stays
@@ -421,7 +482,10 @@ impl TableSawStation {
 
     /// How far the board reaches along the table, from its leading end.
     fn reach(&self) -> Length {
-        work::extent(&self.board, self.lie.along().0)
+        match &self.board {
+            Workpiece::Board(board) => self.saw.reach(board, self.lie),
+            Workpiece::GlueUp(_) => work::extent(&self.board, self.lie.along().0),
+        }
     }
 
     /// How far the board reaches across the table, from the fence.
@@ -486,7 +550,7 @@ impl TableSawStation {
                 placed
             }
         };
-        match self.result() {
+        let mut boards = match self.result() {
             // Each piece sits where it was on the board. Loose pieces are set aside.
             Some(Ok(Passed::Cut(cut))) => SawBoards {
                 whole: Vec::new(),
@@ -506,7 +570,20 @@ impl TableSawStation {
                 ),
                 ..default()
             },
+        };
+        // Held at an angle by the gauge, it's all turned and slid as the gauge has it.
+        if let Some((rotation, pivot, shift)) = self.angled(saw) {
+            for placed in boards
+                .whole
+                .iter_mut()
+                .chain(&mut boards.piece)
+                .chain(&mut boards.offcut)
+            {
+                placed.corner = pivot + rotation * (placed.corner - pivot) + Vec3::Z * shift;
+                placed.rotation = rotation * placed.rotation;
+            }
         }
+        boards
     }
 
     /// One line describing what's on the saw.
@@ -991,6 +1068,71 @@ mod tests {
         assert_eq!(left, [(Shelf::Offcuts, Length::from_inch_fraction(9, 8))]);
         assert!(station.pass.is_none());
         assert!(station.taken.is_empty());
+    }
+
+    /// Where each corner of `placed`'s wood is on the table, in meters.
+    fn wood_corners(placed: &crate::shop::Placed) -> Vec<Vec3> {
+        placed
+            .board
+            .face()
+            .iter()
+            .flat_map(|region| region.corners())
+            .flat_map(|(l, w)| {
+                [Length::ZERO, placed.board.thickness()].map(|t| {
+                    let mesh = Vec3::new(w.as_meters_f32(), t.as_meters_f32(), l.as_meters_f32());
+                    placed.corner + placed.rotation * mesh
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn at_a_gauge_angle_the_board_is_drawn_turned_so_the_cut_is_on_the_blade() {
+        let mut station = TableSawStation::default();
+        assert!(station.switch_guide());
+        assert!(station.turn_left());
+        station.set_gauge_angle(Angle::from_degrees(30));
+        station.push(10.0);
+        let Some(Ok(Passed::Cut(crate::work::Parted::Board(cut)))) = station.result() else {
+            panic!("expected the board crosscut");
+        };
+        assert_eq!(cut.piece.board.miters(), [Angle::from_degrees(30)]);
+        // The piece against the gauge's stop is left of the blade, and the offcut right of it,
+        // both right up to the kerf.
+        let kerf = station.saw.blade.kerf.as_meters_f32();
+        let boards = station.boards();
+        let xs = |placed: &[crate::shop::Placed]| -> (f32, f32) {
+            placed
+                .iter()
+                .flat_map(wood_corners)
+                .fold((f32::MAX, f32::MIN), |(low, high), corner| {
+                    (low.min(corner.x), high.max(corner.x))
+                })
+        };
+        let (piece, offcut) = (xs(&boards.piece), xs(&boards.offcut));
+        assert!((piece.1 + kerf).abs() < 1e-4, "{piece:?}");
+        assert!(offcut.0.abs() < 1e-4, "{offcut:?}");
+        // The gauge's head turns with it.
+        assert_eq!(
+            station.gauge_pose().1,
+            Quat::from_rotation_y(-(30f32.to_radians()))
+        );
+    }
+
+    #[test]
+    fn the_gauge_clicks_from_stop_to_stop_and_turns_only_clear_of_the_blade() {
+        let mut station = TableSawStation::default();
+        station.swing_gauge_to_next_stop(true);
+        assert_eq!(station.saw.gauge_angle, Angle::from_degrees(15));
+        station.swing_gauge_to_next_stop(false);
+        station.swing_gauge_to_next_stop(false);
+        assert_eq!(station.saw.gauge_angle, Angle::from_degrees(-15));
+        station.set_gauge_angle(Angle::from_degrees(80));
+        assert_eq!(station.saw.gauge_angle, MAX_GAUGE);
+        push_to(&mut station, 6);
+        assert!(!station.can_swing_gauge());
+        station.set_gauge_angle(Angle::ZERO);
+        assert_eq!(station.saw.gauge_angle, MAX_GAUGE);
     }
 
     #[test]

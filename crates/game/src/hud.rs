@@ -185,6 +185,7 @@ enum Readout {
 enum Setting {
     Guide,
     Blade,
+    GaugeAngle,
     Stop,
     Miter,
     Depth,
@@ -274,6 +275,7 @@ fn cards(view: ShopView) -> Vec<(Setting, Icon, Option<bool>)> {
         ShopView::TableSaw => vec![
             (Setting::Guide, Icon::Fence, Some(true)),
             (Setting::Blade, Icon::Blade, Some(false)),
+            (Setting::GaugeAngle, Icon::Miter, Some(true)),
         ],
         ShopView::MiterSaw => vec![
             (Setting::Stop, Icon::Stop, Some(true)),
@@ -289,6 +291,7 @@ fn stepping(setting: Setting, step: Step) -> Option<Action> {
     Some(match setting {
         Setting::Guide => Action::Guide(step),
         Setting::Blade => Action::Blade(step),
+        Setting::GaugeAngle => Action::Miter(step),
         Setting::Stop => Action::Stop(step),
         Setting::Miter => Action::Miter(step),
         Setting::Depth => Action::Depth(step),
@@ -383,6 +386,13 @@ impl Shop<'_> {
             Push => "Hold to push the board through".to_string(),
             BringBack => "Bring the board back around".to_string(),
             Stop(s) => step(s, "Stop in", "Stop out", "1/16\"", "1\""),
+            Miter(s) if self.view == ShopView::TableSaw => step(
+                s,
+                "Swing the gauge left",
+                "Swing the gauge right",
+                "1°",
+                "to the next stop",
+            ),
             Miter(s) => step(s, "Swing left", "Swing right", "1°", "to the next stop"),
             Depth(s) => step(s, "Depth stop down", "Depth stop up", "1/16\"", "1/4\""),
             Lower => "Hold to lower the blade".to_string(),
@@ -445,6 +455,7 @@ impl Shop<'_> {
             (ShopView::TableSaw, StandOnEdge) => table.can_tip(),
             (ShopView::TableSaw, Push) => table.can_push(),
             (ShopView::TableSaw, BringBack) => table.can_bring_back(),
+            (ShopView::TableSaw, Miter(_)) => table.can_swing_gauge(),
             (ShopView::MiterSaw, TurnLeft | TurnRight | Flip) => miter.can_turn(),
             (ShopView::MiterSaw, StandOnEdge) => miter.can_tip(),
             (ShopView::MiterSaw, Lower) => miter.has_work(),
@@ -491,6 +502,10 @@ impl Shop<'_> {
             }
             Setting::Guide => ("Rip fence".to_string(), table.saw.fence.to_string()),
             Setting::Blade => ("Blade height".to_string(), table.saw.height.to_string()),
+            Setting::GaugeAngle => (
+                "Gauge angle".to_string(),
+                describe_miter(table.saw.gauge_angle),
+            ),
             Setting::Stop => ("Length".to_string(), miter.stop.to_string()),
             Setting::Miter => ("Miter".to_string(), describe_miter(miter.saw.miter)),
             Setting::Depth => (
@@ -565,6 +580,7 @@ fn setting_help(setting: Setting) -> Option<&'static str> {
         Setting::Blade => "Up/Down arrows: raise or lower the blade 1/16\" (Shift: 1/4\")",
         Setting::Stop => "Left/Right arrows: move the stop 1/16\" (Shift: 1\")",
         Setting::Miter => "[ and ]: swing the miter 1° (Shift: to the next stop)",
+        Setting::GaugeAngle => "[ and ]: swing the miter gauge 1° (Shift: to the next stop)",
         Setting::Depth => {
             "Up/Down arrows: raise or lower the depth stop 1/16\" (Shift: 1/4\"); below the \
              table, it's off"

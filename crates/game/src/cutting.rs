@@ -419,6 +419,11 @@ fn settings(tool: Tool) -> String {
     match tool {
         Tool::TableSaw { saw, lie, .. } => {
             let guide = match saw.miter_gauge {
+                Some(stop) if saw.gauge_angle != woodsim::Angle::ZERO => format!(
+                    "miter gauge at {}, stop at {}",
+                    describe_miter(saw.gauge_angle),
+                    measured(stop)
+                ),
                 Some(stop) => format!("miter gauge, stop at {}", measured(stop)),
                 None => format!("rip fence at {}", measured(saw.fence)),
             };
@@ -957,7 +962,7 @@ fn nibbles(first: Tool, then: Tool) -> bool {
             },
         ) => {
             lie_a == lie_b
-                && (a.blade, a.height) == (b.blade, b.height)
+                && (a.blade, a.height, a.gauge_angle) == (b.blade, b.height, b.gauge_angle)
                 && match (a.miter_gauge, b.miter_gauge) {
                     (None, None) => b.fence <= a.fence,
                     (Some(stop_a), Some(stop_b)) => stop_b <= stop_a,
@@ -983,6 +988,7 @@ fn verb(tool: Tool) -> &'static str {
             saw:
                 woodsim::TableSaw {
                     miter_gauge: Some(_),
+                    gauge_angle: woodsim::Angle::ZERO,
                     ..
                 },
             ..
