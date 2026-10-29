@@ -173,6 +173,7 @@ fn work_in_studio(
             }
             Action::StopRender => studio.stop(),
             Action::Engine => studio.switch_engine(),
+            Action::DepthOfField => studio.switch_depth_of_field(),
             _ => {}
         }
     }

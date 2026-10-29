@@ -84,10 +84,12 @@ pub enum Icon {
     Quality,
     /// A chip with pins along its sides: render on the GPU.
     Chip,
+    /// A sharp spot in front of a blurred one: depth of field.
+    Focus,
 }
 
 impl Icon {
-    const ALL: [Icon; 48] = [
+    const ALL: [Icon; 49] = [
         Icon::TurnLeft,
         Icon::TurnRight,
         Icon::Flip,
@@ -136,6 +138,7 @@ impl Icon {
         Icon::Backdrop,
         Icon::Quality,
         Icon::Chip,
+        Icon::Focus,
     ];
 
     /// Every icon there is.
@@ -469,6 +472,15 @@ impl Icon {
                     shapes.push(Line(vec![p(at, 0.8), p(at, 0.92)], 0.06));
                     shapes.push(Line(vec![p(0.08, at), p(0.2, at)], 0.06));
                     shapes.push(Line(vec![p(0.8, at), p(0.92, at)], 0.06));
+                }
+                shapes
+            }
+            Icon::Focus => {
+                let behind = p(0.7, 0.3);
+                let mut shapes = vec![Disc(p(0.36, 0.64), 0.22), Disc(behind, 0.06)];
+                for k in 0..8 {
+                    let toward = Vec2::from_angle(std::f32::consts::TAU * k as f32 / 8.0);
+                    shapes.push(Disc(behind + 0.17 * toward, 0.04));
                 }
                 shapes
             }

@@ -306,6 +306,7 @@ fn dock(view: ShopView) -> Vec<Vec<Tool>> {
                     }),
                     Icon::Quality,
                 ),
+                tool(DepthOfField, Icon::Focus),
             ],
             vec![
                 tool(Engine, Icon::Chip),
@@ -538,6 +539,14 @@ impl Shop<'_> {
                     "Rendering on the CPU. Render on the GPU instead".to_string()
                 }
             },
+            DepthOfField if self.studio.setup.depth_of_field => {
+                "Depth of field: what's far behind the piece is soft. Make everything sharp"
+                    .to_string()
+            }
+            DepthOfField => {
+                "No depth of field: everything's sharp. Soften what's far behind the piece"
+                    .to_string()
+            }
             StopRender if self.studio.rendering() => "Stop rendering".to_string(),
             StopRender => "Back to setting up".to_string(),
             Store if self.view == ShopView::Bench => "Put it away".to_string(),
@@ -620,7 +629,7 @@ impl Shop<'_> {
             (
                 ShopView::Studio,
                 TurnLeft | TurnRight | Flip | ZoomIn | ZoomOut | Light(_) | Swing(_) | Raise(_)
-                | Brighten(_) | Tip(_) | Lens(_) | Backdrop(_) | Quality(_) | Engine,
+                | Brighten(_) | Tip(_) | Lens(_) | Backdrop(_) | Quality(_) | Engine | DepthOfField,
             ) => self.studio.shoot().is_some() && !self.studio.rendering(),
             _ => true,
         }
@@ -640,6 +649,7 @@ impl Shop<'_> {
             },
             Action::Light(index) => self.studio.setup.picked == index,
             Action::Engine => self.studio.setup.engine == crate::shoot::Engine::Gpu,
+            Action::DepthOfField => self.studio.setup.depth_of_field,
             Action::Help => self.showing.help,
             Action::Inventory => self.showing.inventory,
             _ => false,

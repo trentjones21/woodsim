@@ -35,8 +35,8 @@ pub const FOLDER: &str = "renders";
 
 /// How much of the picture the piece fills when it's framed, each way.
 const FILL: f32 = 0.78;
-/// The lens's f-number: stopped down enough that the whole piece is sharp, with only what's
-/// far behind it a little soft.
+/// The lens's f-number, with depth of field: stopped down enough that the whole piece is
+/// sharp, with only what's far behind it a little soft.
 const F_NUMBER: f32 = 8.0;
 /// Lenses, as focal lengths on a 35 mm camera (whose picture is 24 mm high).
 const LENSES: [u32; 8] = [24, 35, 50, 70, 85, 105, 135, 200];
@@ -214,6 +214,9 @@ pub struct Setup {
     /// How far the camera looks down at the piece, in radians.
     pub pitch: f32,
     pub engine: Engine,
+    /// Whether what's far behind the piece comes out a little soft, as through a real lens at
+    /// f/8, or everything's sharp, as through a pinhole.
+    pub depth_of_field: bool,
 }
 
 impl Setup {
@@ -252,6 +255,7 @@ impl Default for Setup {
             lens: 70,
             pitch: 24.0 * PI / 180.0,
             engine: Engine::Gpu,
+            depth_of_field: true,
         }
     }
 }
@@ -566,7 +570,11 @@ impl Shoot {
                 right,
                 up: right.cross(forward),
                 tan_half_height: SENSOR_HALF_HEIGHT / lens,
-                aperture: lens / 1000.0 / (2.0 * F_NUMBER),
+                aperture: if setup.depth_of_field {
+                    lens / 1000.0 / (2.0 * F_NUMBER)
+                } else {
+                    0.0
+                },
                 focus: self.distance,
             },
             EXPOSURE,
@@ -785,6 +793,13 @@ impl Studio {
                 Engine::Gpu => Engine::Cpu,
                 Engine::Cpu => Engine::Gpu,
             };
+        }
+    }
+
+    /// Renders with everything sharp from now on, or with what's far behind the piece soft.
+    pub fn switch_depth_of_field(&mut self) {
+        if let Some((_, setup)) = self.adjust() {
+            setup.depth_of_field = !setup.depth_of_field;
         }
     }
 
@@ -1171,6 +1186,23 @@ mod tests {
             big: false,
         });
         assert_eq!(studio.setup.lens, 80);
+    }
+
+    #[test]
+    fn without_depth_of_field_the_camera_is_a_pinhole() {
+        let mut studio = Studio::default();
+        studio.open(&piece(), 1.5);
+        let aperture = |studio: &Studio| {
+            let shoot = studio.shoot().unwrap();
+            shoot.scene(&studio.setup).camera.aperture
+        };
+        // A 70 mm lens at f/8 is 4.4 mm across.
+        assert!((aperture(&studio) - 0.070 / 16.0).abs() < 1e-6);
+        studio.switch_depth_of_field();
+        assert!(!studio.setup.depth_of_field);
+        assert_eq!(aperture(&studio), 0.0);
+        studio.switch_depth_of_field();
+        assert!(studio.setup.depth_of_field);
     }
 
     #[test]

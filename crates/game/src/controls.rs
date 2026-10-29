@@ -71,6 +71,9 @@ pub enum Action {
     StopRender,
     /// In the studio, render on the CPU from now on, or on the GPU.
     Engine,
+    /// In the studio, render with everything sharp from now on, or with what's far behind the
+    /// piece soft.
+    DepthOfField,
     /// At a saw: put away what's on it, or put the measured piece away and the offcut back to
     /// cut again. At the bench, put away the picked part or glue-up.
     Store,
@@ -174,6 +177,7 @@ pub fn bound(view: ShopView, key: KeyCode, shift: bool) -> Option<Action> {
         (Studio, Enter | NumpadEnter) => Render,
         (Studio, Backspace | Delete) => StopRender,
         (Studio, KeyG) => Engine,
+        (Studio, KeyD) => DepthOfField,
         (_, KeyQ) => TurnLeft,
         (_, KeyE) => TurnRight,
         (_, KeyF) => Flip,
