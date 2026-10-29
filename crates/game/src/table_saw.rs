@@ -7,6 +7,7 @@ use woodsim::Length;
 
 use crate::{
     chop::MiterSawStation,
+    controls::{Action, Actions, Step},
     feed::TableSawStation,
     hand::Hand,
     meshes::{Grain, board_mesh, lumber_mesh, rounded_box},
@@ -25,17 +26,6 @@ pub const BOUNDS: Block = Block {
     min: Vec3::new(TABLE_LEFT, -ORIGIN.y, OUTFEED_END),
     max: Vec3::new(TABLE_RIGHT, FENCE_HEIGHT, TABLE_FRONT + inches(2.0)),
 };
-
-pub const HELP: &str = "Left/Right: move the fence or gauge stop 1/16\"   Shift: 1\"   \
-                        Or drag it\n\
-                        G: switch between the rip fence and the miter gauge\n\
-                        Up/Down: raise or lower the blade 1/16\"   Shift+Up/Down: 1/4\"\n\
-                        Drag the board, or hold Space, to push it   Drag it back to back it out\n\
-                        Q/E: turn the board   F: flip it   V: stand it on edge   \
-                        B: bring it back around\n\
-                        Click a board clear of the blade: pick it up   \
-                        Holding one: click the saw to set it here\n\
-                        Tab: go to the miter saw   Esc: back to the shop";
 
 /// The cast-iron top, in table space.
 const TABLE_LEFT: f32 = inches(-14.0);
@@ -81,12 +71,12 @@ impl Plugin for TableSawPlugin {
                 Update,
                 (
                     (
-                        move_fence_with_keys,
-                        switch_guide_with_key,
-                        raise_blade_with_keys,
-                        turn_with_keys,
+                        move_guide,
+                        switch_guide,
+                        raise_blade,
+                        turn_board,
                         push_board,
-                        bring_back_with_key,
+                        bring_back,
                     )
                         .run_if(resource_equals(ShopView::TableSaw)),
                     set_loose_aside,
@@ -379,32 +369,26 @@ fn spawn_saw(
         .observe(drag_gauge_stop);
 }
 
-fn move_fence_with_keys(keys: Res<ButtonInput<KeyCode>>, mut station: ResMut<TableSawStation>) {
-    let step = if keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]) {
-        FENCE_BIG_STEP
-    } else {
-        FENCE_STEP
-    };
-    // The arrows move whichever guide is in use the way they point: the gauge's stop is left
-    // of the blade, so moving it left makes the piece longer.
-    let (right, left) = (
-        keys.just_pressed(KeyCode::ArrowRight),
-        keys.just_pressed(KeyCode::ArrowLeft),
-    );
-    if !(right || left) {
-        return;
-    }
-    if station.using_gauge() {
-        let stop = station.gauge_stop();
-        station.set_gauge_stop(if right { stop - step } else { stop + step });
-    } else {
-        let fence = station.saw.fence;
-        station.set_fence(if right { fence + step } else { fence - step });
+/// Moves whichever guide is in use the way its arrow points: the gauge's stop is left of the
+/// blade, so moving it left makes the piece longer.
+fn move_guide(actions: Res<Actions>, mut station: ResMut<TableSawStation>) {
+    for action in actions.started() {
+        let Action::Guide(Step { more: right, big }) = action else {
+            continue;
+        };
+        let step = if big { FENCE_BIG_STEP } else { FENCE_STEP };
+        if station.using_gauge() {
+            let stop = station.gauge_stop();
+            station.set_gauge_stop(if right { stop - step } else { stop + step });
+        } else {
+            let fence = station.saw.fence;
+            station.set_fence(if right { fence + step } else { fence - step });
+        }
     }
 }
 
-fn switch_guide_with_key(keys: Res<ButtonInput<KeyCode>>, mut station: ResMut<TableSawStation>) {
-    if keys.just_pressed(KeyCode::KeyG) {
+fn switch_guide(actions: Res<Actions>, mut station: ResMut<TableSawStation>) {
+    if actions.just(Action::SwitchGuide) {
         station.switch_guide();
     }
 }
@@ -499,33 +483,25 @@ fn drag_fence(
     }
 }
 
-fn raise_blade_with_keys(keys: Res<ButtonInput<KeyCode>>, mut station: ResMut<TableSawStation>) {
-    let step = if keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]) {
-        HEIGHT_BIG_STEP
-    } else {
-        HEIGHT_STEP
-    };
-    let height = station.saw.height;
-    if keys.just_pressed(KeyCode::ArrowUp) {
-        station.set_height(height + step);
-    }
-    if keys.just_pressed(KeyCode::ArrowDown) {
-        station.set_height(height - step);
+fn raise_blade(actions: Res<Actions>, mut station: ResMut<TableSawStation>) {
+    for action in actions.started() {
+        let Action::Blade(Step { more: up, big }) = action else {
+            continue;
+        };
+        let step = if big { HEIGHT_BIG_STEP } else { HEIGHT_STEP };
+        let height = station.saw.height;
+        station.set_height(if up { height + step } else { height - step });
     }
 }
 
-fn push_board(
-    keys: Res<ButtonInput<KeyCode>>,
-    time: Res<Time>,
-    mut station: ResMut<TableSawStation>,
-) {
-    if keys.pressed(KeyCode::Space) {
+fn push_board(actions: Res<Actions>, time: Res<Time>, mut station: ResMut<TableSawStation>) {
+    if actions.held(Action::Push) {
         station.push(FEED_SPEED * time.delta_secs());
     }
 }
 
-fn bring_back_with_key(keys: Res<ButtonInput<KeyCode>>, mut station: ResMut<TableSawStation>) {
-    if keys.just_pressed(KeyCode::KeyB) {
+fn bring_back(actions: Res<Actions>, mut station: ResMut<TableSawStation>) {
+    if actions.just(Action::BringBack) {
         station.bring_back();
     }
 }
@@ -566,20 +542,17 @@ fn drag_board(
     }
 }
 
-/// Q and E turn the board a quarter turn left and right, and F flips it over, while it waits
-/// in front of the blade.
-fn turn_with_keys(keys: Res<ButtonInput<KeyCode>>, mut station: ResMut<TableSawStation>) {
-    if keys.just_pressed(KeyCode::KeyQ) {
-        station.turn_left();
-    }
-    if keys.just_pressed(KeyCode::KeyE) {
-        station.turn_right();
-    }
-    if keys.just_pressed(KeyCode::KeyF) {
-        station.flip();
-    }
-    if keys.just_pressed(KeyCode::KeyV) {
-        station.tip();
+/// Turns the board a quarter turn left or right, flips it over, or stands it on an edge, while
+/// it waits in front of the blade.
+fn turn_board(actions: Res<Actions>, mut station: ResMut<TableSawStation>) {
+    for action in actions.started() {
+        match action {
+            Action::TurnLeft => station.turn_left(),
+            Action::TurnRight => station.turn_right(),
+            Action::Flip => station.flip(),
+            Action::StandOnEdge => station.tip(),
+            _ => continue,
+        };
     }
 }
 

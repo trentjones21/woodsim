@@ -191,7 +191,7 @@ fn texture(width: u32, height: u32, pixels: Vec<u8>, format: TextureFormat) -> I
 
 /// Appends each smaller mip level to an RGBA8 image, halving until 1x1, by averaging 2x2
 /// blocks. Returns the data and the number of levels.
-fn with_mipmaps(width: u32, height: u32, pixels: Vec<u8>) -> (Vec<u8>, u32) {
+pub fn with_mipmaps(width: u32, height: u32, pixels: Vec<u8>) -> (Vec<u8>, u32) {
     let mut data = pixels;
     let (mut w, mut h) = (width as usize, height as usize);
     let mut start = 0;

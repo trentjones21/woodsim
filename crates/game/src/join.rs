@@ -496,6 +496,19 @@ impl BenchStation {
         true
     }
 
+    /// The group a turn turns when the pointer isn't on a part: the picked part's, or the only
+    /// one on the bench.
+    pub fn turnable(&self) -> Option<usize> {
+        self.picked
+            .map(|picked| picked.group)
+            .or((self.groups.len() == 1).then_some(0))
+    }
+
+    /// Whether there's a joint for `take_apart` to take back apart.
+    pub fn can_take_apart(&self) -> bool {
+        self.latest().is_some()
+    }
+
     /// The group the last joint went together in, if any.
     fn latest(&self) -> Option<usize> {
         (0..self.groups.len())
@@ -647,20 +660,20 @@ impl BenchStation {
                 )
             });
             return format!(
-                "Click the surface of a part to move it: an end, an edge, or a face. Q/E turn \
-                 the part under the pointer to bring a side facing away around.{last}"
+                "Click the surface of a part to move it: an end, an edge, or a face. If the \
+                 side you want faces away, click the part and turn it around.{last}"
             );
         };
         let mine = name(picked.surface);
         let (Some(lining_up), Some(preview)) = (self.lining_up, self.preview()) else {
             let take = if self.groups[picked.group].is_loose() {
-                "it"
+                "pick it up"
             } else {
-                "up the glue-up"
+                "pick up the glue-up"
             };
             return format!(
-                "Moving its {mine}. Click the surface it goes against; if it faces away, Q/E \
-                 turn the part under the pointer. Space picks {take}."
+                "Moving its {mine}. Click the surface it goes against (if it faces away, drag \
+                 to look around), or {take}."
             );
         };
         let theirs = name(lining_up.onto.surface);
@@ -674,7 +687,7 @@ impl BenchStation {
         let [a, b] = [lining_up.onto.member, first + picked.member].map(|k| members[k].axes()[0]);
         let in_line = (a[0] * b[0] + a[1] * b[1] + a[2] * b[2]).abs() > 0.999;
         let flip = if in_line && mine == "mitered end" && theirs == "mitered end" {
-            " They run on in a straight line; F flips it over to make a corner."
+            " They run on in a straight line; flip it over to make a corner."
         } else {
             ""
         };
@@ -687,7 +700,7 @@ impl BenchStation {
             String::new()
         };
         format!(
-            "Its {mine} against the {theirs}{lined_up}.{flip} Enter fastens it with {}{places}.{}",
+            "Its {mine} against the {theirs}{lined_up}.{flip} Fasten it with {}{places}.{}",
             fastened(self.fastener),
             describe_fit(&preview.assembly, first)
         )
@@ -952,7 +965,7 @@ mod tests {
         assert_eq!(lining_up.onto, spot(0, 0, miter(&piece, true)));
         assert_eq!(
             bench.status(false),
-            "Its mitered end against the mitered end. Enter fastens it with glue. Every joint is \
+            "Its mitered end against the mitered end. Fasten it with glue. Every joint is \
              tight."
         );
         // While it's lined up, it's shown where it would go, and nowhere else.
@@ -1009,7 +1022,7 @@ mod tests {
                 assert!(
                     bench
                         .status(false)
-                        .contains("Enter fastens it with glue at 2 joints."),
+                        .contains("Fasten it with glue at 2 joints."),
                     "{}",
                     bench.status(false)
                 );
@@ -1117,7 +1130,7 @@ mod tests {
         // The frame's corner comes off whole, turned as it lay, with its joint.
         bench.turn_group(0, Rotation::quarter_turns(2, 1));
         click(&mut bench, spot(0, 1, Surface::Top));
-        assert!(bench.status(false).ends_with("Space picks up the glue-up."));
+        assert!(bench.status(false).ends_with("or pick up the glue-up."));
         let Some(Workpiece::GlueUp(corner)) = bench.take_picked() else {
             panic!("expected the glue-up");
         };
@@ -1251,11 +1264,11 @@ mod tests {
         assert!(
             bench
                 .status(false)
-                .contains("F flips it over to make a corner.")
+                .contains("flip it over to make a corner.")
         );
         bench.turn_around_joint(2);
         let status = bench.status(false);
-        assert!(!status.contains("F flips"), "{status}");
+        assert!(!status.contains("flip it over"), "{status}");
         assert!(status.ends_with("Every joint is tight."), "{status}");
         let shown = bench.shown();
         assert!(

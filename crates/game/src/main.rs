@@ -2,8 +2,11 @@
 
 mod bench;
 mod chop;
+mod controls;
 mod feed;
 mod hand;
+mod hud;
+mod icons;
 mod join;
 mod meshes;
 mod miter_saw;
@@ -31,7 +34,9 @@ use bevy::{
 };
 
 use bench::BenchPlugin;
+use controls::ControlsPlugin;
 use hand::HandPlugin;
+use hud::HudPlugin;
 use miter_saw::MiterSawPlugin;
 use scenery::ScenePlugin;
 use shop::ShopPlugin;
@@ -92,6 +97,8 @@ fn main() {
         MiterSawPlugin,
         BenchPlugin,
         HandPlugin,
+        ControlsPlugin,
+        HudPlugin,
     ));
 
     if let Some(path) = screenshot {

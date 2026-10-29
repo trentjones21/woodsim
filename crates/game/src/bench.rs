@@ -16,11 +16,13 @@ use bevy::{
     prelude::*,
     render::render_resource::PrimitiveTopology,
 };
-use woodsim::{Board, Fastener, Rotation, Surface, outline};
+use woodsim::{Board, Rotation, Surface, outline};
 
 use crate::{
+    controls::{Action, Actions, Arrow},
     hand::{Gesture, Hand},
-    join::{BenchStation, HALF_TOP, Spot, assembly_point, fastened, surface_at},
+    hud::OnHud,
+    join::{BenchStation, HALF_TOP, Spot, assembly_point, surface_at},
     meshes::{Grain, board_mesh, lumber_mesh},
     plan::{self, Plan},
     shop::{
@@ -37,15 +39,6 @@ pub const BOUNDS: Block = Block {
     min: Vec3::new(-HALF_TOP.x, -ORIGIN.y, -HALF_TOP.y),
     max: Vec3::new(HALF_TOP.x, inches(10.0), HALF_TOP.y),
 };
-
-pub const HELP: &str = "Click a surface of a part, then the surface it goes against\n\
-                        Q/E: turn the part under the pointer, or around the joint   \
-                        F: flip it\n\
-                        Arrows: slide it across the joint (Shift: 1/16\")   Enter: fasten it\n\
-                        1: glue   2: brads   3: screws   U: take the last joint apart\n\
-                        Backspace: let go   Space: pick up a loose part   P: plans to print\n\
-                        Drag: look around   Scroll: zoom   Tab: go to the table saw   \
-                        Esc: back to the shop";
 
 const TOP_THICKNESS: f32 = inches(1.75);
 
@@ -66,7 +59,7 @@ impl Plugin for BenchPlugin {
                 Update,
                 (
                     look_from_the_front,
-                    (work_with_keys, look_around).run_if(resource_equals(ShopView::Bench)),
+                    (work_at_bench, look_around).run_if(resource_equals(ShopView::Bench)),
                     draw_bench,
                     mark_surfaces,
                 )
@@ -261,9 +254,15 @@ fn look_around(
     scroll: Res<AccumulatedMouseScroll>,
     mut pinches: MessageReader<PinchGesture>,
     gesture: Res<Gesture>,
+    on_hud: Res<OnHud>,
     mut view: ResMut<BenchView>,
 ) {
-    if mouse.pressed(MouseButton::Left) && gesture.dragged() && motion.delta != Vec2::ZERO {
+    // A drag that starts on a button isn't one to look around with.
+    if mouse.pressed(MouseButton::Left)
+        && !on_hud.pressed()
+        && gesture.dragged()
+        && motion.delta != Vec2::ZERO
+    {
         view.yaw -= motion.delta.x * TURN_PER_PIXEL;
         view.pitch = (view.pitch + motion.delta.y * TURN_PER_PIXEL).clamp(LEAST_PITCH, MOST_PITCH);
     }
@@ -300,75 +299,73 @@ fn arrow_slides(directions: [Vec3; 2], right: Vec3, up: Vec3) -> [(usize, bool);
     ]
 }
 
-fn work_with_keys(
-    keys: Res<ButtonInput<KeyCode>>,
+/// Does what's asked at the bench: picks the fastener; turns or flips the part under the
+/// pointer, or else the picked one (or the only one), or the part being lined up around the
+/// joint; slides it across the joint; fastens it or lets go; takes the last joint apart; picks
+/// a part up; or draws up plans.
+fn work_at_bench(
+    actions: Res<Actions>,
     camera: Single<&GlobalTransform, With<ShopCamera>>,
     pointing: Res<Pointing>,
     parts: Query<&BenchPart>,
     mut bench: ResMut<BenchStation>,
     mut hand: ResMut<Hand>,
 ) {
-    for (key, fastener) in [
-        (KeyCode::Digit1, Fastener::Glue),
-        (KeyCode::Digit2, Fastener::Brads),
-        (KeyCode::Digit3, Fastener::Screws),
-    ] {
-        if keys.just_pressed(key) && bench.fastener != fastener {
-            bench.fastener = fastener;
-        }
-    }
-    // Q and E turn a part a quarter turn, seen from above: the part under the pointer, or else
-    // the picked one, or the part being lined up, around the joint. F flips it over.
     let under_pointer = pointing
         .part
         .and_then(|entity| parts.get(entity).ok())
         .map(|part| part.group);
-    for (key, quarters) in [(KeyCode::KeyQ, 1), (KeyCode::KeyE, -1), (KeyCode::KeyF, 2)] {
-        if !keys.just_pressed(key) {
-            continue;
-        }
-        if bench.lining_up.is_some() {
-            bench.turn_around_joint(quarters);
-        } else if let Some(group) = under_pointer.or(bench.picked.map(|picked| picked.group)) {
-            let rotation = match key {
-                KeyCode::KeyF => Rotation::quarter_turns(0, 2),
-                _ => Rotation::quarter_turns(2, quarters),
-            };
-            bench.turn_group(group, rotation);
-        }
-    }
-    if keys.just_pressed(KeyCode::KeyP) {
-        draw_up_plans(&mut bench, under_pointer);
-    }
-    if let Some(directions) = bench.slide_directions() {
-        let fine = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
-        let arrows = [
-            KeyCode::ArrowLeft,
-            KeyCode::ArrowRight,
-            KeyCode::ArrowUp,
-            KeyCode::ArrowDown,
-        ];
-        let slides = arrow_slides(directions, camera.right().into(), camera.up().into());
-        for (key, (axis, toward_most)) in arrows.into_iter().zip(slides) {
-            if keys.just_pressed(key) {
-                bench.slide(axis, toward_most, fine);
+    let slides = bench
+        .slide_directions()
+        .map(|directions| arrow_slides(directions, camera.right().into(), camera.up().into()));
+    for action in actions.started() {
+        match action {
+            Action::Use(fastener) if bench.fastener != fastener => bench.fastener = fastener,
+            Action::TurnLeft | Action::TurnRight | Action::Flip => {
+                let quarters = match action {
+                    Action::TurnLeft => 1,
+                    Action::TurnRight => -1,
+                    _ => 2,
+                };
+                if bench.lining_up.is_some() {
+                    bench.turn_around_joint(quarters);
+                } else if let Some(group) = under_pointer.or(bench.turnable()) {
+                    let rotation = match action {
+                        Action::Flip => Rotation::quarter_turns(0, 2),
+                        _ => Rotation::quarter_turns(2, quarters),
+                    };
+                    bench.turn_group(group, rotation);
+                }
             }
+            Action::Slide(arrow, fine) => {
+                if let Some(slides) = slides {
+                    let index = match arrow {
+                        Arrow::Left => 0,
+                        Arrow::Right => 1,
+                        Arrow::Up => 2,
+                        Arrow::Down => 3,
+                    };
+                    let (axis, toward_most) = slides[index];
+                    bench.slide(axis, toward_most, fine);
+                }
+            }
+            Action::Fasten => {
+                bench.glue();
+            }
+            Action::LetGo => bench.cancel(),
+            Action::TakeApart => {
+                bench.take_apart();
+            }
+            Action::PickUp => {
+                if hand.0.is_none()
+                    && let Some(work) = bench.take_picked()
+                {
+                    hand.0 = Some(work);
+                }
+            }
+            Action::Plans => draw_up_plans(&mut bench, under_pointer),
+            _ => {}
         }
-    }
-    if keys.any_just_pressed([KeyCode::Enter, KeyCode::NumpadEnter]) {
-        bench.glue();
-    }
-    if keys.any_just_pressed([KeyCode::Backspace, KeyCode::Delete]) {
-        bench.cancel();
-    }
-    if keys.just_pressed(KeyCode::KeyU) {
-        bench.take_apart();
-    }
-    if keys.just_pressed(KeyCode::Space)
-        && hand.0.is_none()
-        && let Some(work) = bench.take_picked()
-    {
-        hand.0 = Some(work);
     }
 }
 
@@ -674,7 +671,7 @@ fn sheet(polygons: &[Vec<[woodsim::Length; 3]>]) -> Mesh {
     .with_inserted_indices(Indices::U32(indices))
 }
 
-/// The bench's reading: the fastener chosen and how many parts are on it.
+/// How many parts and joints are on the bench: "3 parts, 2 joints".
 pub fn reading(bench: &BenchStation) -> String {
     let parts: usize = bench
         .groups
@@ -687,6 +684,7 @@ pub fn reading(bench: &BenchStation) -> String {
         .map(|group| group.assembly.joints().len())
         .sum();
     let parts = match parts {
+        0 => return "nothing yet".to_string(),
         1 => "1 part".to_string(),
         n => format!("{n} parts"),
     };
@@ -695,10 +693,7 @@ pub fn reading(bench: &BenchStation) -> String {
         1 => ", 1 joint".to_string(),
         n => format!(", {n} joints"),
     };
-    format!(
-        "Fastener: {}   On the bench: {parts}{joints}",
-        fastened(bench.fastener)
-    )
+    format!("{parts}{joints}")
 }
 
 #[cfg(test)]

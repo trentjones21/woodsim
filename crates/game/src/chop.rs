@@ -149,6 +149,29 @@ impl MiterSawStation {
         self.relay(self.lie.tipped())
     }
 
+    /// Whether the board against the stop can be turned or flipped: it's waiting there with the
+    /// blade up.
+    pub fn can_turn(&self) -> bool {
+        self.blade_up() && matches!(self.work, Work::Ready { .. })
+    }
+
+    /// Whether it can stand on an edge: it can turn, and it's a board rather than a glue-up.
+    pub fn can_tip(&self) -> bool {
+        self.can_turn()
+            && !matches!(
+                self.work,
+                Work::Ready {
+                    board: Workpiece::GlueUp(_),
+                    ..
+                }
+            )
+    }
+
+    /// Whether there's anything on the saw for the blade to come down on.
+    pub fn has_work(&self) -> bool {
+        !matches!(self.work, Work::Empty)
+    }
+
     fn relay(&mut self, lie: Orientation) -> bool {
         if !self.blade_up() {
             return false;
@@ -491,7 +514,7 @@ impl MiterSawStation {
                 ..
             } => "Cutting into the glue-up.".to_string(),
             Work::Ready { board, .. } => format!(
-                "{}. Hold Space to lower the blade.{}{}",
+                "{}. Hold the blade down to cut.{}{}",
                 work::on_the_saw(board),
                 self.reach_note(board),
                 self.depth_note(board)

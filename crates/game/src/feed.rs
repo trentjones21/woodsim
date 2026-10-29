@@ -178,11 +178,32 @@ impl TableSawStation {
 
     /// Lays the board down another way, if it's in one piece and waiting in front of the blade.
     fn relay(&mut self, lie: Orientation) -> bool {
-        if self.on_saw() != Some(Part::Whole) || self.pass.is_some() || self.advance > -CLEAR {
+        if !self.can_turn() {
             return false;
         }
         self.lie = lie;
         true
+    }
+
+    /// Whether the board can be turned or flipped: it's in one piece, waiting in front of the
+    /// blade.
+    pub fn can_turn(&self) -> bool {
+        self.on_saw() == Some(Part::Whole) && self.pass.is_none() && self.advance <= -CLEAR
+    }
+
+    /// Whether it can stand on an edge: it can turn, and it's a board rather than a glue-up.
+    pub fn can_tip(&self) -> bool {
+        self.can_turn() && !matches!(self.board, Workpiece::GlueUp(_))
+    }
+
+    /// Whether there's a board to push along the fence.
+    pub fn can_push(&self) -> bool {
+        self.on_saw().is_some()
+    }
+
+    /// Whether `bring_back` would bring the board back around.
+    pub fn can_bring_back(&self) -> bool {
+        self.on_saw() == Some(Part::Whole) && !self.at_blade() && self.advance != START
     }
 
     /// Where the blade's center is along the board, from its leading end: negative while the
@@ -452,16 +473,16 @@ impl TableSawStation {
                 if self.at_blade() {
                     format!("Cutting. So far, {kerf}.{}", self.warning())
                 } else {
-                    format!("Cut {kerf}. Press B to bring the board back around for another pass.")
+                    format!("Cut {kerf}. Bring the board back around for another pass.")
                 }
             }
             Some(Ok(Passed::Missed)) if self.past_blade() => {
                 "The blade is below the table, so the board went over it uncut. \
-                 Press B to bring it back around."
+                 Bring it back around for another pass."
                     .to_string()
             }
             _ => format!(
-                "{}. Drag it, or hold Space, to push it through.{}",
+                "{}. Drag it, or hold the push button, to push it through.{}",
                 work::on_the_saw(&self.board),
                 self.warning()
             ),
@@ -477,11 +498,11 @@ impl TableSawStation {
         match self.saw.miter_gauge {
             None if reach < span && self.saw.fence < span => {
                 " Careful: it rides the fence on its short side, so it can twist into the blade \
-                 and kick back. Press G to crosscut with the miter gauge."
+                 and kick back. Switch to the miter gauge to crosscut it."
             }
             Some(stop) if reach > span && stop < span => {
                 " Careful: the gauge only holds the back of a board this long, so it can wander \
-                 off line. Press G to rip it against the fence."
+                 off line. Switch to the rip fence to rip it."
             }
             _ => "",
         }
@@ -554,7 +575,7 @@ mod tests {
         assert_eq!(
             station.status(),
             "Board on the saw: 3/4\" x 7-1/4\" x 24\", with a stopped cut 11-9/16\" long on top \
-             and 13\" on the bottom. Drag it, or hold Space, to push it through."
+             and 13\" on the bottom. Drag it, or hold the push button, to push it through."
         );
     }
 
@@ -623,7 +644,7 @@ mod tests {
         assert_eq!(
             station.status(),
             "Cut a 1/8\"-wide, 1/4\"-deep groove the full length. \
-             Press B to bring the board back around for another pass."
+             Bring the board back around for another pass."
         );
 
         // Move the fence over and cut a second groove beside the first.
@@ -772,7 +793,7 @@ mod tests {
         assert!(
             station
                 .status()
-                .ends_with("Press G to rip it against the fence.")
+                .ends_with("Switch to the rip fence to rip it.")
         );
     }
 
@@ -875,7 +896,7 @@ mod tests {
         assert_eq!(station.board, Workpiece::Board(crosscut_piece()));
         assert_eq!(
             station.status(),
-            "Board on the saw: 3/4\" x 6\" x 12\". Drag it, or hold Space, to push it through."
+            "Board on the saw: 3/4\" x 6\" x 12\". Drag it, or hold the push button, to push it through."
         );
     }
 

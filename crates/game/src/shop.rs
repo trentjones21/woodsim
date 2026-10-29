@@ -1,15 +1,11 @@
-//! The shop around the stations: shared layout helpers, the camera, the readout, and moving
-//! between the overview and the stations.
+//! The shop around the stations: shared layout helpers, the camera, and moving between the
+//! overview and the stations.
 
-use std::{
-    f32::consts::{FRAC_PI_2, PI},
-    time::Duration,
-};
+use std::f32::consts::{FRAC_PI_2, PI};
 
 use bevy::{
     camera::Exposure,
     core_pipeline::tonemapping::Tonemapping,
-    diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin},
     ecs::system::{EntityCommands, SystemParam},
     input::{
         gestures::PinchGesture,
@@ -20,15 +16,15 @@ use bevy::{
     picking::pointer::PointerButton,
     prelude::*,
     render::view::{ColorGrading, ColorGradingGlobal},
-    time::common_conditions::on_real_timer,
 };
 use woodsim::{Across, Angle, Board, Cut, Kerf, Length, Orientation, Piece, Run};
 
 use crate::{
     bench::{self, BenchView},
     chop::MiterSawStation,
+    controls::{Action, Actions, Arrow},
     feed::TableSawStation,
-    hand::{self, Gesture, Hand, set_down},
+    hand::{Gesture, Hand, set_down},
     join::BenchStation,
     meshes::{lumber_mesh, rounded_box},
     miter_saw,
@@ -172,7 +168,7 @@ pub struct Slot(pub usize);
 
 /// What the camera is showing: the whole shop, or one station up close. A station's keyboard
 /// controls only work while it's up close.
-#[derive(Resource, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Resource, Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum ShopView {
     #[default]
     Overview,
@@ -180,13 +176,6 @@ pub enum ShopView {
     MiterSaw,
     Bench,
 }
-
-pub const OVERVIEW_HELP: &str = "W/A/S/D or arrows: pan   Drag the floor: pan   \
-                                 Scroll or pinch: zoom   Q/E: rotate\n\
-                                 Click a station to work at it   Tab: go to the table saw\n\
-                                 Click a board to pick it up; new ones are on the lumber rack\n\
-                                 Holding one: click a station or the pile to set it down \
-                                 there, or the scrap bin to throw it away";
 
 /// The floor runs this far from the middle of the shop in each direction, in meters.
 pub const SHOP_HALF_SIZE: f32 = 3.0;
@@ -261,25 +250,13 @@ impl OverviewCamera {
 /// The station under the pointer, and how many of its parts are, so moving from one part to
 /// the next doesn't flicker.
 #[derive(Resource, Default)]
-struct HoveredStation {
-    station: Option<ShopView>,
+pub struct HoveredStation {
+    pub station: Option<ShopView>,
     parts: u32,
 }
 
 #[derive(Component)]
 pub struct ShopCamera;
-
-#[derive(Component)]
-enum ReadoutLine {
-    Reading,
-    Status,
-    Help,
-    CutList,
-    /// Frame rate and frame time, so performance can be checked while playing.
-    Fps,
-    /// The board in hand.
-    Hand,
-}
 
 /// Textures and materials more than one part of the shop uses.
 #[derive(Resource)]
@@ -334,12 +311,11 @@ pub struct ShopPlugin;
 
 impl Plugin for ShopPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(FrameTimeDiagnosticsPlugin::default())
-            .init_resource::<ShopView>()
+        app.init_resource::<ShopView>()
             .init_resource::<ShopAssets>()
             .init_resource::<OverviewCamera>()
             .init_resource::<HoveredStation>()
-            .add_systems(Startup, (spawn_shop, spawn_readout))
+            .add_systems(Startup, spawn_shop)
             .add_systems(
                 Update,
                 (
@@ -347,14 +323,8 @@ impl Plugin for ShopPlugin {
                     move_overview.run_if(resource_equals(ShopView::Overview)),
                     follow_view,
                     outline_hovered_station,
-                    update_readout,
                 )
                     .chain(),
-            )
-            // Often enough to follow, slow enough to read.
-            .add_systems(
-                Update,
-                update_fps.run_if(on_real_timer(Duration::from_millis(250))),
             );
     }
 }
@@ -475,22 +445,28 @@ impl Stations<'_> {
 
 /// Esc backs out to the overview; Tab goes around the stations: the table saw, the miter saw,
 /// the workbench.
-fn switch_view(keys: Res<ButtonInput<KeyCode>>, mut view: ResMut<ShopView>) {
-    if keys.just_pressed(KeyCode::Escape) && *view != ShopView::Overview {
-        *view = ShopView::Overview;
-    }
-    if keys.just_pressed(KeyCode::Tab) {
-        *view = match *view {
-            ShopView::TableSaw => ShopView::MiterSaw,
-            ShopView::MiterSaw => ShopView::Bench,
-            ShopView::Overview | ShopView::Bench => ShopView::TableSaw,
+fn switch_view(actions: Res<Actions>, mut view: ResMut<ShopView>) {
+    for action in actions.started() {
+        let next = match action {
+            Action::Back => ShopView::Overview,
+            Action::GoTo(station) => station,
+            Action::NextStation => match *view {
+                ShopView::TableSaw => ShopView::MiterSaw,
+                ShopView::MiterSaw => ShopView::Bench,
+                ShopView::Overview | ShopView::Bench => ShopView::TableSaw,
+            },
+            _ => continue,
         };
+        if *view != next {
+            *view = next;
+        }
     }
 }
 
-/// Pans with the keyboard, rotates in quarter turns, and zooms with the scroll wheel or a pinch.
+/// Pans with the keyboard, rotates in quarter turns, and zooms with the scroll wheel, a pinch,
+/// or the zoom buttons.
 fn move_overview(
-    keys: Res<ButtonInput<KeyCode>>,
+    actions: Res<Actions>,
     scroll: Res<AccumulatedMouseScroll>,
     mut pinches: MessageReader<PinchGesture>,
     time: Res<Time>,
@@ -498,13 +474,13 @@ fn move_overview(
 ) {
     let (forward, right) = overview.ground_axes();
     let mut direction = Vec3::ZERO;
-    for (pan_keys, toward) in [
-        ([KeyCode::KeyW, KeyCode::ArrowUp], forward),
-        ([KeyCode::KeyS, KeyCode::ArrowDown], -forward),
-        ([KeyCode::KeyD, KeyCode::ArrowRight], right),
-        ([KeyCode::KeyA, KeyCode::ArrowLeft], -right),
+    for (arrow, toward) in [
+        (Arrow::Up, forward),
+        (Arrow::Down, -forward),
+        (Arrow::Right, right),
+        (Arrow::Left, -right),
     ] {
-        if keys.any_pressed(pan_keys) {
+        if actions.held(Action::Pan(arrow)) {
             direction += toward;
         }
     }
@@ -513,17 +489,24 @@ fn move_overview(
         overview.pan(direction.normalize() * step);
     }
 
-    if keys.just_pressed(KeyCode::KeyQ) {
+    if actions.just(Action::RotateLeft) {
         overview.yaw += FRAC_PI_2;
     }
-    if keys.just_pressed(KeyCode::KeyE) {
+    if actions.just(Action::RotateRight) {
         overview.yaw -= FRAC_PI_2;
     }
 
-    let lines = match scroll.unit {
+    let mut lines = match scroll.unit {
         MouseScrollUnit::Line => scroll.delta.y,
         MouseScrollUnit::Pixel => scroll.delta.y / PIXELS_PER_LINE,
     };
+    // A click on a zoom button goes as far as a few lines of scrolling.
+    if actions.just(Action::ZoomIn) {
+        lines += 3.0;
+    }
+    if actions.just(Action::ZoomOut) {
+        lines -= 3.0;
+    }
     let pinch: f32 = pinches.read().map(|pinch| pinch.0).sum();
     if lines != 0.0 || pinch != 0.0 {
         overview.zoom((1.0 - ZOOM_PER_LINE).powf(lines) * (1.0 - pinch));
@@ -591,211 +574,6 @@ fn outline_hovered_station(view: Res<ShopView>, hovered: Res<HoveredStation>, mu
         _ => return,
     };
     gizmos.cube(outline, Color::srgb(1.0, 0.85, 0.3));
-}
-
-fn spawn_readout(mut commands: Commands) {
-    let text = Color::srgb(0.17, 0.2, 0.27);
-    let panel = Node {
-        position_type: PositionType::Absolute,
-        padding: UiRect::axes(px(14), px(8)),
-        border: UiRect::all(px(2)),
-        border_radius: BorderRadius::all(px(12)),
-        ..default()
-    };
-    // The reading and the status stack at the top left, narrow enough to wrap before they run
-    // into the cut list, which wraps before it runs into them.
-    let column = commands
-        .spawn(Node {
-            position_type: PositionType::Absolute,
-            top: px(16),
-            left: px(16),
-            max_width: vw(58),
-            flex_direction: FlexDirection::Column,
-            align_items: AlignItems::FlexStart,
-            row_gap: px(8),
-            ..default()
-        })
-        .id();
-    let stacked = Node {
-        position_type: PositionType::Relative,
-        ..panel.clone()
-    };
-    let lines = [
-        (
-            ReadoutLine::Reading,
-            34.0,
-            Color::srgb(0.88, 0.38, 0.1),
-            stacked.clone(),
-        ),
-        (ReadoutLine::Status, 18.0, text, stacked),
-        (
-            ReadoutLine::Help,
-            15.0,
-            text.with_alpha(0.75),
-            Node {
-                bottom: px(16),
-                left: px(16),
-                ..panel.clone()
-            },
-        ),
-        (
-            ReadoutLine::CutList,
-            17.0,
-            text,
-            Node {
-                top: px(16),
-                right: px(16),
-                max_width: vw(36),
-                ..panel.clone()
-            },
-        ),
-        (
-            ReadoutLine::Fps,
-            15.0,
-            text.with_alpha(0.75),
-            Node {
-                bottom: px(16),
-                right: px(16),
-                ..panel.clone()
-            },
-        ),
-        // What's in hand, above the frame rate, while there's anything.
-        (
-            ReadoutLine::Hand,
-            18.0,
-            Color::srgb(0.88, 0.38, 0.1),
-            Node {
-                bottom: px(64),
-                right: px(16),
-                max_width: vw(36),
-                display: Display::None,
-                ..panel
-            },
-        ),
-    ];
-    for (line, size, color, node) in lines {
-        let stacks = matches!(line, ReadoutLine::Reading | ReadoutLine::Status);
-        let mut entity = commands.spawn((
-            Text::default(),
-            TextFont {
-                font_size: FontSize::Px(size),
-                ..default()
-            },
-            TextColor(color),
-            node,
-            BackgroundColor(Color::srgba(1.0, 0.98, 0.94, 0.94)),
-            BorderColor::all(Color::srgba(0.17, 0.2, 0.27, 0.18)),
-            line,
-        ));
-        if stacks {
-            entity.insert(ChildOf(column));
-        }
-    }
-}
-
-fn update_readout(
-    view: Res<ShopView>,
-    hovered: Res<HoveredStation>,
-    table_saw: Res<TableSawStation>,
-    miter_saw: Res<MiterSawStation>,
-    bench: Res<BenchStation>,
-    hand: Res<Hand>,
-    mut lines: Query<(&ReadoutLine, &mut Text, &mut Node)>,
-) {
-    if !(view.is_changed()
-        || hovered.is_changed()
-        || table_saw.is_changed()
-        || miter_saw.is_changed()
-        || bench.is_changed()
-        || hand.is_changed())
-    {
-        return;
-    }
-    let (reading, status, help) = match *view {
-        ShopView::Overview => (
-            format!(
-                "Fence: {}   Length: {}",
-                table_saw.saw.fence, miter_saw.stop
-            ),
-            match (hovered.station, hand.0.is_some()) {
-                (Some(ShopView::TableSaw), false) => "Click to work at the table saw.",
-                (Some(ShopView::MiterSaw), false) => "Click to work at the miter saw.",
-                (Some(ShopView::Bench), false) => "Click to work at the workbench.",
-                (Some(ShopView::TableSaw), true) => "Click to set it down on the table saw.",
-                (Some(ShopView::MiterSaw), true) => "Click to set it down on the miter saw.",
-                (Some(ShopView::Bench), true) => "Click to set it down at the workbench.",
-                (_, true) => "Click a station, the pile, or the scrap bin to set it down.",
-                _ => "Click a station to work at it, or a board to pick it up.",
-            }
-            .to_string(),
-            OVERVIEW_HELP,
-        ),
-        ShopView::TableSaw => (
-            match table_saw.saw.miter_gauge {
-                Some(stop) => format!("Gauge: {stop}   Blade: {}", table_saw.saw.height),
-                None => format!(
-                    "Fence: {}   Blade: {}",
-                    table_saw.saw.fence, table_saw.saw.height
-                ),
-            },
-            table_saw.status(),
-            table_saw::HELP,
-        ),
-        ShopView::MiterSaw => (
-            format!(
-                "Length: {}   Miter: {}\nDepth stop: {}",
-                miter_saw.stop,
-                describe_miter(miter_saw.saw.miter),
-                match miter_saw.depth_stop {
-                    Some(stop) => format!("{stop} up"),
-                    None => "off".to_string(),
-                }
-            ),
-            miter_saw.status(),
-            miter_saw::HELP,
-        ),
-        ShopView::Bench => (
-            bench::reading(&bench),
-            bench.status(hand.0.is_some()),
-            bench::HELP,
-        ),
-    };
-    for (line, mut text, mut node) in &mut lines {
-        text.0 = match line {
-            ReadoutLine::Reading => reading.clone(),
-            ReadoutLine::Status => status.clone(),
-            ReadoutLine::Help => help.to_string(),
-            ReadoutLine::CutList => miter_saw.cut_list(),
-            ReadoutLine::Hand => {
-                node.display = if hand.0.is_some() {
-                    Display::Flex
-                } else {
-                    Display::None
-                };
-                hand::describe(&hand)
-            }
-            ReadoutLine::Fps => continue,
-        };
-    }
-}
-
-/// Shows the frame rate, the average frame time, and the slowest frame of the last couple of
-/// seconds, which is where hitches show up.
-fn update_fps(diagnostics: Res<DiagnosticsStore>, mut lines: Query<(&ReadoutLine, &mut Text)>) {
-    let fps = diagnostics
-        .get(&FrameTimeDiagnosticsPlugin::FPS)
-        .and_then(|fps| fps.smoothed());
-    let frame_time = diagnostics.get(&FrameTimeDiagnosticsPlugin::FRAME_TIME);
-    let average = frame_time.and_then(|time| time.smoothed());
-    let worst = frame_time.and_then(|time| time.values().copied().reduce(f64::max));
-    let (Some(fps), Some(average), Some(worst)) = (fps, average, worst) else {
-        return;
-    };
-    for (line, mut text) in &mut lines {
-        if let ReadoutLine::Fps = line {
-            text.0 = format!("{fps:.0} fps   {average:.1} ms   worst {worst:.1} ms");
-        }
-    }
 }
 
 /// Describes a finished cut, e.g. "Ripped a 3/4" x 6" x 24" piece, plus a ... offcut.", and

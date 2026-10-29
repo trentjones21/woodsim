@@ -7,6 +7,7 @@ use woodsim::{Angle, Length, MiterSaw};
 
 use crate::{
     chop::{MITER_STOPS, MiterSawStation, PILE_TRAY, board_turn},
+    controls::{Action, Actions, Step},
     hand::{Gesture, Hand},
     meshes::{Grain, board_mesh, lumber_mesh, rounded_box},
     shop::{
@@ -24,19 +25,6 @@ pub const BOUNDS: Block = Block {
     min: Vec3::new(-BENCH_HALF_LENGTH, -ORIGIN.y, inches(-8.0)),
     max: Vec3::new(BENCH_HALF_LENGTH, inches(16.0), inches(14.0)),
 };
-
-pub const HELP: &str = "Left/Right: move the stop 1/16\"   Shift+Left/Right: 1\"   \
-                        Or drag the stop block\n\
-                        Up/Down: set the depth stop 1/16\"   Shift: 1/4\"   \
-                        Down past the table turns it off\n\
-                        [ and ]: swing the miter 1 deg   \
-                        Shift: to the next stop (15, 22.5, 30, 45 deg)\n\
-                        Hold Space: lower the blade   Q/E: turn the board   F: flip it   \
-                        V: stand it on edge\n\
-                        Click a board, or a part on the pile: pick it up\n\
-                        Holding one: click the saw to set it against the stop, \
-                        or the pile to set it aside\n\
-                        Tab: go to the workbench   Esc: back to the shop";
 
 const FENCE_HEIGHT: f32 = inches(3.0);
 const BENCH_HALF_LENGTH: f32 = inches(40.0);
@@ -84,12 +72,7 @@ impl Plugin for MiterSawPlugin {
                 Update,
                 (
                     (
-                        (
-                            move_stop_with_keys,
-                            set_depth_stop_with_keys,
-                            swing_with_keys,
-                            turn_with_keys,
-                        )
+                        (move_stop, set_depth_stop, swing, turn_board)
                             .run_if(resource_equals(ShopView::MiterSaw)),
                         work_blade,
                     ),
@@ -434,19 +417,17 @@ fn spawn_miter_saw(
         .observe(tray_clicked);
 }
 
-/// Q and E turn the board against the stop a quarter turn left and right, and F flips it over.
-fn turn_with_keys(keys: Res<ButtonInput<KeyCode>>, mut station: ResMut<MiterSawStation>) {
-    if keys.just_pressed(KeyCode::KeyQ) {
-        station.turn_left();
-    }
-    if keys.just_pressed(KeyCode::KeyE) {
-        station.turn_right();
-    }
-    if keys.just_pressed(KeyCode::KeyF) {
-        station.flip();
-    }
-    if keys.just_pressed(KeyCode::KeyV) {
-        station.tip();
+/// Turns the board against the stop a quarter turn left or right, flips it over, or stands it
+/// on an edge.
+fn turn_board(actions: Res<Actions>, mut station: ResMut<MiterSawStation>) {
+    for action in actions.started() {
+        match action {
+            Action::TurnLeft => station.turn_left(),
+            Action::TurnRight => station.turn_right(),
+            Action::Flip => station.flip(),
+            Action::StandOnEdge => station.tip(),
+            _ => continue,
+        };
     }
 }
 
@@ -498,29 +479,25 @@ fn saw_part_clicked(
     }
 }
 
-fn move_stop_with_keys(keys: Res<ButtonInput<KeyCode>>, mut station: ResMut<MiterSawStation>) {
-    let step = if keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]) {
-        STOP_BIG_STEP
-    } else {
-        STOP_STEP
-    };
-    let stop = station.stop;
-    if keys.just_pressed(KeyCode::ArrowRight) {
-        station.set_stop(stop + step);
-    }
-    if keys.just_pressed(KeyCode::ArrowLeft) {
-        station.set_stop(stop - step);
+fn move_stop(actions: Res<Actions>, mut station: ResMut<MiterSawStation>) {
+    for action in actions.started() {
+        let Action::Stop(Step { more, big }) = action else {
+            continue;
+        };
+        let step = if big { STOP_BIG_STEP } else { STOP_STEP };
+        let stop = station.stop;
+        station.set_stop(if more { stop + step } else { stop - step });
     }
 }
 
-/// Holding Space at this station brings the blade down; letting go lets it spring back up.
+/// Holding the blade down at this station brings it down; letting go lets it spring back up.
 fn work_blade(
-    keys: Res<ButtonInput<KeyCode>>,
+    actions: Res<Actions>,
     view: Res<ShopView>,
     time: Res<Time>,
     mut station: ResMut<MiterSawStation>,
 ) {
-    let pressing = *view == ShopView::MiterSaw && keys.pressed(KeyCode::Space);
+    let pressing = *view == ShopView::MiterSaw && actions.held(Action::Lower);
     if pressing && station.lowered < station.lowest() {
         station.lower(LOWER_SPEED * time.delta_secs());
     } else if !pressing && station.lowered > 0.0 {
@@ -589,15 +566,18 @@ fn draw_head(station: Res<MiterSawStation>, mut head: Single<&mut Transform, Wit
     }
 }
 
-/// [ and ] swing the miter 1° away from the stop and toward it; with Shift, to the next place
-/// the table clicks into.
-fn swing_with_keys(keys: Res<ButtonInput<KeyCode>>, mut station: ResMut<MiterSawStation>) {
-    let shift = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
-    for (key, toward_stop) in [(KeyCode::BracketLeft, false), (KeyCode::BracketRight, true)] {
-        if !keys.just_pressed(key) {
+/// Swings the miter 1° away from the stop or toward it, or a big step to the next place the
+/// table clicks into.
+fn swing(actions: Res<Actions>, mut station: ResMut<MiterSawStation>) {
+    for action in actions.started() {
+        let Action::Miter(Step {
+            more: toward_stop,
+            big,
+        }) = action
+        else {
             continue;
-        }
-        if shift {
+        };
+        if big {
             station.swing_to_next_stop(toward_stop);
         } else {
             let step = if toward_stop { MITER_STEP } else { -MITER_STEP };
@@ -614,22 +594,20 @@ fn draw_table(station: Res<MiterSawStation>, mut table: Single<&mut Transform, W
     }
 }
 
-/// Up and Down raise and lower the depth stop. Lowered past the table, it's off.
-fn set_depth_stop_with_keys(keys: Res<ButtonInput<KeyCode>>, mut station: ResMut<MiterSawStation>) {
-    let step = if keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]) {
-        DEPTH_BIG_STEP
-    } else {
-        DEPTH_STEP
-    };
-    if keys.just_pressed(KeyCode::ArrowUp) {
-        let stop = station.depth_stop.map_or(Length::ZERO, |stop| stop + step);
-        station.set_depth_stop(Some(stop));
-    }
-    if keys.just_pressed(KeyCode::ArrowDown)
-        && let Some(stop) = station.depth_stop
-    {
-        let lower = stop - step;
-        station.set_depth_stop((lower >= Length::ZERO).then_some(lower));
+/// Raises and lowers the depth stop. Lowered past the table, it's off.
+fn set_depth_stop(actions: Res<Actions>, mut station: ResMut<MiterSawStation>) {
+    for action in actions.started() {
+        let Action::Depth(Step { more: up, big }) = action else {
+            continue;
+        };
+        let step = if big { DEPTH_BIG_STEP } else { DEPTH_STEP };
+        if up {
+            let stop = station.depth_stop.map_or(Length::ZERO, |stop| stop + step);
+            station.set_depth_stop(Some(stop));
+        } else if let Some(stop) = station.depth_stop {
+            let lower = stop - step;
+            station.set_depth_stop((lower >= Length::ZERO).then_some(lower));
+        }
     }
 }
 
