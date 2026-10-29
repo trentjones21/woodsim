@@ -221,7 +221,7 @@ fn dock(view: ShopView) -> Vec<Vec<Tool>> {
         tool(TurnRight, Icon::TurnRight),
         tool(Flip, Icon::Flip),
     ];
-    let on_edge = tool(StandOnEdge, Icon::StandOnEdge);
+    let stand_up = tool(StandUp, Icon::StandUp);
     match view {
         ShopView::Overview => vec![
             vec![
@@ -232,12 +232,12 @@ fn dock(view: ShopView) -> Vec<Vec<Tool>> {
         ],
         ShopView::TableSaw => vec![
             vec![tool(SwitchGuide, Icon::SwitchGuide)],
-            [turning, vec![on_edge]].concat(),
+            [turning, vec![stand_up]].concat(),
             vec![tool(Push, Icon::Push), tool(BringBack, Icon::BringBack)],
             vec![tool(CutAgain, Icon::Again), tool(Store, Icon::Store)],
         ],
         ShopView::MiterSaw => vec![
-            [turning, vec![on_edge]].concat(),
+            [turning, vec![stand_up]].concat(),
             vec![tool(Lower, Icon::Lower)],
             vec![tool(CutAgain, Icon::Again), tool(Store, Icon::Store)],
         ],
@@ -382,7 +382,7 @@ impl Shop<'_> {
             TurnLeft => "Turn the board left".to_string(),
             TurnRight => "Turn the board right".to_string(),
             Flip => "Flip the board over".to_string(),
-            StandOnEdge => "Stand it on an edge, or lay it down".to_string(),
+            StandUp => "Stand it on an edge, then on end, then lay it down".to_string(),
             SwitchGuide if self.table_saw.using_gauge() => "Use the rip fence".to_string(),
             SwitchGuide => "Use the miter gauge".to_string(),
             Guide(s) if self.table_saw.using_gauge() => {
@@ -466,13 +466,13 @@ impl Shop<'_> {
             (ShopView::MiterSaw, CutAgain) => miter.can_cut_again(),
             (ShopView::Bench, Store) => bench.picked.is_some(),
             (ShopView::TableSaw, TurnLeft | TurnRight | Flip) => table.can_turn(),
-            (ShopView::TableSaw, StandOnEdge) => table.can_tip(),
+            (ShopView::TableSaw, StandUp) => table.can_tip(),
             (ShopView::TableSaw, Push) => table.can_push(),
             (ShopView::TableSaw, BringBack) => table.can_bring_back(),
             (ShopView::TableSaw, Miter(_)) => table.can_swing_gauge(),
             (ShopView::TableSaw, Tilt(_)) => table.can_tilt(),
             (ShopView::MiterSaw, TurnLeft | TurnRight | Flip) => miter.can_turn(),
-            (ShopView::MiterSaw, StandOnEdge) => miter.can_tip(),
+            (ShopView::MiterSaw, StandUp) => miter.can_tip(),
             (ShopView::MiterSaw, Lower) => miter.has_work(),
             (ShopView::Bench, TurnLeft | TurnRight | Flip) => {
                 bench.lining_up.is_some() || bench.turnable().is_some()

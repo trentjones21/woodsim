@@ -23,7 +23,7 @@ pub enum Icon {
     TurnLeft,
     TurnRight,
     Flip,
-    StandOnEdge,
+    StandUp,
     SwitchGuide,
     Push,
     BringBack,
@@ -67,7 +67,7 @@ impl Icon {
         Icon::TurnLeft,
         Icon::TurnRight,
         Icon::Flip,
-        Icon::StandOnEdge,
+        Icon::StandUp,
         Icon::SwitchGuide,
         Icon::Push,
         Icon::BringBack,
@@ -126,7 +126,7 @@ impl Icon {
                 shapes.extend(arrow_arc(p(0.5, 0.6), 0.3, -175.0, 150.0, 0.1));
                 shapes
             }
-            Icon::StandOnEdge => {
+            Icon::StandUp => {
                 let mut shapes = vec![
                     Rounded(p(0.58, 0.16), p(0.72, 0.84), 0.04),
                     Line(vec![p(0.12, 0.9), p(0.88, 0.9)], 0.07),

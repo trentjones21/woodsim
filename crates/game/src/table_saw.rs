@@ -607,7 +607,7 @@ fn turn_board(actions: Res<Actions>, mut station: ResMut<TableSawStation>) {
             Action::TurnLeft => station.turn_left(),
             Action::TurnRight => station.turn_right(),
             Action::Flip => station.flip(),
-            Action::StandOnEdge => station.tip(),
+            Action::StandUp => station.tip(),
             _ => continue,
         };
     }

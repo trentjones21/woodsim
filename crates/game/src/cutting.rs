@@ -429,6 +429,7 @@ fn settings(tool: Tool) -> String {
             };
             let edge = match lie {
                 Lie::Board(lie) if lie.on_edge() => ", the board on edge",
+                Lie::Board(lie) if lie.on_end() => ", the board on end",
                 _ => "",
             };
             let tilt = if saw.tilt == woodsim::Angle::ZERO {
@@ -458,6 +459,7 @@ fn settings(tool: Tool) -> String {
             };
             let edge = match lie {
                 Lie::Board(lie) if lie.on_edge() => ", the board on edge",
+                Lie::Board(lie) if lie.on_end() => ", the board on end",
                 _ => "",
             };
             format!(
@@ -758,6 +760,8 @@ impl Say<'_> {
         if was_up != now_up {
             moves.push(if now.on_edge() {
                 format!("stand {it} on edge")
+            } else if now.on_end() {
+                format!("stand {it} on end")
             } else {
                 format!("lay {it} flat")
             });
@@ -842,8 +846,9 @@ fn is_glue_up(tool: Tool) -> bool {
     )
 }
 
+/// Whether the table saw's blade went through a board parallel to its faces.
 fn is_resaw(tool: Tool) -> bool {
-    matches!(tool, Tool::TableSaw { lie: Lie::Board(lie), .. } if lie.on_edge())
+    matches!(tool, Tool::TableSaw { lie: Lie::Board(lie), .. } if lie.across().0 == Axis::Thickness)
 }
 
 /// "Rip", from "rip".
@@ -979,17 +984,16 @@ fn nibbles(first: Tool, then: Tool) -> bool {
     }
 }
 
-/// What a pass does to the wood: rips it, crosscuts it, resaws it, or cuts it to length.
+/// What a pass does to the wood: rips it, crosscuts it, resaws it, or cuts it to length. The
+/// table saw's blade stands square to whichever of a board's axes lies across the table:
+/// through its thickness it resaws, through its length it crosscuts.
 fn verb(tool: Tool) -> &'static str {
     match tool {
+        _ if is_resaw(tool) => "Resaw",
         Tool::TableSaw {
             lie: Lie::Board(lie),
             ..
-        } if lie.on_edge() => "Resaw",
-        Tool::TableSaw {
-            lie: Lie::Board(lie),
-            ..
-        } if lie.along().0 == Axis::Width => "Crosscut",
+        } if lie.across().0 == Axis::Length => "Crosscut",
         Tool::TableSaw {
             saw:
                 woodsim::TableSaw {
@@ -1100,6 +1104,37 @@ fn diagram(stock: &Stock, index: usize, members: &[Member], labels: &[String]) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_table_saw_pass_is_named_by_the_board_axis_across_the_table() {
+        let saw = woodsim::TableSaw {
+            blade: woodsim::Blade {
+                diameter: Length::from_inches(10),
+                kerf: woodsim::Blade::FULL_KERF,
+            },
+            fence: Length::from_inches(2),
+            height: Length::from_inches(1),
+            miter_gauge: None,
+            gauge_angle: woodsim::Angle::ZERO,
+            tilt: woodsim::Angle::ZERO,
+        };
+        let pass = |lie: Orientation| {
+            verb(Tool::TableSaw {
+                saw,
+                lie: Lie::Board(lie),
+                travel: (Length::ZERO, Length::ZERO),
+            })
+        };
+        let flat = Orientation::default();
+        assert_eq!(pass(flat), "Rip");
+        assert_eq!(pass(flat.turned_left()), "Crosscut");
+        assert_eq!(pass(flat.tipped()), "Resaw");
+        // On edge and turned, the blade goes through its length.
+        assert_eq!(pass(flat.tipped().turned_left()), "Crosscut");
+        // On end against the fence, its faces are parallel to the blade.
+        assert_eq!(pass(flat.stood()), "Resaw");
+        assert_eq!(pass(flat.stood().turned_left()), "Rip");
+    }
 
     #[test]
     fn lumber_goes_by_its_name_when_it_has_one() {

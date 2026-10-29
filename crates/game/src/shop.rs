@@ -119,12 +119,15 @@ fn board_size(board: &Board) -> Vec3 {
 }
 
 /// The rotation that lays `board` on a saw as `lie` says, and where its corner ends up from the
-/// near corner of the space it takes up. Matches `woodsim::Orientation`: the rolls come first,
-/// about the saw's along axis, each tipping across toward up, then the quarter turns about the
-/// up axis.
+/// near corner of the space it takes up: `lie`'s own turn, from the board's axes onto the
+/// saw's, with the mesh's axes (`w`, `t`, `l`) and the station's (across, up, along) in place
+/// of woodsim's.
 fn lay(board: &Board, lie: Orientation) -> (Quat, Vec3) {
-    let roll = Quat::from_rotation_z(lie.rolls() as f32 * FRAC_PI_2);
-    let rotation = Quat::from_rotation_y(lie.turns() as f32 * FRAC_PI_2) * roll;
+    let [l, w, t] = lie
+        .rotation()
+        .columns()
+        .map(|[along, across, up]| Vec3::new(across as f32, up as f32, along as f32));
+    let rotation = Quat::from_mat3(&Mat3::from_cols(w, t, l));
     let placed = Placed {
         board: board.clone(),
         corner: Vec3::ZERO,
@@ -997,6 +1000,45 @@ pub fn set_material_on<E: EntityEvent>(
 mod tests {
     use super::*;
     use woodsim::{MiterSaw, Pass};
+
+    #[test]
+    fn every_way_a_board_lies_it_fills_its_space_from_the_near_corner_as_woodsim_says() {
+        let board = Board::new(
+            Length::from_inches(24),
+            Length::from_inches(3),
+            Length::from_inch_fraction(3, 4),
+        );
+        let flat = Orientation::default();
+        for mut lie in [
+            flat,
+            flat.tipped(),
+            flat.flipped(),
+            flat.flipped().tipped(),
+            flat.stood(),
+            flat.stood().flipped(),
+        ] {
+            for _ in 0..4 {
+                let placed = Placed::lying(&board, lie, Vec3::ZERO);
+                let (near, far) = placed.bounds();
+                assert!(near.length() < 1e-6, "{lie:?} starts at {near}");
+                // Across, up, and along, it reaches as far as the axis woodsim lays that way,
+                // and the board's own corner is at the far side of any it lays backward.
+                for ((axis, backward), size, corner) in [
+                    (lie.across(), far.x, placed.corner.x),
+                    (lie.up(), far.y, placed.corner.y),
+                    (lie.along(), far.z, placed.corner.z),
+                ] {
+                    assert!(
+                        (size - axis.of(&board).as_meters_f32()).abs() < 1e-6,
+                        "{lie:?}"
+                    );
+                    let expected = if backward { size } else { 0.0 };
+                    assert!((corner - expected).abs() < 1e-6, "{lie:?}");
+                }
+                lie = lie.turned_left();
+            }
+        }
+    }
 
     #[test]
     fn overview_pans_relative_to_where_the_camera_faces() {

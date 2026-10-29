@@ -274,13 +274,13 @@ impl TableSawStation {
         self.relay(self.lie.flipped())
     }
 
-    /// Stands the board up on an edge, with its bottom face toward the fence, or lays it back
-    /// down. A glue-up stays flat.
+    /// Stands the board up further (`work::stood_up`): on an edge, with its bottom face toward
+    /// the fence, then on its end, then back down flat. A glue-up stays flat.
     pub fn tip(&mut self) -> bool {
         if matches!(self.board, Workpiece::GlueUp(_)) {
             return false;
         }
-        self.relay(self.lie.tipped())
+        self.relay(work::stood_up(self.lie))
     }
 
     /// Lays the board down another way, if it's in one piece and waiting in front of the blade.
@@ -1237,6 +1237,63 @@ mod tests {
         assert_eq!(
             station.status(),
             "Cutting. So far, a 1/8\"-wide, 11/16\"-deep kerf in an edge, 11/32\" long."
+        );
+    }
+
+    #[test]
+    fn standing_up_goes_from_flat_to_its_edge_to_its_end_and_back_down() {
+        let mut station = TableSawStation::default();
+        station.load(Workpiece::Board(narrow()));
+        let height = |station: &TableSawStation| {
+            let (near, far) = station.boards().whole[0].bounds();
+            far.y - near.y
+        };
+        assert_close(height(&station), inches(0.75));
+        assert!(station.tip());
+        assert!(station.lie.on_edge());
+        assert_close(height(&station), inches(3.0));
+        assert!(station.tip());
+        assert!(station.lie.on_end());
+        assert_close(height(&station), inches(24.0));
+        assert!(station.tip());
+        assert_eq!(station.lie, Orientation::default());
+    }
+
+    #[test]
+    fn on_end_against_the_fence_the_blade_cuts_a_tenon_cheek() {
+        let mut station = TableSawStation::default();
+        station.load(Workpiece::Board(narrow()));
+        assert!(station.tip());
+        assert!(station.tip());
+        station.set_fence(Length::from_inch_fraction(1, 4));
+        station.set_height(Length::from_inch_fraction(3, 2));
+        push_through(&mut station);
+        assert_eq!(
+            station.status(),
+            "Cut a 1/8\"-wide, 1-1/2\"-deep resaw kerf in an end, all the way across. Bring the \
+             board back around for another pass."
+        );
+    }
+
+    #[test]
+    fn on_end_a_short_block_is_resawn_through_its_length() {
+        let mut station = TableSawStation::default();
+        station.load(Workpiece::Board(Board::new(
+            Length::from_inches(2),
+            Length::from_inches(3),
+            Length::from_inch_fraction(3, 4),
+        )));
+        assert!(station.tip());
+        assert!(station.tip());
+        station.set_fence(Length::from_inch_fraction(1, 4));
+        station.set_height(HEIGHT_MAX);
+        push_through(&mut station);
+        assert!(
+            station
+                .status()
+                .starts_with("Resawed a 1/4\" x 3\" x 2\" piece, plus a 3/8\" x 3\" x 2\" offcut."),
+            "{}",
+            station.status()
         );
     }
 

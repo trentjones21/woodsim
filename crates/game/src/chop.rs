@@ -126,8 +126,8 @@ impl MiterSawStation {
         self.relay(self.lie.flipped())
     }
 
-    /// Stands the board up on an edge, with its bottom face toward the fence, or lays it back
-    /// down. A glue-up stays flat.
+    /// Stands the board up further (`work::stood_up`): on an edge, with its bottom face toward
+    /// the fence, then on its end, then back down flat. A glue-up stays flat.
     pub fn tip(&mut self) -> bool {
         if matches!(
             &self.work,
@@ -138,7 +138,7 @@ impl MiterSawStation {
         ) {
             return false;
         }
-        self.relay(self.lie.tipped())
+        self.relay(work::stood_up(self.lie))
     }
 
     /// Whether the board against the stop can be turned or flipped: it's waiting there with the
@@ -1047,6 +1047,22 @@ mod tests {
             "{}",
             station.status()
         );
+    }
+
+    #[test]
+    fn standing_up_goes_from_flat_to_its_edge_to_its_end_and_back_down() {
+        let mut station = MiterSawStation::default();
+        station.load(Workpiece::Board(Board::new(
+            Length::from_inches(24),
+            Length::from_inch_fraction(7, 2),
+            Length::from_inch_fraction(3, 4),
+        )));
+        assert!(station.tip());
+        assert!(station.lie.on_edge());
+        assert!(station.tip());
+        assert!(station.lie.on_end());
+        assert!(station.tip());
+        assert_eq!(station.lie, Orientation::default());
     }
 
     #[test]

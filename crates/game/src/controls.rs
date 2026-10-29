@@ -21,12 +21,12 @@ pub enum Action {
     RotateRight,
     ZoomIn,
     ZoomOut,
-    /// A board waiting on a saw, or a part on the bench: a quarter turn each way, over, or onto
-    /// an edge.
+    /// A board waiting on a saw, or a part on the bench: a quarter turn each way, over, or up
+    /// onto an edge or an end.
     TurnLeft,
     TurnRight,
     Flip,
-    StandOnEdge,
+    StandUp,
     /// The table saw's guide: the rip fence or the miter gauge, and moving it.
     SwitchGuide,
     Guide(Step),
@@ -127,7 +127,7 @@ pub fn bound(view: ShopView, key: KeyCode, shift: bool) -> Option<Action> {
         (_, KeyQ) => TurnLeft,
         (_, KeyE) => TurnRight,
         (_, KeyF) => Flip,
-        (TableSaw | MiterSaw, KeyV) => StandOnEdge,
+        (TableSaw | MiterSaw, KeyV) => StandUp,
         (TableSaw, KeyG) => SwitchGuide,
         (TableSaw, ArrowLeft | ArrowRight) => Guide(step(key == ArrowRight)),
         (TableSaw, ArrowUp | ArrowDown) => Blade(step(key == ArrowUp)),

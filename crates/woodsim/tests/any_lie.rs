@@ -6,7 +6,7 @@
 use proptest::prelude::*;
 use woodsim::{
     Angle, Assembly, Blade, Board, CutError, Fastener, GlueUpPass, Length, Mating, Member,
-    MiterSaw, Rotation, Source, Surface, TableSaw, surfaces,
+    MiterSaw, Orientation, Rotation, Source, Surface, TableSaw, surfaces,
 };
 
 fn inches(n: i64) -> Length {
@@ -259,4 +259,27 @@ fn there_are_24_square_ways_to_lie() {
         }
     }
     assert_eq!(lies.len(), 24);
+}
+
+#[test]
+fn a_board_on_its_own_can_lie_every_square_way() {
+    // Tipped, stood, flipped, and turned, a board lies each way a glue-up can.
+    let flat = Orientation::default();
+    let mut found = Vec::new();
+    for mut lie in [
+        flat,
+        flat.tipped(),
+        flat.flipped(),
+        flat.flipped().tipped(),
+        flat.stood(),
+        flat.stood().flipped(),
+    ] {
+        for _ in 0..4 {
+            found.push(lie.rotation().columns());
+            lie = lie.turned_left();
+        }
+    }
+    for lie in square_lies() {
+        assert!(found.contains(&lie.columns()), "{:?}", lie.columns());
+    }
 }

@@ -1,3 +1,5 @@
+use std::fmt;
+
 use crate::{Board, Length, Rotation};
 
 /// One of a board's three directions: along its length (with the grain), across its width, or
@@ -20,150 +22,155 @@ impl Axis {
     }
 }
 
-/// How a board lies on a saw's table: rolled some number of quarter turns about its length
-/// (onto an edge, or flipped over), then turned some number of quarter turns.
+/// How a board lies on a saw's table: any of the 24 square ways, flat, on an edge, or on an end,
+/// and turned any of four ways.
 ///
 /// A saw measures positions on its table `across` it toward the fence, `along` it (from the
 /// board's leading end on a table saw, toward the stop on a miter saw), and `up` from the table.
-/// Unrolled and unturned, a board's width runs across, its length along, and its thickness up,
-/// with its `t = 0` face down. A roll stands it on its `w = 0` edge with its `t = 0` face toward
-/// the fence; two roll it face down. Turning is counterclockwise seen from above.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+/// As it comes, a board's width runs across, its length along, and its thickness up, with its
+/// `t = 0` face down. Tipped, it stands on its `w = 0` edge with its `t = 0` face toward the
+/// fence; stood up from there, it stands on its `l = 0` end. Turning is counterclockwise seen
+/// from above.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Orientation {
-    /// Quarter turns, 0 to 3, made after the rolls.
-    turns: u8,
-    /// Quarter rolls about the board's length, 0 to 3: flat, on edge, flipped, on the other edge.
-    rolls: u8,
+    /// Where each of the board's axes, `l`, `w`, and `t`, points on the saw: along the table,
+    /// across it toward the fence, and up, one of them one way or the other.
+    columns: [[i8; 3]; 3],
 }
 
-/// One of the saw's directions: across the table toward the fence, up, or along the table.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Table {
-    Across,
-    Up,
-    Along,
+impl Default for Orientation {
+    fn default() -> Orientation {
+        Orientation {
+            columns: [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+        }
+    }
 }
+
+impl fmt::Debug for Orientation {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let way =
+            |(axis, backward): (Axis, bool)| format!("{}{axis:?}", if backward { "-" } else { "" });
+        write!(
+            f,
+            "Orientation {{ along: {}, across: {}, up: {} }}",
+            way(self.along()),
+            way(self.across()),
+            way(self.up())
+        )
+    }
+}
+
+/// The saw's directions, by where they are in a column: along the table, across it toward the
+/// fence, and up.
+const ALONG: usize = 0;
+const ACROSS: usize = 1;
+const UP: usize = 2;
+
+/// The board's axes, by their column.
+const L: usize = 0;
+const W: usize = 1;
+const T: usize = 2;
 
 impl Orientation {
+    /// Turned on the saw by `turn`, which takes each of the saw's directions to where it goes.
+    fn turned_by(self, turn: impl Fn([i8; 3]) -> [i8; 3]) -> Orientation {
+        Orientation {
+            columns: self.columns.map(turn),
+        }
+    }
+
     /// Turned a quarter turn counterclockwise, seen from above.
     pub fn turned_left(self) -> Orientation {
-        Orientation {
-            turns: (self.turns + 1) % 4,
-            ..self
-        }
+        self.turned_by(|[along, across, up]| [-across, along, up])
     }
 
     /// Turned a quarter turn clockwise, seen from above.
     pub fn turned_right(self) -> Orientation {
-        Orientation {
-            turns: (self.turns + 3) % 4,
-            ..self
-        }
+        self.turned_by(|[along, across, up]| [across, -along, up])
     }
 
     /// Turned over, about the direction along the table. A board turned and then flipped lies
     /// as if it had been flipped and then turned the other way.
     pub fn flipped(self) -> Orientation {
-        Orientation {
-            turns: (4 - self.turns) % 4,
-            rolls: (self.rolls + 2) % 4,
+        self.turned_by(|[along, across, up]| [along, -across, -up])
+    }
+
+    /// Rolled a quarter turn about its length: lying flat, stood up on an edge, its top face
+    /// tipped toward the operator, away from the fence; or, standing on an edge, laid back down
+    /// the way it was. Standing on end, rolling about its length turns it where it stands.
+    pub fn tipped(self) -> Orientation {
+        let [l, w, t] = self.columns;
+        let negative = |v: [i8; 3]| v.map(|x| -x);
+        let columns = if self.on_edge() {
+            [l, negative(t), w]
+        } else {
+            [l, t, negative(w)]
+        };
+        Orientation { columns }
+    }
+
+    /// Turned a quarter turn about its thickness, so the edge it stood on becomes an end: stood
+    /// on an edge, stood up on an end (its `l = 0` end, from its `w = 0` edge); or, standing on
+    /// an end, laid back down onto an edge the same way. Lying flat, it's tipped onto its edge
+    /// first.
+    pub fn stood(self) -> Orientation {
+        let [l, w, t] = self.columns;
+        let negative = |v: [i8; 3]| v.map(|x| -x);
+        match self.up().0 {
+            Axis::Width => Orientation {
+                columns: [w, negative(l), t],
+            },
+            Axis::Length => Orientation {
+                columns: [negative(w), l, t],
+            },
+            Axis::Thickness => self.tipped().stood(),
         }
     }
 
-    /// Stood up on an edge, rolled a quarter turn about its length; or, standing on an edge,
-    /// laid back down the way it was.
-    pub fn tipped(self) -> Orientation {
-        let rolls = if self.on_edge() {
-            self.rolls - 1
-        } else {
-            self.rolls + 1
-        };
-        Orientation { rolls, ..self }
-    }
-
-    /// Quarter turns counterclockwise, 0 to 3, made after any rolls.
-    pub fn turns(self) -> u8 {
-        self.turns
-    }
-
-    /// Quarter rolls about the board's length, 0 to 3, made before the turns: each one tips its
-    /// top face toward the operator, away from the fence.
-    pub fn rolls(self) -> u8 {
-        self.rolls
-    }
-
-    /// Whether the board stands on an edge rather than lying on a face.
+    /// Whether the board stands on an edge rather than lying on a face or standing on an end.
     pub fn on_edge(self) -> bool {
-        self.rolls % 2 == 1
+        self.up().0 == Axis::Width
+    }
+
+    /// Whether the board stands on an end, its length straight up.
+    pub fn on_end(self) -> bool {
+        self.up().0 == Axis::Length
     }
 
     /// The board's axis that lies across the table, and whether the board's coordinates run
     /// backward along it: from the fence side rather than toward it.
     pub fn across(self) -> (Axis, bool) {
-        self.axis_on(Table::Across)
+        self.axis_on(ACROSS)
     }
 
     /// The board's axis that lies along the table, and whether the board's coordinates run
     /// backward along it.
     pub fn along(self) -> (Axis, bool) {
-        self.axis_on(Table::Along)
+        self.axis_on(ALONG)
     }
 
     /// The board's axis that stands up from the table, and whether the board's coordinates run
     /// backward along it: down from the top.
     pub fn up(self) -> (Axis, bool) {
-        self.axis_on(Table::Up)
+        self.axis_on(UP)
     }
 
     /// The turn that lays the board's axes (`l`, `w`, `t`) onto the saw's, as `x`, `y`, and `z`:
     /// along the table, across it toward the fence, and up. The same turn lays a glue-up on a
     /// saw the way this lays a board.
     pub fn rotation(self) -> Rotation {
-        let mut columns = [[0i8; 3]; 3];
-        for (row, (axis, backward)) in [self.along(), self.across(), self.up()]
-            .into_iter()
-            .enumerate()
-        {
-            let column = match axis {
-                Axis::Length => 0,
-                Axis::Width => 1,
-                Axis::Thickness => 2,
-            };
-            columns[column][row] = if backward { -1 } else { 1 };
-        }
-        Rotation::square(columns)
+        Rotation::square(self.columns)
     }
 
-    /// The board's axis on the saw's direction `table`, rolled and then turned into place from
-    /// the board lying flat with its length along the table.
-    fn axis_on(self, table: Table) -> (Axis, bool) {
-        let roll = |(on, forward): (Table, bool)| match on {
-            Table::Across => (Table::Up, forward),
-            Table::Up => (Table::Across, !forward),
-            Table::Along => (Table::Along, forward),
-        };
-        let turn = |(on, forward): (Table, bool)| match on {
-            Table::Along => (Table::Across, forward),
-            Table::Across => (Table::Along, !forward),
-            Table::Up => (Table::Up, forward),
-        };
-        [
-            (Axis::Length, Table::Along),
-            (Axis::Width, Table::Across),
-            (Axis::Thickness, Table::Up),
-        ]
-        .into_iter()
-        .find_map(|(axis, start)| {
-            let mut placed = (start, true);
-            for _ in 0..self.rolls {
-                placed = roll(placed);
-            }
-            for _ in 0..self.turns {
-                placed = turn(placed);
-            }
-            (placed.0 == table).then_some((axis, !placed.1))
-        })
-        .expect("each of the saw's directions has one of the board's axes")
+    /// The board's axis on the saw's direction `table`, and whether it runs backward.
+    fn axis_on(self, table: usize) -> (Axis, bool) {
+        [(Axis::Length, L), (Axis::Width, W), (Axis::Thickness, T)]
+            .into_iter()
+            .find_map(|(axis, column)| {
+                let on = self.columns[column][table];
+                (on != 0).then_some((axis, on < 0))
+            })
+            .expect("each of the saw's directions has one of the board's axes")
     }
 }
 
@@ -171,23 +178,126 @@ impl Orientation {
 mod tests {
     use super::*;
 
-    #[test]
-    fn every_way_a_board_lies_is_a_turn_not_a_mirror_image() {
-        for rolls in 0..4 {
-            for turns in 0..4 {
-                let lie = Orientation { turns, rolls };
-                let [l, w, t] = lie.rotation().columns();
-                let cross = [
-                    l[1] * w[2] - l[2] * w[1],
-                    l[2] * w[0] - l[0] * w[2],
-                    l[0] * w[1] - l[1] * w[0],
-                ];
-                assert_eq!(cross, t, "{lie:?}");
+    /// Every way a board lies: on each of its faces, edges, and ends, turned each way.
+    fn all_ways() -> Vec<Orientation> {
+        let flat = Orientation::default();
+        let mut ways = Vec::new();
+        for mut lie in [
+            flat,
+            flat.tipped(),
+            flat.flipped(),
+            flat.flipped().tipped(),
+            flat.stood(),
+            flat.stood().flipped(),
+        ] {
+            for _ in 0..4 {
+                ways.push(lie);
+                lie = lie.turned_left();
             }
         }
+        ways
+    }
+
+    #[test]
+    fn a_board_lies_24_ways_each_a_turn_not_a_mirror_image() {
+        let ways = all_ways();
+        for (i, lie) in ways.iter().enumerate() {
+            let [l, w, t] = lie.rotation().columns();
+            let cross = [
+                l[1] * w[2] - l[2] * w[1],
+                l[2] * w[0] - l[0] * w[2],
+                l[0] * w[1] - l[1] * w[0],
+            ];
+            assert_eq!(cross, t, "{lie:?}");
+            assert!(!ways[..i].contains(lie), "{lie:?} twice");
+        }
+        assert_eq!(ways.len(), 24);
         // Lying as it comes, its length runs along the table, its width across, and its
         // thickness up.
         assert_eq!(Orientation::default().rotation(), Rotation::NONE);
+    }
+
+    /// Where a board's axis lies on the saw after `rolls` quarter rolls about its length and
+    /// then `turns` quarter turns, as lies were worked out before a board could stand on end.
+    fn rolled_and_turned(rolls: u8, turns: u8, table: usize) -> (Axis, bool) {
+        let roll = |(on, forward): (usize, bool)| match on {
+            ACROSS => (UP, forward),
+            UP => (ACROSS, !forward),
+            _ => (ALONG, forward),
+        };
+        let turn = |(on, forward): (usize, bool)| match on {
+            ALONG => (ACROSS, forward),
+            ACROSS => (ALONG, !forward),
+            _ => (UP, forward),
+        };
+        [
+            (Axis::Length, ALONG),
+            (Axis::Width, ACROSS),
+            (Axis::Thickness, UP),
+        ]
+        .into_iter()
+        .find_map(|(axis, start)| {
+            let mut placed = (start, true);
+            for _ in 0..rolls {
+                placed = roll(placed);
+            }
+            for _ in 0..turns {
+                placed = turn(placed);
+            }
+            (placed.0 == table).then_some((axis, !placed.1))
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn flat_and_on_edge_it_lies_as_rolling_and_turning_always_laid_it() {
+        for rolls in 0..4u8 {
+            for turns in 0..4u8 {
+                let mut lie = Orientation::default();
+                for _ in 0..rolls {
+                    // Each roll tips the top face toward the operator.
+                    let [l, w, t] = lie.columns;
+                    lie = Orientation {
+                        columns: [l, t, w.map(|x| -x)],
+                    };
+                }
+                for _ in 0..turns {
+                    lie = lie.turned_left();
+                }
+                assert_eq!(lie.along(), rolled_and_turned(rolls, turns, ALONG));
+                assert_eq!(lie.across(), rolled_and_turned(rolls, turns, ACROSS));
+                assert_eq!(lie.up(), rolled_and_turned(rolls, turns, UP));
+                // Flipping and tipping agree with how they changed the rolls and turns.
+                let flipped = lie.flipped();
+                let (rolls_f, turns_f) = ((rolls + 2) % 4, (4 - turns) % 4);
+                assert_eq!(
+                    flipped.across(),
+                    rolled_and_turned(rolls_f, turns_f, ACROSS)
+                );
+                assert_eq!(flipped.up(), rolled_and_turned(rolls_f, turns_f, UP));
+                let tipped = lie.tipped();
+                let rolls_t = if rolls % 2 == 1 { rolls - 1 } else { rolls + 1 };
+                assert_eq!(tipped.across(), rolled_and_turned(rolls_t, turns, ACROSS));
+                assert_eq!(tipped.up(), rolled_and_turned(rolls_t, turns, UP));
+            }
+        }
+    }
+
+    #[test]
+    fn stood_up_from_its_edge_it_stands_on_its_end() {
+        let on_edge = Orientation::default().tipped();
+        let lie = on_edge.stood();
+        assert!(lie.on_end());
+        assert!(!lie.on_edge());
+        // On its `l = 0` end, its face still toward the fence, its width along the table.
+        assert_eq!(lie.up(), (Axis::Length, false));
+        assert_eq!(lie.across(), (Axis::Thickness, true));
+        assert_eq!(lie.along(), (Axis::Width, true));
+        // Laid back down, it's on its edge as it was, and from flat it goes up by its edge.
+        assert_eq!(lie.stood(), on_edge);
+        assert_eq!(Orientation::default().stood(), lie);
+        // Flipped, it stands on its other end.
+        assert_eq!(lie.flipped().up(), (Axis::Length, true));
     }
 
     #[test]

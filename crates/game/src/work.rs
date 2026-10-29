@@ -119,6 +119,19 @@ pub fn on_the_saw(work: &Workpiece) -> String {
     }
 }
 
+/// The next way up for a board on a saw, each time it's stood up further: lying flat, it's
+/// stood on an edge; on an edge, on its end; and on its end, it's laid back down flat the way it
+/// first lay.
+pub fn stood_up(lie: Orientation) -> Orientation {
+    if lie.on_edge() {
+        lie.stood()
+    } else if lie.on_end() {
+        lie.stood().tipped()
+    } else {
+        lie.tipped()
+    }
+}
+
 /// `work` as it's carried away from a saw it lay on as `lie` says: a board as it is, and a
 /// glue-up turned as it lay, so it's set down the same way up. A glue-up the saw left a single
 /// board of is that board.
