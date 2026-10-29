@@ -26,7 +26,7 @@ pub use board::{Board, Piece, Run, SlotSize};
 pub use face::{Direction, Edge, Region, Vector};
 pub use glue_up::{GlueUpCut, GlueUpPass};
 pub use history::{Lie, Operation, Origin, Part, Side, Source, Tool};
-pub use kerf::{Across, Kerf};
+pub use kerf::{Across, Kerf, Opening};
 pub use length::Length;
 pub use orientation::{Axis, Orientation};
 pub use saw::{Blade, Cut, CutError, MAX_GAUGE, MAX_TILT, MiterSaw, Pass, TableSaw};

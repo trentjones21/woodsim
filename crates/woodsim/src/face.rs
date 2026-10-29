@@ -525,12 +525,6 @@ impl Region {
         (span(|p| p.x), span(|p| p.y))
     }
 
-    /// The range of `direction · (l, w)` over the region, times the direction's scale.
-    pub(crate) fn extent(&self, direction: Direction) -> (f64, f64) {
-        let (low, high) = self.extremes(direction);
-        (low.along(direction), high.along(direction))
-    }
-
     /// The corners furthest back and furthest forward along `direction`.
     pub(crate) fn extremes(&self, direction: Direction) -> (Point, Point) {
         let points = self.points();

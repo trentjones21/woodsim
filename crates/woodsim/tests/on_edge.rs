@@ -169,6 +169,76 @@ fn on_edge_and_turned_the_table_saw_crosscuts_it_through_its_thickness() {
 }
 
 #[test]
+fn on_edge_and_turned_a_crosscut_stopped_partway_is_a_slot_in_the_bottom_edge() {
+    let board = Board::new(inches(24), inches(3), fraction(3, 4));
+    let saw = TableSaw {
+        miter_gauge: Some(inches(10)),
+        ..table_saw(inches(6), all_the_way_up())
+    };
+    // The blade's center stops 4.3" short of the board's leading face, 1-7/8" below the table:
+    // at the table its teeth are 0.335" into the thickness, and they reach the leading face
+    // 0.676" up.
+    let slotted = kerfed(saw.feed(
+        &board,
+        on_edge().turned_left(),
+        -inches(6),
+        -Length::from_nm(inches(43).as_nm() / 10),
+    ));
+    let slot = slotted.kerfs()[0];
+    let size = slotted.slot(&slot);
+    assert_eq!(size.into, Axis::Width);
+    assert!(size.from_low);
+    assert_eq!(size.width, Blade::FULL_KERF);
+    assert_eq!(size.depth.rounded_to(fraction(1, 32)), fraction(11, 16));
+    let bottom = size.bottom.unwrap();
+    assert!(!bottom.end_to_end);
+    assert_eq!(bottom.length.rounded_to(fraction(1, 32)), fraction(11, 32));
+    assert!(size.top.is_none());
+    // It opens on the leading face, from below the table as far up it as the teeth reached,
+    // and not on the other.
+    let thickness = slotted.thickness().as_nm() as f64;
+    let openings: Vec<_> = [0.0, thickness]
+        .into_iter()
+        .filter_map(|t| slot.meets(Axis::Thickness, t))
+        .collect();
+    assert_eq!(openings.len(), 1);
+    let up: Vec<f64> = openings[0]
+        .corners()
+        .iter()
+        .map(|corner| corner[1])
+        .collect();
+    let (low, high) = up
+        .iter()
+        .fold((f64::MAX, f64::MIN), |(a, b), &w| (a.min(w), b.max(w)));
+    assert!(low < 0.0, "{low}");
+    assert!(
+        (high / inches(1).as_nm() as f64 - 0.6765).abs() < 1e-3,
+        "{high}"
+    );
+}
+
+#[test]
+fn a_tilted_blade_lower_than_the_board_is_wide_leaves_a_leaning_slot_in_its_edge() {
+    let board = Board::new(inches(24), fraction(11, 2), fraction(3, 4));
+    let saw = TableSaw {
+        tilt: Angle::from_degrees(3),
+        ..table_saw(fraction(5, 16), inches(3))
+    };
+    let slotted = kerfed(saw.rip(&board, on_edge()));
+    let slot = slotted.kerfs()[0];
+    assert_eq!(slot.tilt(), Angle::from_degrees(87));
+    let size = slotted.slot(&slot);
+    // Into the bottom edge as far up as the teeth reach, the full length.
+    assert_eq!(size.into, Axis::Width);
+    assert!(size.from_low);
+    assert_eq!(size.width, Blade::FULL_KERF);
+    assert_eq!(size.depth.rounded_to(fraction(1, 64)), inches(3));
+    assert!(size.bottom.unwrap().end_to_end);
+    assert!(size.top.is_none());
+    assert_eq!(slotted.to_string(), board.to_string());
+}
+
+#[test]
 fn the_miter_saw_chops_down_through_a_board_on_edge() {
     let board = Board::new(inches(24), fraction(7, 2), fraction(3, 4));
     let cut = MiterSaw::twelve_inch()

@@ -1,5 +1,5 @@
 use crate::{
-    Angle, Length,
+    Angle, Axis, Length,
     face::{Direction, Edge, Region, Vector},
     wide::Wide,
 };
@@ -48,6 +48,53 @@ pub enum Across {
     Face(Direction),
     /// The board's thickness: the blade stood parallel to the faces, through a board on edge.
     Thickness,
+}
+
+/// Where a slot meets a plane through the board: between the lines its two faces make on the
+/// plane, as far along them as the blade reached on both.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Opening {
+    /// The way the lines run, a unit vector `(l, w, t)`.
+    pub direction: [f64; 3],
+    /// Where each face's line passes nearest the board's corner, in nanometers `(l, w, t)`:
+    /// square to `direction` from it.
+    pub near: [f64; 3],
+    pub far: [f64; 3],
+    /// How far along the lines from those points the blade reached, in nanometers.
+    pub from: f64,
+    pub to: f64,
+}
+
+impl Opening {
+    /// Its corners, in order around it, in nanometers `(l, w, t)`.
+    pub fn corners(&self) -> [[f64; 3]; 4] {
+        let at =
+            |point: [f64; 3], along: f64| [0, 1, 2].map(|k| point[k] + along * self.direction[k]);
+        [
+            at(self.near, self.from),
+            at(self.near, self.to),
+            at(self.far, self.to),
+            at(self.far, self.from),
+        ]
+    }
+}
+
+/// `(l, w, t)` as floating point.
+fn float(v: Vector) -> [f64; 3] {
+    [v.l as f64, v.w as f64, v.t as f64]
+}
+
+fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+/// A unit vector along one of the board's axes.
+pub(crate) fn unit(axis: Axis) -> [f64; 3] {
+    match axis {
+        Axis::Length => [1.0, 0.0, 0.0],
+        Axis::Width => [0.0, 1.0, 0.0],
+        Axis::Thickness => [0.0, 0.0, 1.0],
+    }
 }
 
 /// Points on each round end of a slot, when it's outlined in its plane.
@@ -168,6 +215,157 @@ impl Kerf {
     /// Up the blade's plane, square to the way its center traveled.
     pub fn up(&self) -> Vector {
         self.normal.cross(self.along)
+    }
+
+    /// Which of the board's axes the blade came into it along: the one up its plane runs most
+    /// nearly along. Its thickness for a slot sawn into a face, even with the blade tilted as
+    /// far as it goes; its width for one sawn into an edge, like a resaw slot or a board on
+    /// edge crosscut partway; its length for one sawn into an end.
+    pub fn into(&self) -> Axis {
+        let up = self.up();
+        let (l, w, t) = (up.l.abs(), up.w.abs(), up.t.abs());
+        if t >= w && t >= l {
+            Axis::Thickness
+        } else if w >= l {
+            Axis::Width
+        } else {
+            Axis::Length
+        }
+    }
+
+    /// The point the blade reached furthest `toward` (any length), on the plane midway between
+    /// the slot's faces, in nanometers `(l, w, t)`: an end of its center's path, out to the
+    /// blade's edge.
+    pub(crate) fn furthest(&self, toward: [f64; 3]) -> [f64; 3] {
+        let (normal, along, up) = (float(self.normal), float(self.along), float(self.up()));
+        let (n2, a2, u2) = (dot(normal, normal), dot(along, along), dot(up, up));
+        let middle = (nm(self.near) + nm(self.far)) as f64 / 2.0;
+        let path = |at: Length| {
+            [0, 1, 2].map(|k| {
+                middle * normal[k] / n2
+                    + self.center as f64 * up[k] / u2
+                    + at.as_nm() as f64 * along[k] / a2
+            })
+        };
+        let (start, end) = (path(self.start), path(self.end));
+        let center = if dot(start, toward) >= dot(end, toward) {
+            start
+        } else {
+            end
+        };
+        // Toward it in the blade's plane.
+        let out = [0, 1, 2].map(|k| toward[k] - dot(toward, normal) * normal[k] / n2);
+        let size = dot(out, out).sqrt();
+        if size == 0.0 {
+            return center;
+        }
+        let radius = self.radius.as_nm() as f64;
+        [0, 1, 2].map(|k| center[k] + radius * out[k] / size)
+    }
+
+    /// Where the slot meets the plane where the board's `axis` is `at` nanometers, or `None`
+    /// if the blade didn't reach it between its faces, or its faces run the same way as the
+    /// plane. Worked out to within floating point of a nanometer, for measuring and drawing.
+    pub fn meets(&self, axis: Axis, at: f64) -> Option<Opening> {
+        let plane = unit(axis);
+        let (near, direction) = self.line(plane, at, self.near.as_nm() as f64)?;
+        let (far, _) = self.line(plane, at, self.far.as_nm() as f64)?;
+        let (from_near, to_near) = self.reached(near, direction)?;
+        let (from_far, to_far) = self.reached(far, direction)?;
+        let (from, to) = (from_near.max(from_far), to_near.min(to_far));
+        (from <= to).then_some(Opening {
+            direction,
+            near,
+            far,
+            from,
+            to,
+        })
+    }
+
+    /// Where a plane parallel to the slot's faces, `normal · p = face` (nanometers times the
+    /// normal's length), meets the plane `plane · p = at`: the point on the line nearest the
+    /// board's corner, and the unit vector it runs along. `None` if the planes run the same
+    /// way.
+    pub(crate) fn line(&self, plane: [f64; 3], at: f64, face: f64) -> Option<([f64; 3], [f64; 3])> {
+        let normal = float(self.normal);
+        let line = [
+            normal[1] * plane[2] - normal[2] * plane[1],
+            normal[2] * plane[0] - normal[0] * plane[2],
+            normal[0] * plane[1] - normal[1] * plane[0],
+        ];
+        let (n2, g2, ng) = (dot(normal, normal), dot(plane, plane), dot(normal, plane));
+        let size = dot(line, line).sqrt();
+        if size < 1e-9 * (n2 * g2).sqrt() {
+            return None;
+        }
+        // On both planes, square to the line: some of the normal and some of the other plane's.
+        let determinant = n2 * g2 - ng * ng;
+        let a = (face * g2 - at * ng) / determinant;
+        let b = (at * n2 - face * ng) / determinant;
+        Some((
+            [0, 1, 2].map(|k| a * normal[k] + b * plane[k]),
+            line.map(|v| v / size),
+        ))
+    }
+
+    /// Along the line through `point` (nanometers) the way `direction` (a unit vector) runs,
+    /// where the blade reached in its plane: within its radius of its center's path.
+    pub(crate) fn reached(&self, point: [f64; 3], direction: [f64; 3]) -> Option<(f64, f64)> {
+        let (along, up) = (float(self.along), float(self.up()));
+        let (a, u) = (dot(along, along).sqrt(), dot(up, up).sqrt());
+        // Along the path and up the plane from it, in nanometers, as `x + dx s` at `s`.
+        let (x, dx) = (dot(along, point) / a, dot(along, direction) / a);
+        let (y, dy) = (
+            (dot(up, point) - self.center as f64) / u,
+            dot(up, direction) / u,
+        );
+        let (start, end) = (self.start.as_nm() as f64 / a, self.end.as_nm() as f64 / a);
+        let radius = self.radius.as_nm() as f64;
+        // Where `(x + dx s - past)^2 + (y + dy s)^2 < r^2`, past the end of the path at `past`,
+        // or beside it, with `past` where along it the line is.
+        let within = |past: Option<f64>| -> Option<(f64, f64)> {
+            let (x, dx) = match past {
+                Some(past) => (x - past, dx),
+                None => (0.0, 0.0),
+            };
+            let (qa, qb, qc) = (
+                dx * dx + dy * dy,
+                2.0 * (x * dx + y * dy),
+                x * x + y * y - radius * radius,
+            );
+            if qa == 0.0 {
+                return (qc < 0.0).then_some((f64::MIN, f64::MAX));
+            }
+            let discriminant = qb * qb - 4.0 * qa * qc;
+            (discriminant > 0.0).then(|| {
+                let root = discriminant.sqrt();
+                ((-qb - root) / (2.0 * qa), (-qb + root) / (2.0 * qa))
+            })
+        };
+        // Where along the line it's before the path's start, beside it, and past its end.
+        let between = |low: f64, high: f64| -> (f64, f64) {
+            if dx == 0.0 {
+                return if low <= x && x <= high {
+                    (f64::MIN, f64::MAX)
+                } else {
+                    (0.0, -1.0)
+                };
+            }
+            let ends = [(low - x) / dx, (high - x) / dx];
+            (ends[0].min(ends[1]), ends[0].max(ends[1]))
+        };
+        [
+            (within(Some(start)), between(f64::MIN, start)),
+            (within(None), between(start, end)),
+            (within(Some(end)), between(end, f64::MAX)),
+        ]
+        .into_iter()
+        .filter_map(|(reached, (low, high))| {
+            let (from, to) = reached?;
+            let (from, to) = (from.max(low), to.min(high));
+            (from <= to).then_some((from, to))
+        })
+        .reduce(|a, b| (a.0.min(b.0), a.1.max(b.1)))
     }
 
     /// What the slot's faces are square to, roughly.
@@ -326,10 +524,10 @@ impl Kerf {
         )
     }
 
-    /// For a slot that ran across the face, where along the slot it goes all the way through a
-    /// board `thickness` thick, or `None` if it doesn't anywhere. The blade swept a convex
-    /// region, so it goes through wherever it reached both faces.
-    pub fn through_span(&self, thickness: Length) -> Option<(Length, Length)> {
+    /// For a slot square to the face, where along the slot it goes all the way through a board
+    /// `thickness` thick, or `None` if it doesn't anywhere. The blade swept a convex region, so
+    /// it goes through wherever it reached both faces.
+    fn through_span(&self, thickness: Length) -> Option<(Length, Length)> {
         let (bottom_start, bottom_end) = self.span_at(Length::ZERO)?;
         let (top_start, top_end) = self.span_at(thickness)?;
         let (start, end) = (bottom_start.max(top_start), bottom_end.min(top_end));

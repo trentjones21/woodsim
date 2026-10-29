@@ -231,7 +231,7 @@ impl TableSawStation {
     /// it's about, and the slide, in meters; `None` while the gauge is square or not in use.
     fn angled(&self, saw: TableSaw) -> Option<(Quat, Vec3, f32)> {
         let stop = saw.miter_gauge?;
-        if saw.gauge_angle == Angle::ZERO || self.lie.on_edge() {
+        if saw.gauge_angle == Angle::ZERO {
             return None;
         }
         // The board's length across the table turns toward its trailing side as the blade's
@@ -1171,6 +1171,91 @@ mod tests {
         };
         assert_eq!(cut.piece.board.miters(), [Angle::from_degrees(30); 2]);
         assert_eq!(cut.piece.board.length(), Length::from_inches(14));
+    }
+
+    /// A 1x3, narrow enough to cut through standing on edge.
+    fn narrow() -> Board {
+        Board::new(
+            Length::from_inches(24),
+            Length::from_inches(3),
+            Length::from_inch_fraction(3, 4),
+        )
+    }
+
+    #[test]
+    fn on_edge_and_across_a_tilted_blade_cuts_the_end_on_the_slant_across_the_width() {
+        let mut station = TableSawStation::default();
+        station.load(Workpiece::Board(narrow()));
+        assert!(station.switch_guide());
+        assert!(station.tip());
+        assert!(station.turn_left());
+        station.set_height(HEIGHT_MAX);
+        station.set_tilt(Angle::from_degrees(30));
+        station.push(10.0);
+        let Some(Ok(Passed::Cut(crate::work::Parted::Board(cut)))) = station.result() else {
+            panic!("expected the board crosscut, got {:?}", station.result());
+        };
+        assert_eq!(cut.piece.board.miters(), [Angle::from_degrees(30)]);
+        assert!(cut.piece.board.bevels().is_empty());
+    }
+
+    #[test]
+    fn on_edge_and_across_at_a_gauge_angle_a_tilted_blade_cuts_a_compound_angle() {
+        let mut station = TableSawStation::default();
+        station.load(Workpiece::Board(narrow()));
+        assert!(station.switch_guide());
+        assert!(station.tip());
+        assert!(station.turn_left());
+        station.set_height(HEIGHT_MAX);
+        station.set_tilt(Angle::from_degrees(30));
+        station.set_gauge_angle(Angle::from_degrees(15));
+        station.push(10.0);
+        let Some(Ok(Passed::Cut(crate::work::Parted::Board(cut)))) = station.result() else {
+            panic!("expected the board crosscut, got {:?}", station.result());
+        };
+        // The end slants across the width and leans through the thickness.
+        assert_eq!(cut.piece.board.miters().len(), 1);
+        assert_eq!(cut.piece.board.bevels().len(), 1);
+        // The board on edge, and the gauge's head with it, are turned on the table.
+        assert_eq!(
+            station.gauge_pose().1,
+            Quat::from_rotation_y(-(15f32.to_radians()))
+        );
+    }
+
+    #[test]
+    fn on_edge_and_across_stopped_partway_the_slot_is_in_the_bottom_edge() {
+        let mut station = TableSawStation::default();
+        station.load(Workpiece::Board(narrow()));
+        assert!(station.switch_guide());
+        assert!(station.tip());
+        assert!(station.turn_left());
+        station.set_height(HEIGHT_MAX);
+        // The blade's center 4.3" short of the leading face: its teeth are into the bottom
+        // edge, partway through the thickness.
+        station.move_to(-Length::from_nm(Length::from_inches(43).as_nm() / 10));
+        assert_eq!(
+            station.status(),
+            "Cutting. So far, a 1/8\"-wide, 11/16\"-deep kerf in an edge, 11/32\" long."
+        );
+    }
+
+    #[test]
+    fn on_edge_a_tilted_blade_resaws_on_the_slant() {
+        let mut station = TableSawStation::default();
+        station.load(Workpiece::Board(narrow()));
+        assert!(station.tip());
+        station.set_fence(Length::from_inch_fraction(5, 16));
+        station.set_height(HEIGHT_MAX);
+        station.set_tilt(Angle::from_degrees(3));
+        push_through(&mut station);
+        let Some(Ok(Passed::Cut(crate::work::Parted::Board(cut)))) = station.result() else {
+            panic!("expected the board resawn, got {:?}", station.result());
+        };
+        // Each layer is thicker along one edge than the other: a face of each leans.
+        assert!(!cut.piece.board.bevels().is_empty());
+        let offcut = cut.offcut.as_ref().expect("the other layer");
+        assert!(!offcut.board.bevels().is_empty());
     }
 
     #[test]

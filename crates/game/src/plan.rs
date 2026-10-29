@@ -12,7 +12,7 @@ use std::{
 };
 
 use woodsim::{
-    Across, Angle, Assembly, Board, Edge, Fastener, Joint, Length, Member, Region, Surface,
+    Angle, Assembly, Board, Edge, Fastener, Joint, Length, Member, Opening, Region, Surface,
     surfaces,
 };
 
@@ -790,6 +790,72 @@ enum Seen {
     Through,
 }
 
+/// Where a slot opens on a face of a part, seen from above: between two lines that run one way
+/// across the face, as far along them as the blade reached. In nanometers on the face.
+#[derive(Clone, Copy, Debug)]
+struct Footprint {
+    /// The way its lines run, a unit vector `(l, w)`, and square to that across the face.
+    along: Vec2,
+    across: Vec2,
+    /// From and to along each, from the part's corner.
+    from: f64,
+    to: f64,
+    low: f64,
+    high: f64,
+}
+
+impl Footprint {
+    fn footprint(&self) -> Vec<Vec2> {
+        let at = |along: f64, across: f64| {
+            [0, 1].map(|k| along * self.along[k] + across * self.across[k])
+        };
+        vec![
+            at(self.from, self.low),
+            at(self.to, self.low),
+            at(self.to, self.high),
+            at(self.from, self.high),
+        ]
+    }
+
+    /// Whether it's all inside `other`, to within a nanometer.
+    fn within(&self, other: &Footprint) -> bool {
+        self.from >= other.from - 1.0
+            && self.to <= other.to + 1.0
+            && self.low >= other.low - 1.0
+            && self.high <= other.high + 1.0
+    }
+}
+
+/// Where a slot opens on a face, seen from above. On a face its lines run level, so they run
+/// the same way on the bottom face and the top.
+fn seen(opening: &Opening) -> Footprint {
+    let along = [opening.direction[0], opening.direction[1]];
+    let across = [-along[1], along[0]];
+    let on = |direction: Vec2, point: [f64; 3]| direction[0] * point[0] + direction[1] * point[1];
+    let (near, far) = (on(across, opening.near), on(across, opening.far));
+    Footprint {
+        along,
+        across,
+        from: opening.from + on(along, opening.near),
+        to: opening.to + on(along, opening.near),
+        low: near.min(far),
+        high: near.max(far),
+    }
+}
+
+/// Where openings on the bottom face and the top overlap, seen from above.
+fn through(below: &Opening, above: &Opening) -> Option<Footprint> {
+    let (below, above) = (seen(below), seen(above));
+    let overlap = Footprint {
+        from: below.from.max(above.from),
+        to: below.to.min(above.to),
+        low: below.low.max(above.low),
+        high: below.high.min(above.high),
+        ..below
+    };
+    (overlap.from < overlap.to && overlap.low < overlap.high).then_some(overlap)
+}
+
 /// A part drawn on its face: its outline and the slots sawn into it, in nanometers from its
 /// corner, `l` across the page and `w` up it. Of the four ways it could lie in its box, it's
 /// drawn the one that sorts first, so the same part turned over draws the same.
@@ -873,52 +939,33 @@ impl Sketch {
             edges.extend(joined);
         }
         let mut slots = Vec::new();
+        // Slots that open onto neither face, like a resaw slot in an edge, aren't drawn, but
+        // still make the part different: by their size.
+        let mut hidden = Vec::new();
         for kerf in board.kerfs() {
-            let Across::Face(across) = kerf.across() else {
-                continue;
-            };
-            let from_below = kerf.from_below();
-            let face = if from_below { Length::ZERO } else { thickness };
-            // From positions along and across the slot back to the board's `(l, w)`.
-            let (al, aw, cl, cw) = (
-                kerf.along.l as f64,
-                kerf.along.w as f64,
-                across.l as f64,
-                across.w as f64,
-            );
-            let determinant = al * cw - aw * cl;
-            let at = |along: Length, across: Length| {
-                let (u, a) = (along.as_nm() as f64, across.as_nm() as f64);
-                [
-                    (u * cw - aw * a) / determinant,
-                    (al * a - u * cl) / determinant,
-                ]
-            };
-            let footprint = |(start, end): (Length, Length)| {
-                vec![
-                    at(start, kerf.near),
-                    at(end, kerf.near),
-                    at(end, kerf.far),
-                    at(start, kerf.far),
-                ]
-            };
-            if let Some(span) = kerf.span_at(face) {
-                let seen = if from_below { Seen::Below } else { Seen::Above };
-                slots.push((footprint(span), seen));
+            // Where it opens on the bottom face and the top, in the wood, and where those
+            // openings overlap, seen from above: where it goes through.
+            let [below, above] = [Length::ZERO, thickness]
+                .map(|t| board.opening(kerf, woodsim::Axis::Thickness, t.as_nm() as f64));
+            if below.is_none() && above.is_none() {
+                let slot = board.slot(kerf);
+                hidden.push(format!("{}x{}", measured(slot.width), measured(slot.depth)));
             }
-            if let Some(span) = kerf.through_span(thickness) {
-                slots.push((footprint(span), Seen::Through));
+            let through = below
+                .zip(above)
+                .and_then(|(below, above)| through(&below, &above));
+            for (opening, side) in [(below, Seen::Below), (above, Seen::Above)] {
+                let Some(opening) = opening.map(|opening| seen(&opening)) else {
+                    continue;
+                };
+                if through.is_none_or(|through| !opening.within(&through)) {
+                    slots.push((opening.footprint(), side));
+                }
+            }
+            if let Some(through) = through {
+                slots.push((through.footprint(), Seen::Through));
             }
         }
-        let resawn: Vec<String> = board
-            .kerfs()
-            .iter()
-            .filter(|kerf| kerf.across() == Across::Thickness)
-            .map(|kerf| {
-                let slot = board.slot(kerf);
-                format!("{}x{}", measured(slot.width), measured(slot.depth))
-            })
-            .collect();
         let (mut low, mut high) = ([f64::MAX; 2], [f64::MIN; 2]);
         for &[l, w] in regions.iter().flatten() {
             low = [low[0].min(l), low[1].min(w)];
@@ -939,7 +986,7 @@ impl Sketch {
             .map(|(flip_l, flip_w)| {
                 let mut sketch = drawn.turned(low, high, flip_l, flip_w);
                 sketch.key = format!(
-                    "{:?} {} {resawn:?}",
+                    "{:?} {} {hidden:?}",
                     measured(thickness),
                     sketch.drawn_key()
                 );
@@ -1777,6 +1824,73 @@ mod tests {
         assert!(page.contains("class=\"bevel"), "{page}");
         assert!(page.contains("45° bevel"), "{page}");
         assert!(page.contains("bevel to"), "{page}");
+    }
+
+    /// A 1x8 fed into a table saw's blade, 1" high, its center going from `start` to `end`
+    /// along it, lying as `lie` says.
+    fn fed(board: &Board, lie: Orientation, start: f64, end: f64) -> Board {
+        let saw = woodsim::TableSaw {
+            blade: woodsim::Blade {
+                diameter: Length::from_inches(10),
+                kerf: woodsim::Blade::FULL_KERF,
+            },
+            fence: Length::from_inches(2),
+            height: Length::from_inches(1),
+            miter_gauge: lie.on_edge().then_some(Length::from_inches(10)),
+            gauge_angle: Angle::ZERO,
+            tilt: Angle::ZERO,
+        };
+        let at = |inches: f64| Length::from_nm((inches * 25_400_000.0) as i64);
+        match saw.feed(board, lie, at(start), at(end)) {
+            Ok(Pass::Kerfed(board)) => board,
+            other => panic!("expected a slot, got {other:?}"),
+        }
+    }
+
+    /// How much of the board's length, in inches, each slot in its sketch covers, and how it's
+    /// seen.
+    fn openings(board: &Board) -> Vec<(Seen, f64)> {
+        let length = board.length().as_nm() as f64;
+        let mut openings: Vec<(Seen, f64)> = Sketch::of(board)
+            .slots
+            .iter()
+            .map(|(footprint, seen)| {
+                let (low, high) = footprint
+                    .iter()
+                    .fold((f64::MAX, f64::MIN), |(a, b), p| (a.min(p[0]), b.max(p[0])));
+                (*seen, (high.min(length) - low.max(0.0)) / 25_400_000.0)
+            })
+            .collect();
+        openings.sort_by_key(|opening| opening.0);
+        openings
+    }
+
+    #[test]
+    fn a_stopped_cut_shows_where_it_opens_and_where_it_goes_through() {
+        let board = Board::new(
+            Length::from_inches(24),
+            Length::from_inch_fraction(29, 4),
+            Length::from_inch_fraction(3, 4),
+        );
+        // Stopped with the blade's center 10" in, it's 13" along the bottom face and
+        // 11-9/16" through to the top. The part's drawn whichever way up sorts first.
+        let stopped = openings(&fed(&board, Orientation::default(), -6.0, 10.0));
+        assert_eq!(stopped.len(), 2, "{stopped:?}");
+        assert_ne!(stopped[0].0, Seen::Through);
+        assert!((stopped[0].1 - 13.0).abs() < 0.01, "{stopped:?}");
+        assert_eq!(stopped[1].0, Seen::Through);
+        assert!((stopped[1].1 - 11.56).abs() < 0.01, "{stopped:?}");
+        // On edge and across, stopped partway through its thickness, it opens on the face it
+        // went in through and doesn't go through to the other.
+        let narrow = Board::new(
+            Length::from_inches(24),
+            Length::from_inches(3),
+            Length::from_inch_fraction(3, 4),
+        );
+        let lie = Orientation::default().tipped().turned_left();
+        let notched = openings(&fed(&narrow, lie, -6.0, -2.5));
+        assert_eq!(notched.len(), 1, "{notched:?}");
+        assert_ne!(notched[0].0, Seen::Through);
     }
 
     #[test]

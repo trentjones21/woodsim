@@ -8,7 +8,7 @@ use crate::{
     Angle, Axis, Kerf, Length,
     face::{Direction, Edge, Region, Vector, merge_all},
     history::{Operation, Origin, Part, Side},
-    kerf::Across,
+    kerf::{self, Opening},
     solid::{self, hull, line_crosses},
 };
 
@@ -452,92 +452,174 @@ impl Board {
         })
     }
 
-    /// How `kerf`, one of this board's slots, measures in it.
+    /// How `kerf`, one of this board's slots, measures in it, from the side the blade came in
+    /// through, whichever of the board's axes that was along. Worked out to within floating
+    /// point of a nanometer, as you'd measure it.
     pub fn slot(&self, kerf: &Kerf) -> SlotSize {
-        match kerf.across() {
-            Across::Face(across) => self.slot_in_face(kerf, across),
-            Across::Thickness => self.slot_in_edge(kerf),
-        }
-    }
-
-    fn slot_in_face(&self, kerf: &Kerf, across: Direction) -> SlotSize {
-        let thickness = self.thickness;
-        let in_slot: Vec<Region> = self
-            .face
-            .iter()
-            .filter_map(|region| region.solid(thickness).clip_all(kerf.faces()))
-            .collect();
-        let [near_face, far_face] = kerf.faces();
-        let wood_beyond = |face: Edge| {
-            self.face
+        let corners = self.corners();
+        let extent = |at: &dyn Fn(&[Length; 3]) -> f64| {
+            corners
                 .iter()
-                .any(|region| region.solid(thickness).clip(face.flipped()).is_some())
+                .map(at)
+                .fold((f64::MAX, f64::MIN), |(low, high), x| {
+                    (low.min(x), high.max(x))
+                })
         };
-        let along = kerf.along_face();
-        let run = |t: Length| {
-            let (start, end) = kerf.span_at(t)?;
-            let nm = |length: Length| length.as_nm() as i128;
-            let band = [
-                Edge::new(along, nm(end)),
-                Edge::new(along.reversed(), -nm(start)),
-            ];
-            let reached: Vec<Region> = in_slot
-                .iter()
-                .filter_map(|region| region.solid(thickness).clip_all(band))
-                .collect();
-            Some(Run {
-                length: measured(range(&reached, along, thickness), along),
-                end_to_end: reached == in_slot,
+        let nm = |length: Length| length.as_nm() as f64;
+        let normal = kerf.normal;
+        let (least, most) = extent(&|&[l, w, t]| normal.dot(l, w, t) as f64);
+        let (near, far) = (nm(kerf.near), nm(kerf.far));
+        let to_length =
+            |scaled: f64, scale: f64| Length::from_nm((scaled.max(0.0) / scale).round() as i64);
+        // Up the axis the blade came in along, from the side it came in through, as far as the
+        // slot goes into the wood: where it's deepest on the plane midway between its faces,
+        // either as far as the blade reached, or where the slot meets the board's outside.
+        let into = kerf.into();
+        let axis = match into {
+            Axis::Length => 0,
+            Axis::Width => 1,
+            Axis::Thickness => 2,
+        };
+        let e = kerf::unit(into);
+        let (low, high) = extent(&|corner| nm(corner[axis]));
+        let from_low = kerf.furthest(e)[axis] + kerf.furthest(e.map(|v| -v))[axis] < low + high;
+        let toward = if from_low { e } else { e.map(|v| -v) };
+        let along = |point: [f64; 3]| (0..3).map(|k| point[k] * toward[k]).sum::<f64>();
+        let middle = (near + far) / 2.0;
+        let furthest = kerf.furthest(toward);
+        let reached = self
+            .outside()
+            .filter_map(|(plane, at)| {
+                let (point, direction) = kerf.line(plane, at, middle)?;
+                let (first, last) = self.wood_along(point, direction)?;
+                let (from, to) = kerf.reached(point, direction)?;
+                let (from, to) = (from.max(first), to.min(last));
+                (from <= to).then(|| {
+                    let at = |s: f64| along([0, 1, 2].map(|k| point[k] + s * direction[k]));
+                    at(from).max(at(to))
+                })
             })
-        };
-        SlotSize {
-            width: measured(range(&in_slot, across, thickness), across),
-            depth: kerf.depth(self.thickness).min(self.thickness),
-            at_edge: !wood_beyond(near_face) || !wood_beyond(far_face),
-            bottom: run(Length::ZERO),
-            top: run(self.thickness),
-        }
-    }
-
-    /// Measures a slot square to the thickness, which came in through one of the board's edges
-    /// square to `along.square()`.
-    fn slot_in_edge(&self, kerf: &Kerf) -> SlotSize {
-        let along = kerf.along_face();
-        let square = along.square();
-        let scale = along.scale();
-        let radius = kerf.radius.as_nm() as f64 * scale;
-        let center = kerf.center as f64;
-        let (low, high) = range(&self.face, square, self.thickness);
-        let wood = range(&self.face, along, self.thickness);
-        // How far the blade reached along each edge, within the board's length there.
+            .chain(self.holds(furthest).then(|| along(furthest)))
+            .fold(f64::MIN, f64::max);
+        let entry = if from_low { low } else { -high };
+        let depth = reached - entry;
+        // On each side, how far the opening runs in the wood, and whether across all of it.
         let run = |side: f64| {
-            let off = side - center;
-            (off.abs() <= radius).then(|| {
-                let half = (radius * radius - off * off).sqrt();
-                let reach = (
-                    kerf.start.as_nm() as f64 - half,
-                    kerf.end.as_nm() as f64 + half,
-                );
-                let within = (reach.0.max(wood.0), reach.1.min(wood.1));
-                Run {
-                    length: measured(within, along),
-                    end_to_end: reach.0 <= wood.0 && reach.1 >= wood.1,
-                }
+            let opening = self.opening(kerf, into, side)?;
+            let (first, last) = self.wood_beside(kerf, into, side)?;
+            Some(Run {
+                length: to_length(opening.to - opening.from, 1.0),
+                end_to_end: opening.from <= first + 0.5 && opening.to >= last - 0.5,
             })
         };
-        let depth = if center < low {
-            center + radius - low
-        } else {
-            high - (center - radius)
-        };
-        let nm = |scaled: f64| Length::from_nm((scaled / scale).round() as i64);
         SlotSize {
-            width: (kerf.far.min(self.thickness) - kerf.near.max(Length::ZERO)).max(Length::ZERO),
-            depth: nm(depth.min(high - low)),
-            at_edge: kerf.near <= Length::ZERO || kerf.far >= self.thickness,
+            into,
+            from_low,
+            width: to_length(far.min(most) - near.max(least), normal.scale()),
+            depth: to_length(depth.min(high - low), 1.0),
+            at_edge: least >= near || most <= far,
             bottom: run(low),
             top: run(high),
         }
+    }
+
+    /// Where `kerf`, one of this board's slots, opens onto the plane where the board's `axis`
+    /// is `at` nanometers: where `Kerf::meets` has it, cut short where the wood there ends.
+    /// `None` if it doesn't open onto the plane in the wood.
+    pub fn opening(&self, kerf: &Kerf, axis: Axis, at: f64) -> Option<Opening> {
+        let opening = kerf.meets(axis, at)?;
+        let (first, last) = self.wood_beside(kerf, axis, at)?;
+        let (from, to) = (opening.from.max(first), opening.to.min(last));
+        (to - from > 0.5).then_some(Opening {
+            from,
+            to,
+            ..opening
+        })
+    }
+
+    /// Along the lines where a slot's faces meet the plane where the board's `axis` is `at`
+    /// nanometers, from where the wood starts to where it ends, as `Kerf::meets` measures
+    /// along them: on lines at its faces where they're in the board, or at the board's
+    /// outside where they're past it.
+    fn wood_beside(&self, kerf: &Kerf, axis: Axis, at: f64) -> Option<(f64, f64)> {
+        let normal = kerf.normal;
+        let (least, most) = self
+            .corners()
+            .iter()
+            .map(|&[l, w, t]| normal.dot(l, w, t) as f64)
+            .fold((f64::MAX, f64::MIN), |(low, high), x| {
+                (low.min(x), high.max(x))
+            });
+        let faces = [
+            (kerf.near.as_nm() as f64).max(least),
+            (kerf.far.as_nm() as f64).min(most),
+        ];
+        faces
+            .into_iter()
+            .filter_map(|face| {
+                let (point, direction) = kerf.line(kerf::unit(axis), at, face)?;
+                self.wood_along(point, direction)
+            })
+            .reduce(|a, b| (a.0.min(b.0), a.1.max(b.1)))
+    }
+
+    /// The planes around each of the board's regions, `plane · p <= at` inside, `p` in
+    /// nanometers: its sides, and its bottom and top faces.
+    fn outside(&self) -> impl Iterator<Item = ([f64; 3], f64)> + '_ {
+        self.face.iter().flat_map(|region| self.around(region))
+    }
+
+    /// The planes around `region` of the board, as `outside` gives them.
+    fn around(&self, region: &Region) -> Vec<([f64; 3], f64)> {
+        let thickness = self.thickness.as_nm() as f64;
+        region
+            .edges()
+            .iter()
+            .map(|edge| {
+                (
+                    [edge.out.l as f64, edge.out.w as f64, edge.lean as f64],
+                    edge.at as f64,
+                )
+            })
+            .chain([([0.0, 0.0, -1.0], 0.0), ([0.0, 0.0, 1.0], thickness)])
+            .collect()
+    }
+
+    /// Whether `point` (nanometers) is in the board's wood, or within half a nanometer of it.
+    fn holds(&self, point: [f64; 3]) -> bool {
+        self.wood_along(point, [1.0, 0.0, 0.0])
+            .is_some_and(|(first, last)| first <= 0.0 && 0.0 <= last)
+    }
+
+    /// Along the line through `point` (nanometers) the way `direction` (a unit vector) runs,
+    /// from where it goes into the wood to where it last comes out, from `point`, in
+    /// nanometers, or `None` if it misses the board. Points on the board's surface count as in
+    /// it, to within half a nanometer.
+    fn wood_along(&self, point: [f64; 3], direction: [f64; 3]) -> Option<(f64, f64)> {
+        self.face
+            .iter()
+            .filter_map(|region| {
+                self.around(region).into_iter().try_fold(
+                    (f64::MIN, f64::MAX),
+                    |(first, last), (out, at): ([f64; 3], f64)| {
+                        let size = (out[0] * out[0] + out[1] * out[1] + out[2] * out[2]).sqrt();
+                        let toward = (0..3).map(|k| out[k] * direction[k]).sum::<f64>() / size;
+                        let past = ((0..3).map(|k| out[k] * point[k]).sum::<f64>() - at) / size;
+                        let (first, last) = if toward.abs() < 1e-12 {
+                            if past > 0.5 {
+                                return None;
+                            }
+                            (first, last)
+                        } else if toward > 0.0 {
+                            (first, last.min((0.5 - past) / toward))
+                        } else {
+                            (first.max((0.5 - past) / toward), last)
+                        };
+                        (first <= last).then_some((first, last))
+                    },
+                )
+            })
+            .reduce(|a, b| (a.0.min(b.0), a.1.max(b.1)))
     }
 
     /// The board's leaning sides, each with how far it leans from square to the faces: what
@@ -610,22 +692,6 @@ fn plane_axes(normal: Vector) -> [[f64; 3]; 2] {
     [x, y]
 }
 
-/// The range of `direction · (l, w)` over `regions` of a board `thickness` thick, times the
-/// direction's scale.
-fn range(regions: &[Region], direction: Direction, thickness: Length) -> (f64, f64) {
-    regions
-        .iter()
-        .map(|region| region.solid(thickness).extent(direction))
-        .fold((f64::MAX, f64::MIN), |(low, high), (a, b)| {
-            (low.min(a), high.max(b))
-        })
-}
-
-/// The length of `(low, high)`, measured along `direction`, to the nanometer.
-fn measured((low, high): (f64, f64), direction: Direction) -> Length {
-    Length::from_nm(((high - low).max(0.0) / direction.scale()).round() as i64)
-}
-
 /// How far `out`, the way an edge faces, is turned from the board's length, in radians, either
 /// way.
 fn slant(out: Direction) -> f64 {
@@ -641,15 +707,21 @@ fn is_end(out: Direction) -> bool {
 /// How a slot in a board measures, to the nanometer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SlotSize {
+    /// Which of the board's axes the blade came in along (`Kerf::into`): through a face, an
+    /// edge, or an end.
+    pub into: Axis,
+    /// Whether it came in through the side where that axis is lowest: the bottom face, the
+    /// `w = 0` edge, or the `l = 0` end.
+    pub from_low: bool,
     /// How wide it is in the board, square to its faces.
     pub width: Length,
-    /// How deep it goes into the board from where the blade came in, at its deepest.
+    /// How deep it goes into the board from the side the blade came in through, at its
+    /// deepest, square to that side. At the board's whole size that way, it goes through.
     pub depth: Length,
     /// Whether it's at an edge or end of the board, with wood on one side of it only.
     pub at_edge: bool,
-    /// How far it runs along the board on the two sides the blade could come out of, if it
-    /// reached them: for a slot in the face, its bottom face and its top; for a slot square to
-    /// the thickness, the edges where `along.square()` is lowest and highest.
+    /// How far it runs on the two sides square to `into` the blade could come in or out of,
+    /// if it opens onto them: the bottom face and the top, the edges, or the ends.
     pub bottom: Option<Run>,
     pub top: Option<Run>,
 }
@@ -705,7 +777,7 @@ mod tests {
     use proptest::prelude::*;
 
     use super::*;
-    use crate::Blade;
+    use crate::{Blade, kerf::Across};
 
     fn inches(n: i64) -> Length {
         Length::from_inches(n)

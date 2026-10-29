@@ -17,7 +17,7 @@ use bevy::{
     prelude::*,
     render::view::{ColorGrading, ColorGradingGlobal},
 };
-use woodsim::{Across, Angle, Board, Cut, Kerf, Length, Orientation, Piece, Run};
+use woodsim::{Angle, Board, Cut, Kerf, Length, Orientation, Piece, Run};
 
 use crate::{
     bench::{self, BenchView},
@@ -789,34 +789,49 @@ fn describe_slots(board: &Board, kerf: &Kerf, count: usize) -> String {
         run.map_or(Length::ZERO, |run| run.length)
             .rounded_to(thirty_second)
     };
-    if let Across::Thickness = kerf.across() {
-        // A resaw slot, cut by a blade standing parallel to the faces, came in through an edge.
-        let width = size.width.rounded_to(thirty_second);
-        let depth = size.depth.rounded_to(thirty_second);
+    let width = size.width.rounded_to(thirty_second);
+    let depth = size.depth.rounded_to(thirty_second);
+    // Which way it runs: along the board, or across the face or edge it's in.
+    let along = kerf.along;
+    let lengthwise = along.l.abs() > along.w.abs().max(along.t.abs());
+    let full = if lengthwise {
+        "the full length"
+    } else {
+        "all the way across"
+    };
+    if size.into != woodsim::Axis::Thickness {
+        // Sawn into an edge or an end: by a blade parallel to the faces, a resaw slot.
+        let resaw = kerf.normal.t.abs() > kerf.normal.l.abs().max(kerf.normal.w.abs());
+        let (cut, slot) = if resaw {
+            ("resaw cut", "resaw kerf")
+        } else {
+            ("cut", "kerf")
+        };
+        let side = if size.into == woodsim::Axis::Width {
+            "edge"
+        } else {
+            "end"
+        };
         return match (size.bottom, size.top) {
             (Some(one), Some(other)) => format!(
-                "{a} stopped resaw cut{s} {} long on one edge and {} on the other",
+                "{a} stopped {cut}{s} {} long on one {side} and {} on the other",
                 run(Some(one)),
                 run(Some(other))
             ),
-            (Some(edge), None) | (None, Some(edge)) if edge.end_to_end => {
-                format!("{a} {width}-wide, {depth}-deep resaw kerf{s} in an edge, the full length")
+            (Some(opening), None) | (None, Some(opening)) if opening.end_to_end => {
+                format!("{a} {width}-wide, {depth}-deep {slot}{s} in an {side}, {full}")
             }
-            (edge, other) => format!(
-                "{a} {width}-wide, {depth}-deep resaw kerf{s} in an edge, {} long",
-                run(edge.or(other))
+            (opening, other) => format!(
+                "{a} {width}-wide, {depth}-deep {slot}{s} in an {side}, {} long",
+                run(opening.or(other))
             ),
         };
     }
-    let thickness = board.thickness();
-    if kerf.depth(thickness) >= thickness {
+    if size.depth >= board.thickness() {
         // A slot through the board's whole length would have cut it apart, so this one stops.
         let (top, bottom) = (run(size.top), run(size.bottom));
         return format!("{a} stopped cut{s} {top} long on top and {bottom} on the bottom");
     }
-    let depth = kerf.depth(thickness).rounded_to(thirty_second);
-    let width = size.width.rounded_to(thirty_second);
-    let lengthwise = kerf.along.l.abs() > kerf.along.w.abs();
     let kind = match (lengthwise, size.at_edge) {
         (true, false) => format!("groove{s}"),
         (true, true) => format!("rabbet{s}"),
@@ -830,15 +845,10 @@ fn describe_slots(board: &Board, kerf: &Kerf, count: usize) -> String {
         format!("{a} {width}-wide, {depth}-deep {kind} at {},", slant)
     };
     // How far it runs on the face the blade came through.
-    let face = if kerf.from_below() {
-        size.bottom
-    } else {
-        size.top
-    };
-    match (face.is_some_and(|run| run.end_to_end), lengthwise) {
-        (true, true) => format!("{described} the full length"),
-        (true, false) => format!("{described} all the way across"),
-        (false, _) => format!("{described} {} long", run(face)),
+    let face = if size.from_low { size.bottom } else { size.top };
+    match face {
+        Some(opening) if opening.end_to_end => format!("{described} {full}"),
+        _ => format!("{described} {} long", run(face)),
     }
 }
 

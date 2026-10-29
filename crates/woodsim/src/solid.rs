@@ -10,7 +10,7 @@
 use crate::{
     Length,
     assembly::Surface,
-    face::{Direction, Edge, Point, Region},
+    face::{Edge, Point, Region},
     wide::Wide,
 };
 
@@ -93,12 +93,6 @@ impl Corner {
     /// The whole nanometers just below and just above it on each axis.
     fn rounded_out(self) -> [(i128, i128); 3] {
         [self.x, self.y, self.z].map(|n| (n.div_euclid(self.d), -(-n).div_euclid(self.d)))
-    }
-
-    /// How far it is along `direction`, in the face, times its scale.
-    pub(crate) fn along(self, direction: Direction) -> f64 {
-        let [l, w, _] = self.position();
-        direction.l as f64 * l + direction.w as f64 * w
     }
 }
 
@@ -525,19 +519,6 @@ impl Solid<'_> {
         })
     }
 
-    /// The range of `direction · (l, w)` over it, times the direction's scale.
-    pub(crate) fn extent(&self, direction: Direction) -> (f64, f64) {
-        if !self.region.leans() {
-            return self.region.extent(direction);
-        }
-        self.corners()
-            .into_iter()
-            .map(|corner| corner.along(direction))
-            .fold((f64::MAX, f64::MIN), |(low, high), x| {
-                (low.min(x), high.max(x))
-            })
-    }
-
     /// Whether some of it is beyond `side`, away from the wood it bounds, exactly.
     pub(crate) fn beyond(&self, side: Edge) -> bool {
         let plane = Plane::side(side);
@@ -658,7 +639,7 @@ fn unit(v: [f64; 3]) -> [f64; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Angle;
+    use crate::{Angle, face::Direction};
 
     fn inches(n: i64) -> Length {
         Length::from_inches(n)
