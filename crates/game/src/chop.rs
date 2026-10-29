@@ -1070,14 +1070,19 @@ mod tests {
     }
 
     #[test]
-    fn on_edge_the_table_has_to_be_square() {
+    fn on_edge_an_angle_cuts_the_end_beveled_across_the_thickness() {
         let mut station = loaded();
         assert!(station.tip());
         station.set_miter(Angle::from_degrees(45));
         chop(&mut station);
-        assert_eq!(
-            station.status(),
-            "No cut: the table has to be square to cut a board standing on edge."
+        let status = station.status();
+        assert!(
+            status.starts_with("Cut a 3/4\" x 6\" x 12\" piece"),
+            "{status}"
+        );
+        assert!(
+            status.ends_with("The piece is beveled 45° at one end."),
+            "{status}"
         );
     }
 }

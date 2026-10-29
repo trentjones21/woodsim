@@ -396,27 +396,50 @@ fn a_blade_lower_than_the_panel_grooves_every_board_and_it_holds_together() {
 }
 
 #[test]
-fn a_glue_up_with_a_board_standing_up_is_not_cut() {
-    let base = Board::new(inches(12), inches(4), fraction(3, 4));
-    let upright = Board::new(inches(6), inches(4), fraction(3, 4));
-    let end = surfaces(&upright)
+fn a_glue_up_with_a_board_standing_up_is_cut_through_both() {
+    // An L: a 1x4 standing on edge along a flat one's edge, glued, its length the same way.
+    let board = Board::new(inches(24), fraction(7, 2), fraction(3, 4));
+    let edge = surfaces(&board)
         .into_iter()
-        .find(|surface| matches!(surface, Surface::Side(edge) if edge.out.l > 0))
+        .find(|surface| matches!(surface, Surface::Side(edge) if edge.out.l == 0 && edge.out.w < 0))
         .unwrap();
-    let mut glue_up = Assembly::of(base);
-    let other = Assembly::of(upright);
-    assert!(glue_up.attach(
-        (0, Surface::Top),
-        &other,
-        (0, end),
-        Mating::default(),
-        Fastener::Screws
-    ));
-    let saw = table_saw(inches(2), None, inches(1));
-    assert!(matches!(
-        saw.rip_glue_up(&glue_up, Rotation::NONE),
-        Err(woodsim::CutError::NotModeled(_))
-    ));
+    let corner = (0..4)
+        .find_map(|turn| {
+            let mut corner = Assembly::of(board.clone());
+            let mating = Mating {
+                turn,
+                ..Mating::default()
+            };
+            corner.attach(
+                (0, Surface::Top),
+                &Assembly::of(board.clone()),
+                (0, edge),
+                mating,
+                Fastener::Glue,
+            );
+            let [base, upright] = [0, 1].map(|k| corner.members()[k].axes()[0]);
+            let along: f64 = (0..3).map(|k| base[k] * upright[k]).sum();
+            (along > 0.99).then_some(corner)
+        })
+        .expect("a way around with their lengths alike");
+    // Chopped 10" from the stop, it comes apart into two L's, each still glued.
+    let Ok(GlueUpPass::Cut(cut)) = mitered(0).crosscut_glue_up(&corner, Rotation::NONE, inches(10))
+    else {
+        panic!("expected the L cut apart");
+    };
+    let offcut = cut.offcut.expect("the rest of the L");
+    for (part, length) in [
+        (&cut.piece, inches(10)),
+        (&offcut, inches(14) - Blade::FULL_KERF),
+    ] {
+        assert_eq!(part.members().len(), 2);
+        assert_eq!(part.joints().len(), 1);
+        for member in part.members() {
+            assert_eq!(member.board.length(), length);
+            assert_eq!(member.board.origin().replay(), member.board);
+        }
+    }
+    assert!(cut.loose.is_empty());
 }
 
 #[test]

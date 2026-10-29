@@ -134,12 +134,18 @@ fn the_other_way_the_miter_slants_the_other_way() {
 }
 
 #[test]
-fn a_glue_up_waits_for_a_square_gauge() {
-    let glue_up = woodsim::Assembly::of(one_by_four());
-    assert!(matches!(
-        gauge(inches(10), 4500).rip_glue_up(&glue_up, woodsim::Rotation::NONE),
-        Err(CutError::NotModeled(_))
-    ));
+fn a_glue_up_against_an_angled_gauge_cuts_as_its_board_does() {
+    let board = one_by_four();
+    let glue_up = woodsim::Assembly::of(board.clone());
+    let saw = gauge(inches(10), 4500);
+    let Ok(woodsim::GlueUpPass::Cut(glued)) = saw.rip_glue_up(&glue_up, across().rotation()) else {
+        panic!("expected the glue-up cut");
+    };
+    let cut = saw.rip(&board, across()).cut_apart();
+    let member = &glued.piece.members()[0];
+    assert_eq!(member.board, cut.piece.board);
+    assert_eq!(member.at, [cut.piece.l, cut.piece.w, cut.piece.t]);
+    assert_eq!(member.board.miters(), [Angle::from_degrees(45)]);
 }
 
 #[test]

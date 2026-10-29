@@ -100,17 +100,6 @@ impl Corner {
         let [l, w, _] = self.position();
         direction.l as f64 * l + direction.w as f64 * w
     }
-
-    /// Whether it's short of `at` along `direction`, times its scale, exactly.
-    pub(crate) fn short_of(self, direction: Direction, at: Length) -> bool {
-        Wide::dot([
-            (direction.l.into(), self.x),
-            (direction.w.into(), self.y),
-            (-nm(at), self.d),
-        ])
-        .signum()
-            < 0
-    }
 }
 
 const TOO_BIG: &str = "a board too big to work out exactly";
@@ -547,13 +536,6 @@ impl Solid<'_> {
             .fold((f64::MAX, f64::MIN), |(low, high), x| {
                 (low.min(x), high.max(x))
             })
-    }
-
-    /// Whether some of it is short of `at` along `direction`, times its scale, exactly.
-    pub(crate) fn reaches_below(&self, direction: Direction, at: Length) -> bool {
-        self.corners()
-            .into_iter()
-            .any(|corner| corner.short_of(direction, at))
     }
 
     /// Whether some of it is beyond `side`, away from the wood it bounds, exactly.

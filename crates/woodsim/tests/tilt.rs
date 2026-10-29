@@ -269,26 +269,70 @@ fn two_45_degree_bevels_glued_together_make_a_square_corner() {
 }
 
 #[test]
-fn what_a_tilted_blade_cannot_cut_yet() {
+fn tilted_short_of_the_top_the_blade_cuts_a_leaning_groove() {
     let board = one_by_six();
-    let not_modeled = |pass: Result<Pass, CutError>| matches!(pass, Err(CutError::NotModeled(_)));
-    // A bevel that doesn't go through, the rounded bottom of a tilted groove.
     let low = TableSaw {
         height: fraction(1, 2),
         ..tilted(inches(2), 4500)
     };
-    assert!(not_modeled(low.rip(&board, Orientation::default())));
-    // A board on edge.
+    let Ok(Pass::Kerfed(grooved)) = low.rip(&board, Orientation::default()) else {
+        panic!("expected a groove");
+    };
+    let groove = grooved.kerfs()[0];
+    assert_eq!(groove.tilt(), Angle::from_degrees(45));
+    assert!(
+        (groove.depth(board.thickness()) - fraction(1, 2))
+            .as_nm()
+            .abs()
+            <= 1
+    );
+    // Its fence-side face is 2" from the fence on the bottom face, leaning away from it going
+    // up: 1/16" up, it's 1/16" further over, and the slot is 1/8" past that. Above 1/2" up,
+    // the blade didn't reach.
+    let face = fraction(11, 2) - inches(2);
+    assert!(!grooved.has_wood_in(inches(12), face - fraction(1, 8), fraction(1, 16)));
+    assert!(grooved.has_wood_in(inches(12), face - fraction(1, 32), fraction(1, 16)));
+    assert!(grooved.has_wood_in(inches(12), face - fraction(5, 8), fraction(11, 16)));
+    assert_eq!(grooved.origin().replay(), grooved);
+}
+
+#[test]
+fn tilted_through_a_board_on_edge_the_resaw_leans_across_its_width() {
+    let board = one_by_six();
+    // On edge, the blade high enough to go through it, tilted 3°: the piece against the fence
+    // is 3/8" thick at the bottom edge, and thicker by the top.
+    let saw = TableSaw {
+        height: inches(6),
+        ..tilted(fraction(3, 8), 300)
+    };
     let on_edge = Orientation::default().tipped();
-    assert!(not_modeled(
-        tilted(fraction(3, 8), 4500).rip(&board, on_edge)
-    ));
-    // A glue-up.
+    let cut = saw.rip(&board, on_edge).cut_apart();
+    let piece = &cut.piece.board;
+    assert_eq!(piece.width(), fraction(11, 2));
+    let rise = 5.5 * 3f64.to_radians().tan();
+    let thick = 0.375 + rise;
+    assert!((piece.thickness().as_nm() as f64 / 25_400_000.0 - thick).abs() < 1e-6);
+    assert!(piece.face().iter().all(|region| region.leans()));
+    for part in parts(&cut) {
+        assert_eq!(part.board.origin().replay(), part.board);
+    }
+    parts_hold_its_wood(&board, &cut, 9).unwrap();
+}
+
+#[test]
+fn tilted_through_a_glue_up_each_board_is_beveled() {
+    let board = one_by_six();
     let glue_up = Assembly::of(board.clone());
-    assert!(matches!(
-        tilted(inches(2), 4500).rip_glue_up(&glue_up, Rotation::NONE),
-        Err(CutError::NotModeled(_))
-    ));
+    let Ok(woodsim::GlueUpPass::Cut(cut)) =
+        tilted(inches(2), 4500).rip_glue_up(&glue_up, Rotation::NONE)
+    else {
+        panic!("expected the glue-up cut");
+    };
+    let alone = tilted(inches(2), 4500)
+        .rip(&board, Orientation::default())
+        .cut_apart();
+    assert_eq!(cut.piece.members()[0].board, alone.piece.board);
+    assert_eq!(cut.piece.members()[0].board.bevels().len(), 1);
 }
 
 proptest! {

@@ -153,13 +153,6 @@ impl Board {
         board
     }
 
-    /// Whether any of the face lies short of `at` along `direction` (times its scale), exactly.
-    pub(crate) fn reaches_below(&self, direction: Direction, at: Length) -> bool {
-        self.face
-            .iter()
-            .any(|region| region.solid(self.thickness).reaches_below(direction, at))
-    }
-
     /// Whether any of the board's wood is beyond `side`, away from the wood it bounds, exactly.
     pub(crate) fn reaches_beyond(&self, side: Edge) -> bool {
         self.face

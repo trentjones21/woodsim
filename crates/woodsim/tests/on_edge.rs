@@ -152,12 +152,20 @@ fn a_groove_through_the_resawn_layer_splits_it_into_strips() {
 }
 
 #[test]
-fn on_edge_the_board_has_to_run_lengthwise_along_the_table_saw() {
+fn on_edge_and_turned_the_table_saw_crosscuts_it_through_its_thickness() {
     let board = Board::new(inches(24), inches(3), fraction(3, 4));
-    assert!(matches!(
-        table_saw(inches(6), all_the_way_up()).rip(&board, on_edge().turned_left()),
-        Err(CutError::NotModeled(_))
-    ));
+    // Its length across the table, its thickness along it, against the gauge's stop.
+    let saw = TableSaw {
+        miter_gauge: Some(inches(10)),
+        ..table_saw(inches(6), all_the_way_up())
+    };
+    let cut = saw.rip(&board, on_edge().turned_left()).cut_apart();
+    assert_eq!(cut.piece.board.to_string(), "3/4\" x 3\" x 10\"");
+    let offcut = cut.offcut.unwrap().board;
+    assert_eq!(offcut.to_string(), "3/4\" x 3\" x 13-7/8\"");
+    assert_eq!(cut.waste, Blade::FULL_KERF);
+    assert_eq!(cut.piece.board.origin().replay(), cut.piece.board);
+    assert_eq!(offcut.origin().replay(), offcut);
 }
 
 #[test]
@@ -174,16 +182,30 @@ fn the_miter_saw_chops_down_through_a_board_on_edge() {
 }
 
 #[test]
-fn the_miter_saw_only_chops_a_board_on_edge_square() {
+fn on_edge_the_miter_saw_cuts_an_angle_through_the_thickness() {
     let board = Board::new(inches(24), fraction(7, 2), fraction(3, 4));
     let saw = MiterSaw {
         miter: Angle::from_degrees(45),
         ..MiterSaw::twelve_inch()
     };
-    assert!(matches!(
-        saw.crosscut(&board, on_edge(), inches(12)),
-        Err(CutError::NotModeled(_))
-    ));
+    // Standing on edge, the table's angle crosses the board's thickness: its end leans 45°
+    // across its faces, 12" along the face against the fence and 3/4" less along the other.
+    let cut = saw.crosscut(&board, on_edge(), inches(12)).cut_apart();
+    let piece = &cut.piece.board;
+    assert_eq!(piece.length(), inches(12));
+    assert_eq!(
+        (piece.width(), piece.thickness()),
+        (fraction(7, 2), fraction(3, 4))
+    );
+    let bevels = piece.bevels();
+    assert_eq!(bevels.len(), 1);
+    assert_eq!(bevels[0].1, Angle::from_degrees(45));
+    let volume = piece.volume() / (25_400_000f64).powi(3);
+    assert!(
+        (volume - (12.0 + 11.25) / 2.0 * 3.5 * 0.75).abs() < 1e-6,
+        "{volume}"
+    );
+    assert_eq!(piece.origin().replay(), *piece);
 }
 
 #[test]

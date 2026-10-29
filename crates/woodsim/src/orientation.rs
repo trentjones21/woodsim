@@ -1,4 +1,4 @@
-use crate::{Board, Direction, Length, Rotation};
+use crate::{Board, Length, Rotation};
 
 /// One of a board's three directions: along its length (with the grain), across its width, or
 /// through its thickness.
@@ -165,55 +165,6 @@ impl Orientation {
         })
         .expect("each of the saw's directions has one of the board's axes")
     }
-
-    /// The direction on the board that runs `across` the table toward the fence and `along` it,
-    /// in those proportions, for a board lying on a face.
-    pub(crate) fn direction_onto_board(self, across: i64, along: i64) -> Direction {
-        let (across_axis, across_backward) = self.across();
-        let (_, along_backward) = self.along();
-        let across = if across_backward { -across } else { across };
-        let along = if along_backward { -along } else { along };
-        match across_axis {
-            Axis::Width => Direction::new(along, across),
-            Axis::Length => Direction::new(across, along),
-            Axis::Thickness => panic!("a board on edge has no face direction across the table"),
-        }
-    }
-
-    /// Where the point `across` and `along` the table from the near corner of `board` is on
-    /// the board, as `(l, w)`, for a board lying on a face.
-    pub(crate) fn point_onto_board(
-        self,
-        board: &Board,
-        across: Length,
-        along: Length,
-    ) -> (Length, Length) {
-        let (across_axis, across_backward) = self.across();
-        let (along_axis, along_backward) = self.along();
-        let (across, _) =
-            Orientation::onto_board((across, across), across_axis.of(board), across_backward);
-        let (along, _) =
-            Orientation::onto_board((along, along), along_axis.of(board), along_backward);
-        match across_axis {
-            Axis::Width => (along, across),
-            Axis::Length => (across, along),
-            Axis::Thickness => panic!("a board on edge has no face point across the table"),
-        }
-    }
-
-    /// Converts the span `from..to` on the table, measured from the near side of a board
-    /// `extent` long in that direction, to the board's own coordinates.
-    pub(crate) fn onto_board(
-        (from, to): (Length, Length),
-        extent: Length,
-        backward: bool,
-    ) -> (Length, Length) {
-        if backward {
-            (extent - to, extent - from)
-        } else {
-            (from, to)
-        }
-    }
 }
 
 #[cfg(test)]
@@ -314,14 +265,5 @@ mod tests {
                 lie = lie.turned_left();
             }
         }
-    }
-
-    #[test]
-    fn spans_on_a_backward_axis_count_from_the_far_side() {
-        let inch = Length::from_inches;
-        assert_eq!(
-            Orientation::onto_board((inch(1), inch(3)), inch(10), true),
-            (inch(7), inch(9))
-        );
     }
 }

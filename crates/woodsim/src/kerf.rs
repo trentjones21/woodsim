@@ -58,6 +58,7 @@ fn nm(length: Length) -> i128 {
 }
 
 impl Kerf {
+    #[cfg(test)]
     /// A slot between its faces at `near` and `far` on `across`, whose blade's center traveled
     /// from `along · (l, w) = start` to `end`. Standing square to the face, its center is
     /// `center` up the thickness; parallel to the faces, `center` along `along.square()`.
@@ -83,6 +84,7 @@ impl Kerf {
         Kerf::blade(normal, faces, along, travel, radius, center)
     }
 
+    #[cfg(test)]
     /// A slot cut by a blade tilted from square to the face, whose faces lean `lean` (as an
     /// `Edge` does), its center's path `center` up the thickness on the plane halfway between
     /// them: `across` is square to `along`, and with `lean` has no common factor.
