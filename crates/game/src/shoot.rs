@@ -136,16 +136,18 @@ pub enum Quality {
     #[default]
     Good,
     Best,
+    Ultra,
 }
 
 impl Quality {
-    const ALL: [Quality; 3] = [Quality::Draft, Quality::Good, Quality::Best];
+    const ALL: [Quality; 4] = [Quality::Draft, Quality::Good, Quality::Best, Quality::Ultra];
 
     pub fn name(self) -> &'static str {
         match self {
             Quality::Draft => "Draft",
             Quality::Good => "Good",
             Quality::Best => "Best",
+            Quality::Ultra => "Ultra",
         }
     }
 
@@ -154,6 +156,7 @@ impl Quality {
             Quality::Draft => 1280,
             Quality::Good => 1920,
             Quality::Best => 2560,
+            Quality::Ultra => 3600,
         }
     }
 
@@ -168,9 +171,11 @@ impl Quality {
             (Engine::Gpu, Quality::Draft) => "a second or two",
             (Engine::Gpu, Quality::Good) => "about 15 seconds",
             (Engine::Gpu, Quality::Best) => "under a minute",
+            (Engine::Gpu, Quality::Ultra) => "a few minutes",
             (Engine::Cpu, Quality::Draft) => "a few seconds",
             (Engine::Cpu, Quality::Good) => "about a minute",
             (Engine::Cpu, Quality::Best) => "a few minutes",
+            (Engine::Cpu, Quality::Ultra) => "a quarter of an hour",
         }
     }
 
@@ -179,6 +184,7 @@ impl Quality {
             Quality::Draft => 64,
             Quality::Good => 256,
             Quality::Best => 512,
+            Quality::Ultra => 1024,
         }
     }
 }
@@ -1460,8 +1466,8 @@ mod tests {
 
     /// Renders real pieces into `renders/` at the top of the workspace, to look at:
     /// `cargo test -p game --release -- --ignored studio_renders`. Set `WOODSHOP_QUALITY` to
-    /// `draft` or `best` for less or more time over them, and `WOODSHOP_ENGINE` to `cpu` to
-    /// render on the CPU.
+    /// `draft`, `best`, or `ultra` for less or more time over them, and `WOODSHOP_ENGINE` to
+    /// `cpu` to render on the CPU.
     #[test]
     #[ignore]
     fn studio_renders() {
@@ -1469,6 +1475,7 @@ mod tests {
         let quality = match std::env::var("WOODSHOP_QUALITY").as_deref() {
             Ok("draft") => Quality::Draft,
             Ok("best") => Quality::Best,
+            Ok("ultra") => Quality::Ultra,
             _ => Quality::Good,
         };
         let engine = match std::env::var("WOODSHOP_ENGINE").as_deref() {
