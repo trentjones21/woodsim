@@ -19,6 +19,7 @@ use crate::{
     inventory::{InventorySystems, Moved, Spot},
     join::BenchStation,
     shop::{Placed, SawBoards, ShopCamera, ShopView},
+    thickness::PlanerStation,
 };
 
 /// How long a picture takes to fly, and to settle into the hand.
@@ -139,6 +140,7 @@ struct Screen<'w, 's> {
     table_saw: Res<'w, TableSawStation>,
     miter_saw: Res<'w, MiterSawStation>,
     jointer: Res<'w, JointerStation>,
+    planer: Res<'w, PlanerStation>,
     bench: Res<'w, BenchStation>,
     rows: Query<
         'w,
@@ -207,6 +209,10 @@ impl Screen<'_, '_> {
             ShopView::Jointer => {
                 let middle = middle(self.jointer.boards()).unwrap_or(Vec3::new(0.06, 0.02, 0.25));
                 crate::jointer::ORIGIN + middle
+            }
+            ShopView::Planer => {
+                let middle = middle(self.planer.boards()).unwrap_or(Vec3::new(0.0, 0.02, 0.3));
+                crate::planer::ORIGIN + middle
             }
             ShopView::Bench => {
                 let middle = self
@@ -474,6 +480,7 @@ mod tests {
         world.init_resource::<TableSawStation>();
         world.init_resource::<MiterSawStation>();
         world.init_resource::<JointerStation>();
+        world.init_resource::<PlanerStation>();
         world.init_resource::<BenchStation>();
         world.spawn((Camera::default(), GlobalTransform::default(), ShopCamera));
         world.spawn((

@@ -77,6 +77,10 @@ fn scene(step: &CutStep, picked: Picked) -> Option<(Vec<Solid>, Overlay)> {
     | Tool::Jointer {
         lie: Lie::Board(lie),
         ..
+    }
+    | Tool::Planer {
+        lie: Lie::Board(lie),
+        ..
     }) = tool
     else {
         return None;
@@ -152,8 +156,8 @@ fn scene(step: &CutStep, picked: Picked) -> Option<(Vec<Solid>, Overlay)> {
         _ => None,
     };
     let u = match tool {
-        // Its cutterhead under the middle of the wood, half of it across.
-        Tool::Jointer { .. } => {
+        // Its cutterhead under the middle of the wood, half of it across, or over it.
+        Tool::Jointer { .. } | Tool::Planer { .. } => {
             let at = |u: f64| on_saw(disc.center(u))[0];
             let (start, per) = (at(0.0), at(disc.scale) - at(0.0));
             (depth / 2.0 - start) / per * disc.scale
@@ -162,10 +166,11 @@ fn scene(step: &CutStep, picked: Picked) -> Option<(Vec<Solid>, Overlay)> {
     };
     // The blade stops at the table and at the guides; the miter saw's at its middle, where its
     // guard would cover it, so its lower half shows. The jointer's cutterhead turns below its
-    // tables, and stops at its fence.
-    let mut keep = match fence {
-        Some(fence) => vec![fence],
-        None => vec![Half::new([0.0, 0.0, -1.0], 0.0)],
+    // tables, and stops at its fence; the planer's, above the wood, shows whole.
+    let mut keep = match (tool, fence) {
+        (Tool::Planer { .. }, _) => Vec::new(),
+        (_, Some(fence)) => vec![fence],
+        (_, None) => vec![Half::new([0.0, 0.0, -1.0], 0.0)],
     };
     match tool {
         Tool::TableSaw { saw, .. } if saw.miter_gauge.is_some() => {
@@ -178,7 +183,7 @@ fn scene(step: &CutStep, picked: Picked) -> Option<(Vec<Solid>, Overlay)> {
             let middle = on_saw(disc.center(u))[2];
             keep.push(Half::new([0.0, 0.0, 1.0], middle.max(tall + INCH)));
         }
-        Tool::Jointer { .. } => {}
+        Tool::Jointer { .. } | Tool::Planer { .. } => {}
     }
     let (near, far) = disc.faces(u, &on_saw);
     let sides = [dot(normal, near[0]), dot(normal, far[0])];
@@ -311,6 +316,15 @@ fn scene(step: &CutStep, picked: Picked) -> Option<(Vec<Solid>, Overlay)> {
                     text: measured(jointer.fence).to_string(),
                 });
             }
+        }
+        Tool::Planer { planer, .. } => {
+            // Beside the wood's leading end, from the bed up to where the knives reach.
+            let (up, y) = (nm(planer.thickness), span + 0.75 * INCH);
+            dimensions.push(Dimension {
+                from: [[0.0, span, 0.0], [0.0, span, up]],
+                to: [[0.0, y, 0.0], [0.0, y, up]],
+                text: measured(planer.thickness).to_string(),
+            });
         }
     }
     // All of it turned for the view: only for the miter gauge.

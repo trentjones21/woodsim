@@ -13,8 +13,8 @@ use bevy::{
 };
 use woodsim::{
     Assembly, Cut, CutError, GlueUpCut, GlueUpPass, Jointer, Length, Lie, MiterSaw, Motion,
-    Operation, Orientation, Pass, Refusal, Remake, Surface, TableSaw, Unsteady, Wood, outline,
-    surfaces,
+    Operation, Orientation, Pass, Planer, Refusal, Remake, Surface, TableSaw, Unsteady, Wood,
+    outline, surfaces,
 };
 
 use crate::{
@@ -108,6 +108,23 @@ pub fn joint(
     }
 }
 
+/// Feeds `work`, lying as `lie` says, under a planer's cutterhead while its center travels from
+/// `start` to `end` along it, as `Planer::feed` does a board.
+pub fn plane(
+    planer: &Planer,
+    work: &Workpiece,
+    lie: Orientation,
+    start: Length,
+    end: Length,
+) -> Result<Passed, CutError> {
+    match work {
+        Workpiece::Board(board) => planer.feed(board, lie, start, end).map(Passed::of_board),
+        Workpiece::GlueUp(glue_up) => planer
+            .feed_glue_up(glue_up, lie.rotation(), start, end)
+            .map(Passed::of_glue_up),
+    }
+}
+
 /// Where a jointer's knives end, across its tables from the near side of the box `work` fills
 /// lying against the fence as `lie` says, leaning with it (`Jointer::knives_end`).
 pub fn knives_end(jointer: &Jointer, work: &Workpiece, lie: Orientation) -> Length {
@@ -179,6 +196,8 @@ pub enum Choosing {
     Fence((usize, Surface)),
     /// At the jointer, the surface to go flat against the fence, on its own.
     Against,
+    /// At the planer, the surface to rest on, flat on the bed, on its own.
+    Bed,
 }
 
 impl Rest {
@@ -187,12 +206,8 @@ impl Rest {
         self.toggle_from(Choosing::Down);
     }
 
-    /// Starts choosing just the surface to go against a jointer's fence, or stops.
-    pub fn toggle_against(&mut self) {
-        self.toggle_from(Choosing::Against);
-    }
-
-    fn toggle_from(&mut self, first: Choosing) {
+    /// Starts choosing from `first`, or stops.
+    pub fn toggle_from(&mut self, first: Choosing) {
         self.choosing = match self.choosing {
             Some(_) => None,
             None => Some(first),
@@ -215,6 +230,7 @@ impl Rest {
             Choosing::Down => rest_on(work, picked, lie),
             Choosing::Fence(down) => glue_up_of(work).resting(down, picked),
             Choosing::Against => glue_up_of(work).against_fence(picked, lie.rotation()),
+            Choosing::Bed => rest_on(work, picked, lie),
         };
         match resting {
             Ok(rest) => {
@@ -256,6 +272,10 @@ impl Rest {
             Choosing::Against => {
                 "Click the surface to go flat against the fence. Whatever it then rests on is \
                  what the knives take off."
+            }
+            Choosing::Bed => {
+                "Click the surface to rest it on, flat on the bed. The knives plane what's on \
+                 top parallel to it."
             }
         };
         Some(format!("{}{next}", refused.unwrap_or_default()))

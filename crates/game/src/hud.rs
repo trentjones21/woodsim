@@ -42,6 +42,7 @@ use crate::{
     saved::Saved,
     shoot::Studio,
     shop::{HoveredStation, SawView, ShopView, describe_miter},
+    thickness::PlanerStation,
 };
 
 const INK: Color = Color::srgb(0.17, 0.2, 0.27);
@@ -209,6 +210,8 @@ enum Setting {
     Cut,
     JointerFence,
     FenceTilt,
+    /// At the planer: how thick it leaves the wood.
+    Thickness,
     OnBench,
     /// In the studio: the picked light's place around the piece, its height, and its power;
     /// the camera's height; and the lens.
@@ -271,7 +274,7 @@ fn dock(view: ShopView) -> Vec<Vec<Tool>> {
             vec![tool(CutAgain, Icon::Again), tool(Store, Icon::Store)],
             look.clone(),
         ],
-        ShopView::Jointer => vec![
+        ShopView::Jointer | ShopView::Planer => vec![
             [turning.clone(), vec![stand_up, rest]].concat(),
             vec![tool(Push, Icon::Push), tool(BringBack, Icon::BringBack)],
             vec![tool(Store, Icon::Store)],
@@ -366,6 +369,7 @@ fn cards(view: ShopView) -> Vec<(Setting, Icon, Option<bool>)> {
             (Setting::JointerFence, Icon::Fence, Some(true)),
             (Setting::FenceTilt, Icon::Tilt, Some(true)),
         ],
+        ShopView::Planer => vec![(Setting::Thickness, Icon::Depth, Some(false))],
         ShopView::Bench => vec![(Setting::OnBench, Icon::Bench, None)],
         ShopView::Studio => vec![
             (Setting::LightAround, Icon::Around, Some(true)),
@@ -398,6 +402,7 @@ fn stepping(setting: Setting, step: Step) -> Option<Action> {
             more: !step.more,
             ..step
         }),
+        Setting::Thickness => Action::Blade(step),
         Setting::OnBench => return None,
         Setting::LightAround => Action::Swing(step),
         Setting::LightHeight => Action::Raise(step),
@@ -415,6 +420,7 @@ struct Game<'w> {
     table_saw: Res<'w, TableSawStation>,
     miter_saw: Res<'w, MiterSawStation>,
     jointer: Res<'w, JointerStation>,
+    planer: Res<'w, PlanerStation>,
     bench: Res<'w, BenchStation>,
     hand: Res<'w, Hand>,
     showing: Res<'w, Showing>,
@@ -434,6 +440,7 @@ impl Game<'_> {
             table_saw: &self.table_saw,
             miter_saw: &self.miter_saw,
             jointer: &self.jointer,
+            planer: &self.planer,
             bench: &self.bench,
             hand: &self.hand,
             showing: &self.showing,
@@ -454,6 +461,7 @@ impl Game<'_> {
             || self.table_saw.is_changed()
             || self.miter_saw.is_changed()
             || self.jointer.is_changed()
+            || self.planer.is_changed()
             || self.bench.is_changed()
             || self.hand.is_changed()
             || self.showing.is_changed()
@@ -473,6 +481,7 @@ struct Shop<'a> {
     table_saw: &'a TableSawStation,
     miter_saw: &'a MiterSawStation,
     jointer: &'a JointerStation,
+    planer: &'a PlanerStation,
     bench: &'a BenchStation,
     hand: &'a Hand,
     showing: &'a Showing,
@@ -496,6 +505,7 @@ impl Shop<'_> {
             table_saw: self.table_saw,
             miter_saw: self.miter_saw,
             jointer: self.jointer,
+            planer: self.planer,
             bench: self.bench,
             inventory: self.inventory,
             saved: self.saved,
@@ -517,6 +527,7 @@ impl Shop<'_> {
             GoTo(ShopView::TableSaw) => "Table saw".to_string(),
             GoTo(ShopView::MiterSaw) => "Miter saw".to_string(),
             GoTo(ShopView::Jointer) => "Jointer".to_string(),
+            GoTo(ShopView::Planer) => "Planer".to_string(),
             GoTo(ShopView::Bench) => "Workbench".to_string(),
             GoTo(ShopView::Studio) => "Photo studio".to_string(),
             NextStation => "Next station".to_string(),
@@ -543,6 +554,9 @@ impl Shop<'_> {
                 "Choose what goes against the fence; the knives take off what it rests on"
                     .to_string()
             }
+            Rest if self.view == ShopView::Planer => {
+                "Choose what it rests on; the knives plane the top parallel to it".to_string()
+            }
             Rest => "Choose what it rests on, then what goes against the fence".to_string(),
             SwitchGuide if self.table_saw.using_gauge() => "Use the rip fence".to_string(),
             SwitchGuide => "Use the miter gauge".to_string(),
@@ -557,6 +571,13 @@ impl Shop<'_> {
                 "1\"",
             ),
             Guide(s) => step(s, "Fence left", "Fence right", "1/16\"", "1\""),
+            Blade(s) if self.view == ShopView::Planer => step(
+                s,
+                "Lower the head, planing thinner",
+                "Raise the head, planing thicker",
+                "1/64\"",
+                "1/16\"",
+            ),
             Blade(s) => step(s, "Blade down", "Blade up", "1/16\"", "1/4\""),
             Tilt(s) if self.view == ShopView::Jointer => step(
                 s,
@@ -574,6 +595,9 @@ impl Shop<'_> {
             ),
             Push if self.view == ShopView::Jointer => {
                 "Hold to feed the board across the cutterhead".to_string()
+            }
+            Push if self.view == ShopView::Planer => {
+                "Hold to feed it in; the rollers take it from there".to_string()
             }
             Push => "Hold to push the board through".to_string(),
             BringBack => "Bring the board back around".to_string(),
@@ -696,6 +720,7 @@ impl Shop<'_> {
                     Knob::Miter => ("Swing left", "Swing right", "1°", "to the next stop"),
                     Knob::Depth => ("Depth stop down", "Depth stop up", "1/16\"", "1/4\""),
                     Knob::Cut => ("Shallower", "Deeper", "1/64\"", "1/16\""),
+                    Knob::Thickness => ("Thinner", "Thicker", "1/64\"", "1/16\""),
                 };
                 step(s, less, more, small, big)
             }
@@ -727,6 +752,7 @@ impl Shop<'_> {
             ShopView::TableSaw => "Put it on the table saw",
             ShopView::MiterSaw => "Put it on the miter saw",
             ShopView::Jointer => "Put it on the jointer",
+            ShopView::Planer => "Put it on the planer",
             ShopView::Bench => "Set it on the bench",
             ShopView::Overview | ShopView::Studio => "Pick it up",
         }
@@ -736,10 +762,10 @@ impl Shop<'_> {
     fn can(&self, action: Action) -> bool {
         use Action::*;
         let (table, miter, bench) = (self.table_saw, self.miter_saw, self.bench);
-        let jointer = self.jointer;
+        let (jointer, planer) = (self.jointer, self.planer);
         match (self.view, action) {
             (view, Take(_) | NewLumber(_) | Load(_)) => {
-                inventory::can_use_at(view, table, miter, jointer)
+                inventory::can_use_at(view, table, miter, jointer, planer)
             }
             (_, PutAway | Stash(Where::Hand)) => self.hand.0.is_some(),
             (_, Duplicate(entry)) => {
@@ -748,6 +774,7 @@ impl Shop<'_> {
             (_, Stash(Where::Saw(ShopView::TableSaw, part))) => table.can_take(part),
             (_, Stash(Where::Saw(ShopView::MiterSaw, part))) => miter.can_take(part),
             (_, Stash(Where::Saw(ShopView::Jointer, part))) => jointer.can_take(part),
+            (_, Stash(Where::Saw(ShopView::Planer, part))) => planer.can_take(part),
             (_, Stash(Where::Bench(index))) => index < bench.groups.len(),
             (_, Stash(_)) => false,
             (_, Tweak(..) | StopEditing) => self.editor.editing.is_some(),
@@ -762,7 +789,9 @@ impl Shop<'_> {
             (ShopView::Bench, Loosen) => !bench.picked_joints().is_empty(),
             // Nothing in the studio comes from the inventory or goes into it.
             (ShopView::Studio, Inventory) => false,
-            (view, Copy) => to_copy(view, self.hand, table, miter, jointer, bench).is_some(),
+            (view, Copy) => {
+                to_copy(view, self.hand, table, miter, jointer, planer, bench).is_some()
+            }
             (ShopView::TableSaw, Store) => table.can_put_away(),
             (ShopView::TableSaw, CutAgain) => table.can_cut_again(),
             (ShopView::MiterSaw, Store) => miter.can_put_away(),
@@ -785,6 +814,12 @@ impl Shop<'_> {
             (ShopView::Jointer, Push) => jointer.can_push(),
             (ShopView::Jointer, BringBack) => jointer.can_bring_back(),
             (ShopView::Jointer, Depth(_) | Guide(_) | Tilt(_)) => jointer.can_set(),
+            (ShopView::Planer, Store) => planer.can_put_away(),
+            (ShopView::Planer, TurnLeft | TurnRight | Flip | Rest) => planer.can_turn(),
+            (ShopView::Planer, StandUp) => planer.can_tip(),
+            (ShopView::Planer, Push) => planer.can_push(),
+            (ShopView::Planer, BringBack) => planer.can_bring_back(),
+            (ShopView::Planer, Blade(_)) => planer.can_set(),
             (ShopView::Bench, TurnLeft | TurnRight | Flip) => {
                 bench.lining_up.is_some() || bench.turnable().is_some()
             }
@@ -818,6 +853,7 @@ impl Shop<'_> {
                 ShopView::TableSaw => self.table_saw.choosing_rest(),
                 ShopView::MiterSaw => self.miter_saw.choosing_rest(),
                 ShopView::Jointer => self.jointer.choosing_rest(),
+                ShopView::Planer => self.planer.choosing_rest(),
                 _ => false,
             },
             Action::Light(index) => self.studio.setup.picked == index,
@@ -870,18 +906,22 @@ impl Shop<'_> {
             ),
             Setting::Cut => (
                 "Depth of cut".to_string(),
-                self.jointer.jointer.depth.to_string(),
+                self.jointer.machine.depth.to_string(),
             ),
             Setting::JointerFence => (
                 "Fence".to_string(),
-                format!("{} of knife", self.jointer.jointer.fence),
+                format!("{} of knife", self.jointer.machine.fence),
             ),
             Setting::FenceTilt => (
                 "Fence tilt".to_string(),
-                match self.jointer.jointer.tilt {
+                match self.jointer.machine.tilt {
                     woodsim::Angle::ZERO => "square".to_string(),
                     tilt => tilt.to_string(),
                 },
+            ),
+            Setting::Thickness => (
+                "Thickness".to_string(),
+                self.planer.machine.thickness.to_string(),
             ),
             Setting::OnBench => ("On the bench".to_string(), bench::reading(self.bench)),
             Setting::LightAround | Setting::LightHeight | Setting::LightPower => {
@@ -912,10 +952,12 @@ impl Shop<'_> {
                 (Some(ShopView::TableSaw), false) => "Click to work at the table saw.",
                 (Some(ShopView::MiterSaw), false) => "Click to work at the miter saw.",
                 (Some(ShopView::Jointer), false) => "Click to work at the jointer.",
+                (Some(ShopView::Planer), false) => "Click to work at the planer.",
                 (Some(ShopView::Bench), false) => "Click to work at the workbench.",
                 (Some(ShopView::TableSaw), true) => "Click to set it down on the table saw.",
                 (Some(ShopView::MiterSaw), true) => "Click to set it down on the miter saw.",
                 (Some(ShopView::Jointer), true) => "Click to set it down on the jointer.",
+                (Some(ShopView::Planer), true) => "Click to set it down on the planer.",
                 (Some(ShopView::Bench), true) => "Click to set it down at the workbench.",
                 (_, true) => "Click a station or the scrap bin to set it down, or put it away.",
                 _ => {
@@ -927,6 +969,7 @@ impl Shop<'_> {
             ShopView::TableSaw => self.table_saw.status(),
             ShopView::MiterSaw => self.miter_saw.status(),
             ShopView::Jointer => self.jointer.status(),
+            ShopView::Planer => self.planer.status(),
             ShopView::Bench => self.bench.status(holding),
             ShopView::Studio => self.studio.status(),
         }
@@ -960,6 +1003,12 @@ fn mouse_help(view: ShopView) -> &'static [&'static str] {
             "Drag the board forward to feed it across, back to back it out",
             "Click a board clear of the cutterhead: pick it up",
             "Holding one: click the jointer to set it against the fence",
+            "Drag anything else, or right-drag anywhere: look around   Scroll: zoom",
+        ],
+        ShopView::Planer => &[
+            "Drag the board forward to feed it in; the rollers take it through",
+            "Click a board clear of the head: pick it up",
+            "Holding one: click the planer to set it on the bed",
             "Drag anything else, or right-drag anywhere: look around   Scroll: zoom",
         ],
         ShopView::Bench => &[
@@ -996,6 +1045,7 @@ fn setting_help(setting: Setting) -> Option<&'static str> {
         Setting::FenceTilt => {
             ", and .: tilt the fence further or back 1° (Shift: to the next stop)"
         }
+        Setting::Thickness => "Up/Down arrows: raise or lower the head 1/64\" (Shift: 1/16\")",
         Setting::OnBench => return None,
         Setting::LightAround => "Left/Right arrows: swing the light around 5° (Shift: 45°)",
         Setting::LightHeight => "Up/Down arrows: raise or lower the light 5° (Shift: 15°)",
@@ -1141,6 +1191,7 @@ fn spawn_hud(mut commands: Commands, icons: Res<Icons>) {
         (ShopView::TableSaw, Icon::TableSaw),
         (ShopView::MiterSaw, Icon::MiterSaw),
         (ShopView::Jointer, Icon::Jointer),
+        (ShopView::Planer, Icon::Planer),
         (ShopView::Bench, Icon::Bench),
     ] {
         spawn_button(
@@ -2567,6 +2618,7 @@ fn tree_detail(commands: &mut Commands, icons: &Icons, list: Entity, line: &Deta
         Kind::TableSaw => Icon::TableSaw,
         Kind::MiterSaw => Icon::MiterSaw,
         Kind::Jointer => Icon::Jointer,
+        Kind::Planer => Icon::Planer,
         Kind::Joint => Icon::Glue,
     };
     commands.spawn((
@@ -2631,6 +2683,7 @@ fn card_actions(shop: &Shop, entry: Entry) -> Vec<(Action, Icon)> {
             ShopView::TableSaw => Icon::TableSaw,
             ShopView::MiterSaw => Icon::MiterSaw,
             ShopView::Jointer => Icon::Jointer,
+            ShopView::Planer => Icon::Planer,
             _ => Icon::Bench,
         };
         (shop.view != view).then_some((Action::GoTo(view), icon))
@@ -2810,6 +2863,8 @@ mod tests {
     ) -> Shop<'a> {
         static JOINTER: std::sync::LazyLock<JointerStation> =
             std::sync::LazyLock::new(JointerStation::default);
+        static PLANER: std::sync::LazyLock<PlanerStation> =
+            std::sync::LazyLock::new(PlanerStation::default);
         static INVENTORY: std::sync::LazyLock<Inventory> =
             std::sync::LazyLock::new(Inventory::default);
         static SAVED: std::sync::LazyLock<Saved> = std::sync::LazyLock::new(Saved::default);
@@ -2824,6 +2879,7 @@ mod tests {
             table_saw,
             miter_saw,
             jointer: &JOINTER,
+            planer: &PLANER,
             bench,
             hand,
             showing,
@@ -2852,6 +2908,7 @@ mod tests {
             ShopView::TableSaw,
             ShopView::MiterSaw,
             ShopView::Jointer,
+            ShopView::Planer,
             ShopView::Bench,
             ShopView::Studio,
         ] {

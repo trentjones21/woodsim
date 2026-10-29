@@ -2268,6 +2268,55 @@ mod tests {
     }
 
     #[test]
+    fn planer_passes_down_to_a_thickness_are_one_step() {
+        let planer = |sixteenths: i64| woodsim::Planer {
+            thickness: Length::from_inch_fraction(sixteenths, 16),
+            ..woodsim::Planer::thirteen_inch()
+        };
+        // A 1x6 planed from 3/4" to 1/2" a 16th at a time, then ripped.
+        let flat = Orientation::default();
+        let mut board = Board::new(
+            Length::from_inches(24),
+            Length::from_inch_fraction(11, 2),
+            Length::from_inch_fraction(3, 4),
+        );
+        for sixteenths in (8..12).rev() {
+            board = match planer(sixteenths).plane(&board, flat) {
+                Ok(Pass::Cut(cut)) => cut.piece.board,
+                other => panic!("expected it planed, got {other:?}"),
+            };
+        }
+        let saw = woodsim::TableSaw {
+            blade: woodsim::Blade {
+                diameter: Length::from_inches(10),
+                kerf: woodsim::Blade::FULL_KERF,
+            },
+            fence: Length::from_inches(3),
+            height: Length::from_inches(1),
+            miter_gauge: None,
+            gauge_angle: Angle::ZERO,
+            tilt: Angle::ZERO,
+        };
+        let Ok(Pass::Cut(cut)) = saw.rip(&board, flat) else {
+            panic!("expected it ripped");
+        };
+        let page = Plan::of(Assembly::of(cut.piece.board)).page();
+        assert!(
+            page.contains(
+                "Planer, set to 1/2\": Plane a new 1x6, 3/4\" x 5-1/2\" x 24\" to 1/2\", \
+                 1/8\" or less a pass. Keep the 1x6 for step 2."
+            ),
+            "{page}"
+        );
+        assert!(
+            page.contains("Table saw, rip fence at 3\", blade 1\" high: Rip A off the 1x6"),
+            "{page}"
+        );
+        // A picture beside each: the planer's, and the table saw's.
+        assert_eq!(page.matches("class=\"setup\"").count(), 2, "{page}");
+    }
+
+    #[test]
     fn a_single_part_has_no_steps() {
         let board = Board::new(
             Length::from_inches(24),

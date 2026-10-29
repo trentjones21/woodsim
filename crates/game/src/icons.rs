@@ -50,6 +50,8 @@ pub enum Icon {
     MiterSaw,
     /// Two tables, the outfeed a step higher, the cutterhead between them, and the fence behind.
     Jointer,
+    /// A head on two posts over a bed, a crank on top.
+    Planer,
     Bench,
     ZoomIn,
     ZoomOut,
@@ -99,7 +101,7 @@ pub enum Icon {
 }
 
 impl Icon {
-    const ALL: [Icon; 54] = [
+    const ALL: [Icon; 55] = [
         Icon::TurnLeft,
         Icon::TurnRight,
         Icon::Flip,
@@ -132,6 +134,7 @@ impl Icon {
         Icon::TableSaw,
         Icon::MiterSaw,
         Icon::Jointer,
+        Icon::Planer,
         Icon::Bench,
         Icon::ZoomIn,
         Icon::ZoomOut,
@@ -421,6 +424,15 @@ impl Icon {
                 ),
                 Line(vec![p(0.2, 0.62), p(0.16, 0.92)], 0.08),
                 Line(vec![p(0.8, 0.54), p(0.84, 0.92)], 0.08),
+            ],
+            Icon::Planer => vec![
+                Rounded(p(0.18, 0.24), p(0.82, 0.48), 0.04),
+                Line(vec![p(0.5, 0.24), p(0.5, 0.1), p(0.66, 0.1)], 0.06),
+                Line(vec![p(0.24, 0.48), p(0.24, 0.66)], 0.07),
+                Line(vec![p(0.76, 0.48), p(0.76, 0.66)], 0.07),
+                Rounded(p(0.04, 0.64), p(0.96, 0.74), 0.03),
+                Line(vec![p(0.22, 0.74), p(0.18, 0.94)], 0.07),
+                Line(vec![p(0.78, 0.74), p(0.82, 0.94)], 0.07),
             ],
             Icon::Bench => vec![
                 Rounded(p(0.06, 0.34), p(0.94, 0.48), 0.03),

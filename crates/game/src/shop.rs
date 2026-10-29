@@ -30,11 +30,12 @@ use crate::{
     join::BenchStation,
     jointer,
     meshes::{lumber_mesh, rounded_box},
-    miter_saw,
+    miter_saw, planer,
     scenery::SKY,
     shoot::Studio,
     studio, table_saw,
     textures::{self, FLOOR_TILE, MAPLE, PINE},
+    thickness::PlanerStation,
 };
 
 /// Converts inches to meters, for laying out the scene.
@@ -183,6 +184,7 @@ pub enum ShopView {
     TableSaw,
     MiterSaw,
     Jointer,
+    Planer,
     Bench,
     /// The photo studio, where a part from the bench is set up and rendered.
     Studio,
@@ -510,6 +512,7 @@ pub struct Stations<'w> {
     pub table_saw: ResMut<'w, TableSawStation>,
     pub miter_saw: ResMut<'w, MiterSawStation>,
     pub jointer: ResMut<'w, JointerStation>,
+    pub planer: ResMut<'w, PlanerStation>,
     pub bench: ResMut<'w, BenchStation>,
 }
 
@@ -521,16 +524,19 @@ impl Stations<'_> {
             station,
             near,
             &mut self.hand,
-            &mut self.table_saw,
-            &mut self.miter_saw,
-            &mut self.jointer,
+            (
+                &mut self.table_saw,
+                &mut self.miter_saw,
+                &mut self.jointer,
+                &mut self.planer,
+            ),
             &mut self.bench,
         )
     }
 }
 
 /// Esc backs out to the overview; Tab goes around the stations: the table saw, the miter saw,
-/// the jointer, the workbench.
+/// the jointer, the planer, the workbench.
 fn switch_view(actions: Res<Actions>, mut view: ResMut<ShopView>) {
     for action in actions.started() {
         let next = match action {
@@ -541,7 +547,8 @@ fn switch_view(actions: Res<Actions>, mut view: ResMut<ShopView>) {
             Action::NextStation => match *view {
                 ShopView::TableSaw => ShopView::MiterSaw,
                 ShopView::MiterSaw => ShopView::Jointer,
-                ShopView::Jointer => ShopView::Bench,
+                ShopView::Jointer => ShopView::Planer,
+                ShopView::Planer => ShopView::Bench,
                 ShopView::Overview | ShopView::Bench | ShopView::Studio => ShopView::TableSaw,
             },
             _ => continue,
@@ -644,6 +651,13 @@ fn standing_at(station: ShopView, using_gauge: bool) -> Option<(Vec3, Vec3, Vec3
         ),
         // Off the infeed end, on the open side, looking down along the fence at the gap the
         // cutterhead turns in.
+        // In front of the infeed wing and off to the side, looking down at the head where the
+        // board goes in.
+        ShopView::Planer => (
+            planer::ORIGIN,
+            Vec3::new(-0.7, 0.8, 1.2),
+            Vec3::new(0.0, 0.06, 0.12),
+        ),
         ShopView::Jointer => (
             jointer::ORIGIN,
             Vec3::new(-0.42, 0.72, 0.9),
@@ -745,7 +759,12 @@ fn follow_view(
 }
 
 /// In the overview, outlines the station under the pointer to show it can be clicked.
-fn outline_hovered_station(view: Res<ShopView>, hovered: Res<HoveredStation>, mut gizmos: Gizmos) {
+fn outline_hovered_station(
+    view: Res<ShopView>,
+    hovered: Res<HoveredStation>,
+    planer_station: Res<PlanerStation>,
+    mut gizmos: Gizmos,
+) {
     if *view != ShopView::Overview {
         return;
     }
@@ -753,6 +772,9 @@ fn outline_hovered_station(view: Res<ShopView>, hovered: Res<HoveredStation>, mu
         Some(ShopView::TableSaw) => block_transform(table_saw::BOUNDS, table_saw::ORIGIN),
         Some(ShopView::MiterSaw) => block_transform(miter_saw::BOUNDS, miter_saw::ORIGIN),
         Some(ShopView::Jointer) => block_transform(jointer::BOUNDS, jointer::ORIGIN),
+        Some(ShopView::Planer) => {
+            block_transform(planer::bounds(&planer_station.machine), planer::ORIGIN)
+        }
         Some(ShopView::Bench) => block_transform(bench::BOUNDS, bench::ORIGIN),
         _ => return,
     };
@@ -1212,6 +1234,7 @@ mod tests {
             (ShopView::TableSaw, true),
             (ShopView::MiterSaw, false),
             (ShopView::Jointer, false),
+            (ShopView::Planer, false),
         ] {
             let (origin, eye, target) = standing_at(station, gauge).unwrap();
             let (work, toward) = (origin + target, eye - target);

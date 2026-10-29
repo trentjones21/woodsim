@@ -17,7 +17,9 @@ use std::{
     },
 };
 
-use crate::{Board, Jointer, Kerf, Length, MiterSaw, Orientation, Piece, Rotation, TableSaw};
+use crate::{
+    Board, Jointer, Kerf, Length, MiterSaw, Orientation, Piece, Planer, Rotation, TableSaw,
+};
 
 static NEXT: AtomicU64 = AtomicU64::new(1);
 
@@ -112,6 +114,13 @@ pub enum Tool {
     /// lay against the fence before it leaned with it (`Jointer::leaned`).
     Jointer {
         jointer: Jointer,
+        lie: Lie,
+        travel: (Length, Length),
+    },
+    /// Fed under a planer's cutterhead, its center traveling from the first length to the
+    /// second along the wood, from its leading end, as at the table saw.
+    Planer {
+        planer: Planer,
         lie: Lie,
         travel: (Length, Length),
     },

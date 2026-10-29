@@ -22,6 +22,7 @@ use crate::{
     parts::{Entry, Places, Tree, Where},
     saved::Saved,
     shop::{Part, ShopView, describe_board, describe_size},
+    thickness::PlanerStation,
 };
 
 /// Where in the inventory a piece of wood goes.
@@ -287,6 +288,7 @@ fn collect_set_aside(
     mut table_saw: ResMut<TableSawStation>,
     mut miter_saw: ResMut<MiterSawStation>,
     mut jointer: ResMut<JointerStation>,
+    mut planer: ResMut<PlanerStation>,
     mut inventory: ResMut<Inventory>,
     mut moved: MessageWriter<Moved>,
 ) {
@@ -308,20 +310,28 @@ fn collect_set_aside(
             inventory.put(shelf, work, from, &mut moved);
         }
     }
+    if planer.has_set_aside() {
+        for (shelf, work) in planer.take_set_aside() {
+            let from = Spot::Station(ShopView::Planer);
+            inventory.put(shelf, work, from, &mut moved);
+        }
+    }
 }
 
-/// What can be done with a piece of wood from the inventory, at `view`: put on a saw or the
-/// jointer, set on the bench, or, from the overview, picked up.
+/// What can be done with a piece of wood from the inventory, at `view`: put on a saw, the
+/// jointer, or the planer, set on the bench, or, from the overview, picked up.
 pub fn can_use_at(
     view: ShopView,
     table_saw: &TableSawStation,
     miter_saw: &MiterSawStation,
     jointer: &JointerStation,
+    planer: &PlanerStation,
 ) -> bool {
     match view {
         ShopView::TableSaw => table_saw.can_load(),
         ShopView::MiterSaw => miter_saw.can_load(),
         ShopView::Jointer => jointer.can_load(),
+        ShopView::Planer => planer.can_load(),
         ShopView::Bench | ShopView::Overview => true,
         ShopView::Studio => false,
     }
@@ -336,6 +346,7 @@ struct Stations<'w> {
     table_saw: ResMut<'w, TableSawStation>,
     miter_saw: ResMut<'w, MiterSawStation>,
     jointer: ResMut<'w, JointerStation>,
+    planer: ResMut<'w, PlanerStation>,
     bench: ResMut<'w, BenchStation>,
     tree: ResMut<'w, Tree>,
 }
@@ -354,7 +365,7 @@ fn use_inventory(
     for action in actions.started() {
         match action {
             Action::Take(id) | Action::NewLumber(id) | Action::Load(id)
-                if can_use_at(view, &at.table_saw, &at.miter_saw, &at.jointer) =>
+                if can_use_at(view, &at.table_saw, &at.miter_saw, &at.jointer, &at.planer) =>
             {
                 let work = match action {
                     Action::Take(id) => inventory.take(id),
@@ -377,6 +388,7 @@ fn use_inventory(
                     ShopView::TableSaw => at.table_saw.load(work),
                     ShopView::MiterSaw => at.miter_saw.load(work),
                     ShopView::Jointer => at.jointer.load(work),
+                    ShopView::Planer => at.planer.load(work),
                     ShopView::Bench => at.bench.set_down(work, None),
                     ShopView::Overview | ShopView::Studio => {
                         if let Some(held) = at.hand.0.replace(work) {
@@ -386,9 +398,10 @@ fn use_inventory(
                 }
                 if let Action::Take(id) = action {
                     let to = match view {
-                        ShopView::TableSaw | ShopView::MiterSaw | ShopView::Jointer => {
-                            Where::Saw(view, Part::Whole)
-                        }
+                        ShopView::TableSaw
+                        | ShopView::MiterSaw
+                        | ShopView::Jointer
+                        | ShopView::Planer => Where::Saw(view, Part::Whole),
                         ShopView::Bench => Where::Bench(at.bench.groups.len() - 1),
                         ShopView::Overview | ShopView::Studio => Where::Hand,
                     };
@@ -401,6 +414,7 @@ fn use_inventory(
                     table_saw: &at.table_saw,
                     miter_saw: &at.miter_saw,
                     jointer: &at.jointer,
+                    planer: &at.planer,
                     bench: &at.bench,
                     inventory: &inventory,
                     saved: &saved,
@@ -431,6 +445,10 @@ fn use_inventory(
                         .jointer
                         .take(part)
                         .map(|work| (shelf(part), work, station(ShopView::Jointer))),
+                    Where::Saw(ShopView::Planer, part) => at
+                        .planer
+                        .take(part)
+                        .map(|work| (shelf(part), work, station(ShopView::Planer))),
                     Where::Bench(index) => at
                         .bench
                         .take(index)
@@ -472,6 +490,7 @@ fn use_inventory(
                 ShopView::TableSaw => at.table_saw.put_away(),
                 ShopView::MiterSaw => at.miter_saw.put_away(),
                 ShopView::Jointer => at.jointer.put_away(),
+                ShopView::Planer => at.planer.put_away(),
                 ShopView::Bench => {
                     let picked = at.bench.picked.map(|picked| Where::Bench(picked.group));
                     if let (Some(work), Some(picked)) = (at.bench.take_picked(), picked) {
@@ -509,6 +528,7 @@ mod tests {
         world.init_resource::<TableSawStation>();
         world.init_resource::<MiterSawStation>();
         world.init_resource::<JointerStation>();
+        world.init_resource::<PlanerStation>();
         world.init_resource::<BenchStation>();
         world.init_resource::<Saved>();
         world.init_resource::<Tree>();

@@ -15,7 +15,8 @@ use crate::{
 pub enum Action {
     /// Back out to the whole shop.
     Back,
-    /// On around the stations: the table saw, the miter saw, the jointer, the workbench.
+    /// On around the stations: the table saw, the miter saw, the jointer, the planer, the
+    /// workbench.
     NextStation,
     /// Straight to a station, or the whole shop.
     GoTo(ShopView),
@@ -44,8 +45,9 @@ pub enum Action {
     /// Tilting the table saw's blade further from square, or back toward it; or the jointer's
     /// fence.
     Tilt(Step),
-    /// Feeding the board into the table saw's blade, or across the jointer's cutterhead, held,
-    /// and bringing it back around.
+    /// Feeding the board into the table saw's blade, across the jointer's cutterhead, or into
+    /// the planer, held, and bringing it back around. `Blade` also raises and lowers the
+    /// planer's head.
     Push,
     BringBack,
     /// The miter saw's stop, its angle, its depth stop (the jointer's depth of cut), and
@@ -157,7 +159,7 @@ impl Action {
 pub fn bound(view: ShopView, key: KeyCode, shift: bool) -> Option<Action> {
     use Action::*;
     use KeyCode::*;
-    use ShopView::{Bench, Jointer, MiterSaw, Overview, Studio, TableSaw};
+    use ShopView::{Bench, Jointer, MiterSaw, Overview, Planer, Studio, TableSaw};
     let step = |more| Step { more, big: shift };
     let arrow = match key {
         ArrowLeft => Some(Arrow::Left),
@@ -168,13 +170,13 @@ pub fn bound(view: ShopView, key: KeyCode, shift: bool) -> Option<Action> {
     };
     Some(match (view, key) {
         (_, Tab) => NextStation,
-        (TableSaw | MiterSaw | Jointer | Bench | Studio, Escape) => Back,
+        (TableSaw | MiterSaw | Jointer | Planer | Bench | Studio, Escape) => Back,
         (_, KeyH) => Action::Help,
         (_, KeyI) => Inventory,
         (_, KeyX) => PutAway,
         (_, KeyY) => Action::Copy,
-        (TableSaw | MiterSaw | Jointer | Bench, KeyC) => Store,
-        (TableSaw | MiterSaw | Jointer | Bench, KeyZ) => ResetView,
+        (TableSaw | MiterSaw | Jointer | Planer | Bench, KeyC) => Store,
+        (TableSaw | MiterSaw | Jointer | Planer | Bench, KeyZ) => ResetView,
         (TableSaw | MiterSaw, KeyA) => CutAgain,
         (Overview, KeyW | ArrowUp) => Pan(Arrow::Up),
         (Overview, KeyS | ArrowDown) => Pan(Arrow::Down),
@@ -209,14 +211,15 @@ pub fn bound(view: ShopView, key: KeyCode, shift: bool) -> Option<Action> {
         (_, KeyQ) => TurnLeft,
         (_, KeyE) => TurnRight,
         (_, KeyF) => Flip,
-        (TableSaw | MiterSaw | Jointer, KeyV) => StandUp,
-        (TableSaw | MiterSaw | Jointer, KeyR) => Rest,
+        (TableSaw | MiterSaw | Jointer | Planer, KeyV) => StandUp,
+        (TableSaw | MiterSaw | Jointer | Planer, KeyR) => Rest,
         (TableSaw, KeyG) => SwitchGuide,
         (TableSaw, ArrowLeft | ArrowRight) => Guide(step(key == ArrowRight)),
         (TableSaw, ArrowUp | ArrowDown) => Blade(step(key == ArrowUp)),
         (TableSaw, Comma | Period) => Tilt(step(key == Comma)),
-        (TableSaw | Jointer, Space) => Push,
-        (TableSaw | Jointer, KeyB) => BringBack,
+        (TableSaw | Jointer | Planer, Space) => Push,
+        (TableSaw | Jointer | Planer, KeyB) => BringBack,
+        (Planer, ArrowUp | ArrowDown) => Blade(step(key == ArrowUp)),
         (Jointer, ArrowLeft | ArrowRight) => Guide(step(key == ArrowRight)),
         (Jointer, ArrowUp | ArrowDown) => Depth(step(key == ArrowUp)),
         (Jointer, Comma | Period) => Tilt(step(key == Comma)),
@@ -471,7 +474,12 @@ mod tests {
             bound(ShopView::Bench, KeyCode::KeyR, false),
             Some(Action::Studio)
         );
-        for view in [ShopView::TableSaw, ShopView::MiterSaw, ShopView::Jointer] {
+        for view in [
+            ShopView::TableSaw,
+            ShopView::MiterSaw,
+            ShopView::Jointer,
+            ShopView::Planer,
+        ] {
             assert_eq!(bound(view, KeyCode::KeyZ, false), Some(Action::ResetView));
         }
         assert_eq!(bound(ShopView::Overview, KeyCode::KeyZ, false), None);

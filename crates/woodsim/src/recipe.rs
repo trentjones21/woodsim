@@ -21,8 +21,10 @@
 //! stop or `none`, its angle, and the tilt; `miter-saw`: blade diameter and kerf, miter, the
 //! furthest it turns, the pivot behind the fence and up, the arm, and the stroke's top and
 //! bottom; `jointer`: the cutterhead's diameter, the knives' length, the depth of cut, the
-//! fence from the knives' end, and its tilt), how the wood lay (`board` or `glue-up`, and the
-//! turn), and how far the pass went (the table saw's and the jointer's travel from and to; the
+//! fence from the knives' end, and its tilt; `planer`: the cutterhead's diameter, the knives'
+//! length, the thinnest and thickest it goes, the most it takes a pass, and the thickness it's
+//! set to), how the wood lay (`board` or `glue-up`, and the
+//! turn), and how far the pass went (the table saw's, the jointer's, and the planer's travel from and to; the
 //! miter saw's length from the stop, and how low the blade came). `sawn` names a board a pass cut from another: which board, which pass, the slot
 //! (its faces' normal, its near and far faces, the way it traveled, the blade's radius, the
 //! path's height, and its start and end), which part it is (`whole`, or `piece` and which),
@@ -37,7 +39,7 @@ use std::{collections::HashMap, fmt::Write, sync::Arc};
 
 use crate::{
     Angle, Assembly, Blade, Board, Direction, Edge, Fastener, Joint, Jointer, Kerf, Length, Member,
-    MiterSaw, Orientation, Rotation, Surface, TableSaw, Vector,
+    MiterSaw, Orientation, Planer, Rotation, Surface, TableSaw, Vector,
     history::{Lie, Operation, Origin, Part, Side, Source, Tool, number_used},
 };
 
@@ -204,6 +206,22 @@ fn tool_words(tool: &Tool) -> String {
             nm(jointer.depth),
             nm(jointer.fence),
             jointer.tilt.hundredths(),
+            lie(on),
+            nm(travel.0),
+            nm(travel.1)
+        ),
+        Tool::Planer {
+            planer,
+            lie: on,
+            travel,
+        } => format!(
+            "planer {} {} {} {} {} {} {} {} {}",
+            nm(planer.cutterhead),
+            nm(planer.knives),
+            nm(planer.thinnest),
+            nm(planer.thickest),
+            nm(planer.deepest),
+            nm(planer.thickness),
             lie(on),
             nm(travel.0),
             nm(travel.1)
@@ -461,6 +479,21 @@ impl<'a> Words<'a> {
                 };
                 Tool::Jointer {
                     jointer,
+                    lie: self.lie()?,
+                    travel: (self.length()?, self.length()?),
+                }
+            }
+            "planer" => {
+                let planer = Planer {
+                    cutterhead: self.length()?,
+                    knives: self.length()?,
+                    thinnest: self.length()?,
+                    thickest: self.length()?,
+                    deepest: self.length()?,
+                    thickness: self.length()?,
+                };
+                Tool::Planer {
+                    planer,
                     lie: self.lie()?,
                     travel: (self.length()?, self.length()?),
                 }

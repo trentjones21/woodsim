@@ -11,7 +11,7 @@
 use std::f32::consts::TAU;
 
 use bevy::{light::NotShadowCaster, prelude::*};
-use woodsim::{Blade, Jointer};
+use woodsim::{Blade, Length};
 
 use crate::{
     meshes::{BladeShape, saw_blade, spinning_plate, spinning_teeth},
@@ -181,18 +181,19 @@ pub fn spawn_blade(
         .id()
 }
 
-/// Spawns a jointer's cutterhead, turning about its x with `motor` turning it, its middle at
-/// the entity's origin: a drum as long as the knives, with three knives set into it, drawn as a
-/// see-through blur once it's going too fast to follow them.
+/// Spawns a jointer's or a planer's cutterhead, `diameter` across its knives' circle and as
+/// long as its `knives`, turning about its x with `motor` turning it, its middle at the entity's
+/// origin: a drum with three knives set into it, drawn as a see-through blur once it's going too
+/// fast to follow them.
 pub fn spawn_cutterhead(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
-    jointer: Jointer,
+    (diameter, knives): (Length, Length),
     motor: Motor,
 ) -> Entity {
-    let radius = jointer.radius().as_meters_f32();
-    let length = jointer.knives.as_meters_f32();
+    let radius = diameter.as_meters_f32() / 2.0;
+    let length = knives.as_meters_f32();
     // Steel glows a little with its own color, so it stays bright in the gap between the tables.
     let steel = |color: Color, alpha_mode: AlphaMode| StandardMaterial {
         base_color: color,

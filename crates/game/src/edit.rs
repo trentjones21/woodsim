@@ -29,6 +29,7 @@ use crate::{
     parts::{Detail, Entry, Places, Tree, Where, through_glue_up},
     saved::Saved,
     shop::{ShopView, describe_miter, measured},
+    thickness::PlanerStation,
     work,
 };
 
@@ -48,6 +49,8 @@ pub enum Knob {
     Depth,
     /// The jointer's depth of cut.
     Cut,
+    /// The thickness a planer's set to.
+    Thickness,
 }
 
 /// The settings of `tool` that can be changed, in the order the saw's cards have them.
@@ -59,6 +62,7 @@ pub fn knobs(tool: Tool) -> Vec<Knob> {
         Tool::TableSaw { .. } => vec![Knob::Fence, Knob::Height, Knob::Tilt],
         Tool::MiterSaw { .. } => vec![Knob::Stop, Knob::Miter, Knob::Depth],
         Tool::Jointer { .. } => vec![Knob::Cut, Knob::Fence, Knob::Tilt],
+        Tool::Planer { .. } => vec![Knob::Thickness],
     }
 }
 
@@ -97,6 +101,9 @@ pub fn reading(tool: Tool, knob: Knob) -> (&'static str, String) {
                 tilt => tilt.to_string(),
             },
         ),
+        (Knob::Thickness, Tool::Planer { planer, .. }) => {
+            ("Thickness", measured(planer.thickness).to_string())
+        }
         (Knob::Stop, Tool::MiterSaw { length, .. }) => ("Length", measured(length).to_string()),
         (Knob::Miter, Tool::MiterSaw { saw, .. }) => ("Miter", describe_miter(saw.miter)),
         (Knob::Depth, Tool::MiterSaw { bottom, .. }) => (
@@ -158,7 +165,7 @@ pub fn stepped(tool: Tool, knob: Knob, step: Step) -> Tool {
                 }
                 Knob::Height => saw.height = length(saw.height, quarter, Length::ZERO, HEIGHT_MAX),
                 Knob::Tilt => saw.tilt = angle(saw.tilt, Angle::ZERO, MAX_TILT),
-                Knob::Stop | Knob::Miter | Knob::Depth | Knob::Cut => {}
+                Knob::Stop | Knob::Miter | Knob::Depth | Knob::Cut | Knob::Thickness => {}
             }
             Tool::TableSaw { saw, lie, travel }
         }
@@ -209,13 +216,33 @@ pub fn stepped(tool: Tool, knob: Knob, step: Step) -> Tool {
                     jointer.depth = to.clamp(Length::ZERO, dress::DEPTH_MAX);
                 }
                 Knob::Fence => {
-                    jointer.fence = length(jointer.fence, inch, dress::FENCE_MIN, dress::FENCE_MAX);
+                    jointer.fence = length(jointer.fence, inch, dress::FENCE_MIN, jointer.knives);
                 }
                 Knob::Tilt => jointer.tilt = angle(jointer.tilt, Angle::ZERO, MAX_FENCE_TILT),
                 _ => {}
             }
             Tool::Jointer {
                 jointer,
+                lie,
+                travel,
+            }
+        }
+        Tool::Planer {
+            mut planer,
+            lie,
+            travel,
+        } => {
+            if knob == Knob::Thickness {
+                let by = Length::from_inch_fraction(1, if step.big { 16 } else { 64 });
+                let to = if step.more {
+                    planer.thickness + by
+                } else {
+                    planer.thickness - by
+                };
+                planer.thickness = to.clamp(planer.thinnest, planer.thickest);
+            }
+            Tool::Planer {
+                planer,
                 lie,
                 travel,
             }
@@ -296,6 +323,7 @@ struct Wood<'w> {
     table_saw: ResMut<'w, TableSawStation>,
     miter_saw: ResMut<'w, MiterSawStation>,
     jointer: ResMut<'w, JointerStation>,
+    planer: ResMut<'w, PlanerStation>,
     bench: ResMut<'w, BenchStation>,
     inventory: ResMut<'w, Inventory>,
     saved: Res<'w, Saved>,
@@ -308,6 +336,7 @@ impl Wood<'_> {
             table_saw: &self.table_saw,
             miter_saw: &self.miter_saw,
             jointer: &self.jointer,
+            planer: &self.planer,
             bench: &self.bench,
             inventory: &self.inventory,
             saved: &self.saved,
@@ -331,6 +360,7 @@ impl Wood<'_> {
             changed += usize::from(self.table_saw.remake(remake, apply)?);
             changed += usize::from(self.miter_saw.remake(remake, apply)?);
             changed += usize::from(self.jointer.remake(remake, apply)?);
+            changed += usize::from(self.planer.remake(remake, apply)?);
             changed += self.bench.remake(remake, apply)?;
             let mut made = Vec::new();
             for item in self.inventory.items() {
@@ -506,6 +536,7 @@ mod tests {
         world.init_resource::<TableSawStation>();
         world.init_resource::<MiterSawStation>();
         world.init_resource::<JointerStation>();
+        world.init_resource::<PlanerStation>();
         world.init_resource::<BenchStation>();
         world.init_resource::<Inventory>();
         world.init_resource::<Saved>();
@@ -629,6 +660,7 @@ mod tests {
             let wood = match view {
                 ShopView::TableSaw => world.resource::<TableSawStation>().wood(),
                 ShopView::Jointer => world.resource::<JointerStation>().wood(),
+                ShopView::Planer => world.resource::<PlanerStation>().wood(),
                 _ => world.resource::<MiterSawStation>().wood(),
             };
             wood.into_iter()

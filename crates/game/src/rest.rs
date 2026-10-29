@@ -14,8 +14,10 @@ use crate::{
     join::surface_at,
     jointer::AtJointer,
     miter_saw::AtMiterSaw,
+    planer::AtPlaner,
     shop::{Part, Shape, ShopView, Slot},
     table_saw::AtTableSaw,
+    thickness::PlanerStation,
 };
 
 pub struct RestPlugin;
@@ -119,10 +121,11 @@ fn spawn_marks(
 #[allow(clippy::type_complexity)]
 fn mark_surfaces(
     view: Res<ShopView>,
-    (table_saw, miter_saw, jointer): (
+    (table_saw, miter_saw, jointer, planer): (
         Res<TableSawStation>,
         Res<MiterSawStation>,
         Res<JointerStation>,
+        Res<PlanerStation>,
     ),
     pointing: Res<SawPointing>,
     parts: Query<(
@@ -131,7 +134,12 @@ fn mark_surfaces(
         &Slot,
         &Shape,
         &GlobalTransform,
-        (Has<AtTableSaw>, Has<AtMiterSaw>, Has<AtJointer>),
+        (
+            Has<AtTableSaw>,
+            Has<AtMiterSaw>,
+            Has<AtJointer>,
+            Has<AtPlaner>,
+        ),
     )>,
     mut marks: Query<(
         &Mark,
@@ -146,13 +154,15 @@ fn mark_surfaces(
         ShopView::TableSaw => (table_saw.choosing_rest(), table_saw.resting_on()),
         ShopView::MiterSaw => (miter_saw.choosing_rest(), miter_saw.resting_on()),
         ShopView::Jointer => (jointer.choosing_rest(), jointer.resting_on()),
+        ShopView::Planer => (planer.choosing_rest(), planer.resting_on()),
         _ => (false, None),
     };
     // The whole board or glue-up on the saw you're at, a board of it by its slot.
-    let here = |(at_table, at_miter, at_jointer): (bool, bool, bool)| match *view {
+    let here = |(at_table, at_miter, at_jointer, at_planer): (bool, bool, bool, bool)| match *view {
         ShopView::TableSaw => at_table,
         ShopView::MiterSaw => at_miter,
         ShopView::Jointer => at_jointer,
+        ShopView::Planer => at_planer,
         _ => false,
     };
     let pointed = pointing

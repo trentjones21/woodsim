@@ -205,18 +205,18 @@ fn spawn_jointer(
     ));
 
     // The cutterhead turns about x, its top toward you, its middle under the knives' middle.
-    let radius = station.jointer.radius().as_meters_f32();
+    let radius = station.machine.radius().as_meters_f32();
     let head = spawn_cutterhead(
         &mut commands,
         &mut meshes,
         &mut materials,
-        station.jointer,
+        (station.machine.cutterhead, station.machine.knives),
         Motor::new(SPIN_UP, COAST, RUN_ON),
     );
     commands.entity(head).insert((
         Cutterhead,
         Transform::from_translation(
-            ORIGIN + Vec3::new(station.jointer.knives.as_meters_f32() / 2.0, -radius, 0.0),
+            ORIGIN + Vec3::new(station.machine.knives.as_meters_f32() / 2.0, -radius, 0.0),
         ),
     ));
 
@@ -275,7 +275,7 @@ fn set_depth(actions: Res<Actions>, mut station: ResMut<JointerStation>) {
             continue;
         };
         let step = if big { DEPTH_BIG_STEP } else { DEPTH_STEP };
-        let depth = station.jointer.depth;
+        let depth = station.machine.depth;
         station.set_depth(if deeper { depth + step } else { depth - step });
     }
 }
@@ -287,7 +287,7 @@ fn move_fence(actions: Res<Actions>, mut station: ResMut<JointerStation>) {
             continue;
         };
         let step = if big { FENCE_BIG_STEP } else { FENCE_STEP };
-        let fence = station.jointer.fence;
+        let fence = station.machine.fence;
         station.set_fence(if back { fence + step } else { fence - step });
     }
 }
@@ -302,7 +302,7 @@ fn tilt_fence(actions: Res<Actions>, mut station: ResMut<JointerStation>) {
             station.tilt_to_next_stop(more);
         } else {
             let step = Angle::from_degrees(if more { 1 } else { -1 });
-            let tilt = station.jointer.tilt + step;
+            let tilt = station.machine.tilt + step;
             station.set_tilt(tilt);
         }
     }
@@ -325,7 +325,7 @@ fn grab_fence(
         )
         && let Ok(mut fence) = fences.get_mut(drag.entity)
     {
-        fence.grab_offset = point.x - ORIGIN.x - station.jointer.fence.as_meters_f32();
+        fence.grab_offset = point.x - ORIGIN.x - station.machine.fence.as_meters_f32();
     }
 }
 
@@ -506,7 +506,7 @@ fn draw_tables(
     mut infeed: Single<&mut Transform, With<InfeedTable>>,
 ) {
     if station.is_changed() {
-        let depth = station.jointer.depth.as_meters_f32();
+        let depth = station.machine.depth.as_meters_f32();
         infeed.translation = ORIGIN + Vec3::new(TABLE_FRONT, -TABLE_THICKNESS - depth, GAP);
     }
 }
@@ -515,7 +515,7 @@ fn draw_tables(
 /// over the tables as it's tilted.
 fn draw_fence(station: Res<JointerStation>, mut fence: Single<&mut Transform, With<Fence>>) {
     if station.is_changed() {
-        let jointer = station.jointer;
+        let jointer = station.machine;
         let tilt = jointer.tilt.radians() as f32;
         let turn = Quat::from_rotation_z(tilt);
         // The mesh's corner is its face's foot, on the line it turns about.

@@ -28,6 +28,7 @@ use crate::{
     plan,
     saved::Saved,
     shop::{Part, ShopView, describe_board, describe_size},
+    thickness::PlanerStation,
 };
 use woodsim::{Lie, Operation, Origin, Side, Source, Tool};
 
@@ -99,6 +100,7 @@ pub enum Heading {
     TableSaw,
     MiterSaw,
     Jointer,
+    Planer,
     Bench,
     Parts,
     Offcuts,
@@ -107,11 +109,12 @@ pub enum Heading {
 }
 
 impl Heading {
-    const ALL: [Heading; 9] = [
+    const ALL: [Heading; 10] = [
         Heading::Hand,
         Heading::TableSaw,
         Heading::MiterSaw,
         Heading::Jointer,
+        Heading::Planer,
         Heading::Bench,
         Heading::Parts,
         Heading::Offcuts,
@@ -125,6 +128,7 @@ impl Heading {
             Heading::TableSaw => "Table saw",
             Heading::MiterSaw => "Miter saw",
             Heading::Jointer => "Jointer",
+            Heading::Planer => "Planer",
             Heading::Bench => "Workbench",
             Heading::Parts => "Parts shelf",
             Heading::Offcuts => "Offcuts shelf",
@@ -137,9 +141,11 @@ impl Heading {
     fn empty(self) -> &'static str {
         match self {
             Heading::Hand | Heading::Lumber => "",
-            Heading::TableSaw | Heading::MiterSaw | Heading::Jointer | Heading::Bench => {
-                "Nothing on it."
-            }
+            Heading::TableSaw
+            | Heading::MiterSaw
+            | Heading::Jointer
+            | Heading::Planer
+            | Heading::Bench => "Nothing on it.",
             Heading::Parts => "Pieces you cut to size, glue-ups, and boards you put away go here.",
             Heading::Offcuts => "What's left over from a cut goes here.",
             Heading::Saved => "Parts you save go here, and stay after a restart.",
@@ -183,12 +189,13 @@ pub struct DetailLine {
     pub changes: bool,
 }
 
-/// What a pass or joint line is: a pass of a saw or the jointer, or a joint.
+/// What a pass or joint line is: a pass of a saw, the jointer, or the planer, or a joint.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     TableSaw,
     MiterSaw,
     Jointer,
+    Planer,
     Joint,
 }
 
@@ -241,6 +248,7 @@ impl Tree {
             Where::Hand => Heading::Hand,
             Where::Saw(ShopView::MiterSaw, _) => Heading::MiterSaw,
             Where::Saw(ShopView::Jointer, _) => Heading::Jointer,
+            Where::Saw(ShopView::Planer, _) => Heading::Planer,
             Where::Saw(..) => Heading::TableSaw,
             Where::Bench(_) => Heading::Bench,
             Where::Shelf(_) => Heading::Parts,
@@ -298,6 +306,7 @@ pub struct Places<'a> {
     pub table_saw: &'a TableSawStation,
     pub miter_saw: &'a MiterSawStation,
     pub jointer: &'a JointerStation,
+    pub planer: &'a PlanerStation,
     pub bench: &'a BenchStation,
     pub inventory: &'a Inventory,
     pub saved: &'a Saved,
@@ -326,6 +335,7 @@ impl Places<'_> {
             Where::Saw(ShopView::TableSaw, part) => on_saw(self.table_saw.wood(), part),
             Where::Saw(ShopView::MiterSaw, part) => on_saw(self.miter_saw.wood(), part),
             Where::Saw(ShopView::Jointer, part) => on_saw(self.jointer.wood(), part),
+            Where::Saw(ShopView::Planer, part) => on_saw(self.planer.wood(), part),
             Where::Saw(..) => None,
             Where::Bench(index) => self.bench.wood(index),
             Where::Shelf(id) => self.inventory.get(id).map(|item| item.work.clone()),
@@ -360,6 +370,7 @@ impl Places<'_> {
                 let saw = match view {
                     ShopView::MiterSaw => "on the miter saw",
                     ShopView::Jointer => "on the jointer",
+                    ShopView::Planer => "on the planer",
                     _ => "on the table saw",
                 };
                 match role(view, part) {
@@ -441,6 +452,7 @@ impl Places<'_> {
             Heading::TableSaw => on_saw(ShopView::TableSaw, self.table_saw.wood()),
             Heading::MiterSaw => on_saw(ShopView::MiterSaw, self.miter_saw.wood()),
             Heading::Jointer => on_saw(ShopView::Jointer, self.jointer.wood()),
+            Heading::Planer => on_saw(ShopView::Planer, self.planer.wood()),
             Heading::Bench => (0..self.bench.groups.len())
                 .filter_map(|index| Some(at(Where::Bench(index), self.bench.wood(index)?)))
                 .collect(),
@@ -493,10 +505,11 @@ impl Places<'_> {
     }
 }
 
-/// What a side of a saw's cut is called. What a jointer pass leaves is just the board, thinner.
+/// What a side of a saw's cut is called. What a jointer or planer pass leaves is just the board,
+/// thinner.
 fn role(view: ShopView, part: Part) -> Option<&'static str> {
     match (view, part) {
-        (_, Part::Whole) | (ShopView::Jointer, Part::Piece) => None,
+        (_, Part::Whole) | (ShopView::Jointer | ShopView::Planer, Part::Piece) => None,
         (_, Part::Piece) => Some("measured piece"),
         (_, Part::Offcut) => Some("offcut"),
     }
@@ -619,6 +632,9 @@ pub fn through_glue_up(tool: Tool) -> bool {
         } | Tool::Jointer {
             lie: Lie::GlueUp(_),
             ..
+        } | Tool::Planer {
+            lie: Lie::GlueUp(_),
+            ..
         }
     )
 }
@@ -645,6 +661,7 @@ fn passes(entry: Entry, board: &woodsim::Board, changes: bool) -> Vec<Line> {
                     Tool::TableSaw { .. } => Kind::TableSaw,
                     Tool::MiterSaw { .. } => Kind::MiterSaw,
                     Tool::Jointer { .. } => Kind::Jointer,
+                    Tool::Planer { .. } => Kind::Planer,
                 },
                 name: cutting::verb(operation.tool).to_string(),
                 notes: format!(
@@ -726,6 +743,7 @@ mod tests {
         table_saw: TableSawStation,
         miter_saw: MiterSawStation,
         jointer: JointerStation,
+        planer: PlanerStation,
         bench: BenchStation,
         inventory: Inventory,
         saved: Saved,
@@ -738,6 +756,7 @@ mod tests {
                 table_saw: TableSawStation::default(),
                 miter_saw: MiterSawStation::default(),
                 jointer: JointerStation::default(),
+                planer: PlanerStation::default(),
                 bench: BenchStation::default(),
                 inventory: Inventory::default(),
                 saved: Saved::default(),
@@ -750,6 +769,7 @@ mod tests {
                 table_saw: &self.table_saw,
                 miter_saw: &self.miter_saw,
                 jointer: &self.jointer,
+                planer: &self.planer,
                 bench: &self.bench,
                 inventory: &self.inventory,
                 saved: &self.saved,
@@ -792,6 +812,7 @@ mod tests {
                 (Heading::TableSaw, 1),
                 (Heading::MiterSaw, 0),
                 (Heading::Jointer, 0),
+                (Heading::Planer, 0),
                 (Heading::Bench, 0),
                 (Heading::Parts, 1),
                 (Heading::Offcuts, 0),

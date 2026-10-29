@@ -1,12 +1,13 @@
 //! One way of cutting for everything: a board or a glue-up, lying any of the 24 square ways on
-//! either saw or the jointer (on edge, on end, upside down), cut with the blade at any angle and
-//! tilt, or the jointer's fence at any tilt, stopped or all the way through, keeps exactly the
-//! wood the blade didn't take, in exactly one piece, and every piece replays from its stock.
+//! either saw, the jointer, or the planer (on edge, on end, upside down), cut with the blade at
+//! any angle and tilt, or the jointer's fence at any tilt, stopped or all the way through, keeps
+//! exactly the wood the blade didn't take, in exactly one piece, and every piece replays from
+//! its stock.
 
 use proptest::prelude::*;
 use woodsim::{
     Angle, Assembly, Blade, Board, CutError, Fastener, GlueUpPass, Jointer, Kerf, Length, Mating,
-    Member, MiterSaw, Orientation, Rotation, Source, Surface, TableSaw, surfaces,
+    Member, MiterSaw, Orientation, Planer, Rotation, Source, Surface, TableSaw, surfaces,
 };
 
 fn inches(n: i64) -> Length {
@@ -375,6 +376,36 @@ proptest! {
         }
         if pass != Err(CutError::AllSawdust) {
             check(&glue_up, pass)?;
+        }
+    }
+
+    #[test]
+    fn the_planer_planes_anything_lying_any_way(
+        glue_up in glue_up(),
+        lie in lie(),
+        under in 0..=8i64,
+        stopped in proptest::option::of(0.0..1.0f64),
+    ) {
+        // Set somewhere from its whole height to a pass's worth under it, as far as it goes.
+        let planer = Planer::thirteen_inch();
+        let lowest = Planer { thickness: planer.thinnest, ..planer };
+        let high = lowest.takes_glue_up(&glue_up, lie) + planer.thinnest;
+        let under = Length::from_nm(planer.deepest.as_nm() * under / 8);
+        let thickness = (high - under).clamp(planer.thinnest, planer.thickest);
+        let planer = Planer { thickness, ..planer };
+        let pass = match stopped {
+            None => planer.plane_glue_up(&glue_up, lie),
+            Some(part) => {
+                // Stopped somewhere along the first 40" of the way through.
+                let radius = planer.radius();
+                let end = Length::from_nm((inches(40).as_nm() as f64 * part) as i64) - radius;
+                planer.feed_glue_up(&glue_up, lie, -radius, end)
+            }
+        };
+        match pass {
+            // Too wide for its knives, or too tall for it.
+            Err(CutError::TooWide { .. } | CutError::TooDeep { .. }) => {}
+            pass => check(&glue_up, pass)?,
         }
     }
 }

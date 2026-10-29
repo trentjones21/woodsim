@@ -16,6 +16,7 @@ use crate::{
     feed::TableSawStation,
     join::BenchStation,
     shop::{ShopView, describe_size, measured},
+    thickness::PlanerStation,
 };
 
 /// Wood to carry or set aside: one board, or boards fastened together.
@@ -76,7 +77,7 @@ impl Gesture {
 }
 
 /// Something a drag with the left button moves, rather than turning the view: a board fed
-/// along the table saw or the jointer, a fence, or a stop.
+/// along the table saw, the jointer, or the planer, a fence, or a stop.
 #[derive(Component)]
 pub struct Grabbable;
 
@@ -140,9 +141,12 @@ pub fn set_down(
     station: ShopView,
     near: Option<Vec3>,
     hand: &mut Hand,
-    table_saw: &mut TableSawStation,
-    miter_saw: &mut MiterSawStation,
-    jointer: &mut JointerStation,
+    (table_saw, miter_saw, jointer, planer): (
+        &mut TableSawStation,
+        &mut MiterSawStation,
+        &mut JointerStation,
+        &mut PlanerStation,
+    ),
     bench: &mut BenchStation,
 ) -> bool {
     let Some(work) = hand.0.take() else {
@@ -159,6 +163,10 @@ pub fn set_down(
         }
         ShopView::Jointer => {
             jointer.load(work);
+            true
+        }
+        ShopView::Planer => {
+            planer.load(work);
             true
         }
         ShopView::Bench => {
@@ -235,22 +243,26 @@ mod tests {
     }
 
     #[test]
-    fn a_glue_up_goes_on_either_saw_the_jointer_or_the_bench() {
-        let (mut table_saw, mut miter_saw, mut jointer, mut bench) = (
+    fn a_glue_up_goes_on_either_saw_the_jointer_the_planer_or_the_bench() {
+        let (mut table_saw, mut miter_saw, mut jointer, mut planer, mut bench) = (
             TableSawStation::default(),
             MiterSawStation::default(),
             JointerStation::default(),
+            PlanerStation::default(),
             BenchStation::default(),
         );
-        for saw in [ShopView::TableSaw, ShopView::MiterSaw, ShopView::Jointer] {
+        for saw in [
+            ShopView::TableSaw,
+            ShopView::MiterSaw,
+            ShopView::Jointer,
+            ShopView::Planer,
+        ] {
             let mut hand = Hand(Some(Workpiece::GlueUp(panel())));
             assert!(set_down(
                 saw,
                 None,
                 &mut hand,
-                &mut table_saw,
-                &mut miter_saw,
-                &mut jointer,
+                (&mut table_saw, &mut miter_saw, &mut jointer, &mut planer),
                 &mut bench
             ));
             assert!(hand.0.is_none());
@@ -260,9 +272,7 @@ mod tests {
             ShopView::Bench,
             None,
             &mut hand,
-            &mut table_saw,
-            &mut miter_saw,
-            &mut jointer,
+            (&mut table_saw, &mut miter_saw, &mut jointer, &mut planer),
             &mut bench
         ));
         assert!(hand.0.is_none());

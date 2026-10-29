@@ -269,7 +269,10 @@ impl Cutting {
 
     fn signature(&self, cut: usize) -> Signature {
         let mut tool = self.cuts[cut].operation.tool;
-        if let Tool::TableSaw { travel, .. } | Tool::Jointer { travel, .. } = &mut tool {
+        if let Tool::TableSaw { travel, .. }
+        | Tool::Jointer { travel, .. }
+        | Tool::Planer { travel, .. } = &mut tool
+        {
             *travel = (Length::ZERO, Length::ZERO);
         }
         let measured = self.cuts[cut]
@@ -396,9 +399,9 @@ impl Cutting {
         };
         let tool = cut.operation.tool;
         match origin.side() {
-            // A slot doesn't change what it's called, and nor does jointing it.
+            // A slot doesn't change what it's called, and nor does jointing or planing it.
             Some(Side::Whole) => self.name(input),
-            _ if is_jointer(tool) => self.name(input),
+            _ if is_jointer(tool) || is_planer(tool) => self.name(input),
             Some(Side::Measured) if is_glue_up(tool) => format!("the {}", describe_size(&board)),
             Some(Side::Measured) if is_resaw(tool) => {
                 format!("the {} slice", measured(board.thickness()))
@@ -524,6 +527,9 @@ pub fn settings_of(operation: &Operation, cut: Option<&Origin>) -> String {
                 measured(jointer.depth)
             )
         }
+        Tool::Planer { planer, .. } => {
+            format!("Planer, set to {}{lying}", measured(planer.thickness))
+        }
     }
 }
 
@@ -532,25 +538,26 @@ pub fn settings_of(operation: &Operation, cut: Option<&Origin>) -> String {
 /// fence".
 fn lying(tool: Tool, cut: Option<&Origin>) -> String {
     let (lie, glue_up) = match tool {
-        Tool::TableSaw { lie, .. } | Tool::MiterSaw { lie, .. } | Tool::Jointer { lie, .. } => {
-            match lie {
-                Lie::Board(lie) if lie.is_square() && lie.on_edge() => {
-                    return ", the board on edge".to_string();
-                }
-                Lie::Board(lie) if lie.is_square() && lie.on_end() => {
-                    return ", the board on end".to_string();
-                }
-                Lie::Board(lie) if lie.is_square() => return String::new(),
-                Lie::Board(lie) => (lie, false),
-                Lie::GlueUp(rotation) => {
-                    let lie = Orientation::from_rotation(rotation);
-                    if lie.is_square() {
-                        return String::new();
-                    }
-                    (lie, true)
-                }
+        Tool::TableSaw { lie, .. }
+        | Tool::MiterSaw { lie, .. }
+        | Tool::Jointer { lie, .. }
+        | Tool::Planer { lie, .. } => match lie {
+            Lie::Board(lie) if lie.is_square() && lie.on_edge() => {
+                return ", the board on edge".to_string();
             }
-        }
+            Lie::Board(lie) if lie.is_square() && lie.on_end() => {
+                return ", the board on end".to_string();
+            }
+            Lie::Board(lie) if lie.is_square() => return String::new(),
+            Lie::Board(lie) => (lie, false),
+            Lie::GlueUp(rotation) => {
+                let lie = Orientation::from_rotation(rotation);
+                if lie.is_square() {
+                    return String::new();
+                }
+                (lie, true)
+            }
+        },
     };
     // What it rested on, from the wood it cut.
     let wood = match glue_up {
@@ -836,6 +843,23 @@ impl Say<'_> {
                 false => format!("joint {it}, making {}", join(&parts)),
             };
         }
+        if let Tool::Planer { planer, lie, .. } = tool {
+            // However much it takes off, a pass at a time.
+            let takes = match (lie, cut_step.inputs.first()) {
+                (Lie::Board(lie), Some(input)) => planer.takes(&input.replay(), lie),
+                _ => Length::ZERO,
+            };
+            let passes = if takes > planer.deepest {
+                format!(", {} or less a pass", measured(planer.deepest))
+            } else {
+                String::new()
+            };
+            let to = measured(planer.thickness);
+            return match parts.is_empty() || generic {
+                true => format!("plane {it} to {to}{passes}"),
+                false => format!("plane {it} to {to}{passes}, making {}", join(&parts)),
+            };
+        }
         let measured_kept = cut_step
             .outputs
             .iter()
@@ -889,6 +913,7 @@ impl Say<'_> {
             (Tool::MiterSaw { .. }, Tool::MiterSaw { .. })
                 | (Tool::TableSaw { .. }, Tool::TableSaw { .. })
                 | (Tool::Jointer { .. }, Tool::Jointer { .. })
+                | (Tool::Planer { .. }, Tool::Planer { .. })
         );
         // Resting at an angle, the saw's settings say how it lies.
         if !same_saw || was == now || !was.is_square() || !now.is_square() {
@@ -963,6 +988,10 @@ fn board_lie(tool: Tool) -> Option<Orientation> {
         | Tool::Jointer {
             lie: Lie::Board(lie),
             ..
+        }
+        | Tool::Planer {
+            lie: Lie::Board(lie),
+            ..
         } => Some(lie),
         _ => None,
     }
@@ -973,7 +1002,7 @@ fn setting(tool: Tool) -> Option<Length> {
     match tool {
         Tool::MiterSaw { length, .. } => Some(measured(length)),
         Tool::TableSaw { saw, .. } => Some(measured(saw.miter_gauge.unwrap_or(saw.fence))),
-        Tool::Jointer { .. } => None,
+        Tool::Jointer { .. } | Tool::Planer { .. } => None,
     }
 }
 
@@ -989,6 +1018,9 @@ fn is_glue_up(tool: Tool) -> bool {
         } | Tool::Jointer {
             lie: Lie::GlueUp(_),
             ..
+        } | Tool::Planer {
+            lie: Lie::GlueUp(_),
+            ..
         }
     )
 }
@@ -996,6 +1028,11 @@ fn is_glue_up(tool: Tool) -> bool {
 /// Whether a pass went across a jointer, taking a layer off what it lay on.
 fn is_jointer(tool: Tool) -> bool {
     matches!(tool, Tool::Jointer { .. })
+}
+
+/// Whether a pass went through a planer, taking it down to a thickness.
+fn is_planer(tool: Tool) -> bool {
+    matches!(tool, Tool::Planer { .. })
 }
 
 /// Whether the table saw's blade went through a board parallel to its faces.
@@ -1067,7 +1104,7 @@ fn is_crosscut(tool: Tool) -> bool {
             ..
         } => lie.along().0 == Axis::Width,
         Tool::TableSaw { saw, .. } => saw.miter_gauge.is_some(),
-        Tool::Jointer { .. } => false,
+        Tool::Jointer { .. } | Tool::Planer { .. } => false,
     }
 }
 
@@ -1133,12 +1170,32 @@ fn nibbles(first: Tool, then: Tool) -> bool {
                     _ => false,
                 }
         }
+        // Planed down a pass at a time, what matters is how thick it ends up.
+        (
+            Tool::Planer {
+                planer: a,
+                lie: lie_a,
+                ..
+            },
+            Tool::Planer {
+                planer: b,
+                lie: lie_b,
+                ..
+            },
+        ) => {
+            lie_a == lie_b
+                && woodsim::Planer {
+                    thickness: b.thickness,
+                    ..a
+                } == b
+                && b.thickness <= a.thickness
+        }
         _ => false,
     }
 }
 
-/// What a pass does to the wood: rips it, crosscuts it, resaws it, cuts it to length, or joints
-/// it. The table saw's blade stands square to whichever of a board's axes lies across the
+/// What a pass does to the wood: rips it, crosscuts it, resaws it, cuts it to length, joints
+/// it, or planes it. The table saw's blade stands square to whichever of a board's axes lies across the
 /// table: through its thickness it resaws, through its length it crosscuts.
 pub fn verb(tool: Tool) -> &'static str {
     match tool {
@@ -1160,6 +1217,7 @@ pub fn verb(tool: Tool) -> &'static str {
         Tool::TableSaw { .. } => "Rip",
         Tool::MiterSaw { .. } => "Cut",
         Tool::Jointer { .. } => "Joint",
+        Tool::Planer { .. } => "Plane",
     }
 }
 

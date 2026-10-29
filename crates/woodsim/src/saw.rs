@@ -65,6 +65,10 @@ pub enum CutError {
     /// The blade would take all the wood there is: a board no wider than the kerf, the blade
     /// right up against the fence or the stop.
     AllSawdust,
+    /// It's wider across than the planer's knives are long, so it won't go through.
+    TooWide { across: Length, widest: Length },
+    /// It's thicker over the planer's setting than a pass takes off.
+    TooDeep { off: Length, most: Length },
 }
 
 impl fmt::Display for CutError {
@@ -74,6 +78,14 @@ impl fmt::Display for CutError {
                 write!(f, "the saw can't be set to {setting}")
             }
             CutError::AllSawdust => write!(f, "the blade would turn all of it to sawdust"),
+            CutError::TooWide { across, widest } => write!(
+                f,
+                "it's {across} across, too wide to go through the {widest} the planer takes"
+            ),
+            CutError::TooDeep { off, most } => write!(
+                f,
+                "that's {off} off in one pass, more than the {most} it takes at most"
+            ),
             CutError::MissesBoard { setting, available } => write!(
                 f,
                 "the blade misses the board: set to {setting}, but the board is only {available}"

@@ -129,6 +129,10 @@ impl Remake {
                 | Tool::Jointer {
                     lie: Lie::GlueUp(_),
                     ..
+                }
+                | Tool::Planer {
+                    lie: Lie::GlueUp(_),
+                    ..
                 },
                 _,
             ) => return Err(Refusal::GlueUpPass(operation.number)),
@@ -174,6 +178,22 @@ impl Remake {
                     false => end,
                 };
                 jointer.feed(&board, lie, start, end)
+            }
+            (
+                Tool::Planer {
+                    planer,
+                    lie: Lie::Board(lie),
+                    travel: (start, end),
+                },
+                Tool::Planer { planer: before, .. },
+            ) => {
+                // A pass that went all the way through still does, however far that is now.
+                let through = end >= before.reach(&was(), lie) + before.radius();
+                let end = match through {
+                    true => end.max(planer.reach(&board, lie) + planer.radius()),
+                    false => end,
+                };
+                planer.feed(&board, lie, start, end)
             }
             _ => return Err(refuse("it's a different saw")),
         }

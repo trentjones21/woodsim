@@ -15,6 +15,7 @@ mod grain;
 mod hand;
 mod hud;
 mod icons;
+mod infeed;
 mod inventory;
 mod join;
 mod jointer;
@@ -22,6 +23,7 @@ mod meshes;
 mod miter_saw;
 mod parts;
 mod plan;
+mod planer;
 mod rest;
 mod saved;
 mod scenery;
@@ -31,6 +33,7 @@ mod shop;
 mod studio;
 mod table_saw;
 mod textures;
+mod thickness;
 mod trace;
 mod work;
 
@@ -62,6 +65,7 @@ use inventory::InventoryPlugin;
 use jointer::JointerPlugin;
 use miter_saw::MiterSawPlugin;
 use parts::PartsPlugin;
+use planer::PlanerPlugin;
 use rest::RestPlugin;
 use saved::SavedPlugin;
 use scenery::ScenePlugin;
@@ -121,7 +125,13 @@ fn main() {
         ShopPlugin,
         ScenePlugin,
         // A tuple of plugins holds at most 15.
-        (TableSawPlugin, MiterSawPlugin, JointerPlugin, BladesPlugin),
+        (
+            TableSawPlugin,
+            MiterSawPlugin,
+            JointerPlugin,
+            PlanerPlugin,
+            BladesPlugin,
+        ),
         BenchPlugin,
         HandPlugin,
         ControlsPlugin,

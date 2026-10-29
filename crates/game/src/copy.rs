@@ -23,6 +23,7 @@ use crate::{
     hand::Hand,
     join::BenchStation,
     shop::ShopView,
+    thickness::PlanerStation,
     work,
 };
 
@@ -51,6 +52,7 @@ pub fn to_copy(
     table_saw: &TableSawStation,
     miter_saw: &MiterSawStation,
     jointer: &JointerStation,
+    planer: &PlanerStation,
     bench: &BenchStation,
 ) -> Option<(String, Recipe)> {
     if let Some(work) = &hand.0 {
@@ -72,6 +74,10 @@ pub fn to_copy(
         ShopView::Jointer => Some((
             format!("on the jointer. {}", jointer.status()),
             jointer.recipe()?,
+        )),
+        ShopView::Planer => Some((
+            format!("on the planer. {}", planer.status()),
+            planer.recipe()?,
         )),
         ShopView::Bench => {
             let group = match bench.picked {
@@ -102,6 +108,7 @@ struct Copyable<'w> {
     table_saw: Res<'w, TableSawStation>,
     miter_saw: Res<'w, MiterSawStation>,
     jointer: Res<'w, JointerStation>,
+    planer: Res<'w, PlanerStation>,
     bench: Res<'w, BenchStation>,
 }
 
@@ -120,6 +127,7 @@ fn copy_wood(
         &copyable.table_saw,
         &copyable.miter_saw,
         &copyable.jointer,
+        &copyable.planer,
         &copyable.bench,
     );
     let message = match found {
@@ -219,6 +227,7 @@ mod tests {
             &table_saw,
             &MiterSawStation::default(),
             &JointerStation::default(),
+            &PlanerStation::default(),
             &BenchStation::default(),
         )
         .expect("a board on the saw");
@@ -248,6 +257,7 @@ mod tests {
             &TableSawStation::default(),
             &MiterSawStation::default(),
             &jointer,
+            &PlanerStation::default(),
             &BenchStation::default(),
         )
         .expect("a board on the jointer");
@@ -262,7 +272,7 @@ mod tests {
         else {
             panic!("expected the jointer");
         };
-        assert_eq!(set, jointer.jointer);
+        assert_eq!(set, jointer.machine);
         assert!(travel.1 > travel.0);
     }
 
@@ -280,6 +290,7 @@ mod tests {
             &TableSawStation::default(),
             &MiterSawStation::default(),
             &JointerStation::default(),
+            &PlanerStation::default(),
             &BenchStation::default(),
         )
         .expect("what's in hand");
@@ -292,6 +303,7 @@ mod tests {
                 &TableSawStation::default(),
                 &MiterSawStation::default(),
                 &JointerStation::default(),
+                &PlanerStation::default(),
                 &BenchStation::default(),
             )
             .is_none()
