@@ -4,7 +4,21 @@
 //! across the joint it sits. Where surfaces meet or nearly do, the assembly measures how well:
 //! tight, open, or running into each other.
 
-use crate::{Angle, Board, Length, face::Edge, history::next_number};
+use crate::{Angle, Board, Length, Orientation, face::Edge, history::next_number};
+
+/// Why something can't rest on a saw the way it was asked to (`Assembly::resting`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unsteady {
+    /// One of the surfaces isn't there.
+    NoSurface,
+    /// Wood reaches past the surface it was to rest on, so it wouldn't sit on it.
+    Rocks,
+    /// The surface to go against the fence faces straight up or down.
+    FacesUp,
+    /// Wood reaches past the surface to go against the fence, toward it, so it would meet the
+    /// fence first.
+    Blocked,
+}
 
 /// A turn in space, as where it turns each of three axes: whole numbers over 2^40, so quarter
 /// turns are exact and any other turn is within a trillionth of a radian.
@@ -60,14 +74,6 @@ impl Rotation {
         columns[b][b] = cos;
         Rotation {
             columns: columns.map(|column| column.map(|v| v << 40)),
-        }
-    }
-
-    /// The square turn whose columns, where it turns `x`, `y`, and `z`, are `columns`: each
-    /// one of the axes, one way or the other.
-    pub(crate) fn square(columns: [[i8; 3]; 3]) -> Rotation {
-        Rotation {
-            columns: columns.map(|column| column.map(|v| i64::from(v) << 40)),
         }
     }
 
@@ -407,6 +413,60 @@ impl Assembly {
 
     /// Every place two members' surfaces meet or nearly do, facing each other, with how far
     /// apart they are.
+    /// How it lies on a saw resting on `down`, flat on the table, and turned so `against`
+    /// faces the fence (or the miter gauge's face, or the miter saw's): as squarely as it
+    /// can, so a surface square to `down` lies flat against the fence, and one that leans,
+    /// like a bevel, touches it along its edge. A board on its own rests the same way as a
+    /// glue-up of one (`Assembly::of`).
+    pub fn resting(
+        &self,
+        down: (usize, Surface),
+        against: (usize, Surface),
+    ) -> Result<Orientation, Unsteady> {
+        let patch = |(member, surface): (usize, Surface)| self.members.get(member)?.patch(surface);
+        let (on, to) = (
+            patch(down).ok_or(Unsteady::NoSurface)?,
+            patch(against).ok_or(Unsteady::NoSurface)?,
+        );
+        // Down onto the table, and the rest of the way toward the fence, level.
+        let d = unit(on.normal);
+        let level = dot(to.normal, d);
+        let f = [0, 1, 2].map(|k| to.normal[k] - level * d[k]);
+        if dot(f, f) < 1e-12 {
+            return Err(Unsteady::FacesUp);
+        }
+        let f = unit(f);
+        let x = cross(d, f);
+        let rotation = Rotation::from_columns([0, 1, 2].map(|k| [x[k], f[k], -d[k]]));
+        // Nothing reaches past the surface it rests on, nor past the one to the fence: within
+        // a micron, so a surface cut at a slant whole-number directions only come near counts.
+        let corners: Vec<[f64; 3]> = self
+            .members
+            .iter()
+            .flat_map(|member| {
+                member
+                    .board
+                    .corners()
+                    .into_iter()
+                    .map(|[l, w, t]| member.point(l, w, t).map(|length| length.as_nm() as f64))
+            })
+            .collect();
+        let furthest = |corners: &[[f64; 3]], toward: [f64; 3]| {
+            corners
+                .iter()
+                .map(|&p| dot(p, toward))
+                .fold(f64::MIN, f64::max)
+        };
+        const MICRON: f64 = 1_000.0;
+        if furthest(&corners, d) > furthest(&on.corners, d) + MICRON {
+            return Err(Unsteady::Rocks);
+        }
+        if furthest(&corners, f) > furthest(&to.corners, f) + MICRON {
+            return Err(Unsteady::Blocked);
+        }
+        Ok(Orientation::from_rotation(rotation))
+    }
+
     pub fn fit(&self) -> Vec<Contact> {
         self.contacts(|_, _| true)
     }

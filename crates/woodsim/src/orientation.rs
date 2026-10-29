@@ -22,8 +22,9 @@ impl Axis {
     }
 }
 
-/// How a board lies on a saw's table: any of the 24 square ways, flat, on an edge, or on an end,
-/// and turned any of four ways.
+/// How a board, or a glue-up, lies on a saw's table: any of the 24 square ways, flat, on an edge,
+/// or on an end, and turned any of four ways; or any way at all, resting on a surface you
+/// choose (`Assembly::resting`).
 ///
 /// A saw measures positions on its table `across` it toward the fence, `along` it (from the
 /// board's leading end on a table saw, toward the stop on a miter saw), and `up` from the table.
@@ -33,15 +34,15 @@ impl Axis {
 /// from above.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Orientation {
-    /// Where each of the board's axes, `l`, `w`, and `t`, points on the saw: along the table,
-    /// across it toward the fence, and up, one of them one way or the other.
-    columns: [[i8; 3]; 3],
+    /// The turn from the board's axes, `l`, `w`, and `t`, onto the saw's: along the table,
+    /// across it toward the fence, and up. Exact for the square ways.
+    rotation: Rotation,
 }
 
 impl Default for Orientation {
     fn default() -> Orientation {
         Orientation {
-            columns: [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+            rotation: Rotation::NONE,
         }
     }
 }
@@ -50,9 +51,10 @@ impl fmt::Debug for Orientation {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let way =
             |(axis, backward): (Axis, bool)| format!("{}{axis:?}", if backward { "-" } else { "" });
+        let nearly = if self.is_square() { "" } else { "nearly " };
         write!(
             f,
-            "Orientation {{ along: {}, across: {}, up: {} }}",
+            "Orientation {{ {nearly}along: {}, across: {}, up: {} }}",
             way(self.along()),
             way(self.across()),
             way(self.up())
@@ -66,47 +68,48 @@ const ALONG: usize = 0;
 const ACROSS: usize = 1;
 const UP: usize = 2;
 
-/// The board's axes, by their column.
-const L: usize = 0;
-const W: usize = 1;
-const T: usize = 2;
-
 impl Orientation {
-    /// Turned on the saw by `turn`, which takes each of the saw's directions to where it goes.
-    fn turned_by(self, turn: impl Fn([i8; 3]) -> [i8; 3]) -> Orientation {
+    /// Lying as `rotation` turns the board's axes onto the saw's, any way at all.
+    pub fn from_rotation(rotation: Rotation) -> Orientation {
+        Orientation { rotation }
+    }
+
+    /// Turned by `turn` in the saw's own frame.
+    fn turned_on_saw(self, turn: Rotation) -> Orientation {
         Orientation {
-            columns: self.columns.map(turn),
+            rotation: self.rotation.then(turn),
+        }
+    }
+
+    /// Turned by `turn` about the board's own axes, wherever they lie.
+    fn turned_on_board(self, turn: Rotation) -> Orientation {
+        Orientation {
+            rotation: turn.then(self.rotation),
         }
     }
 
     /// Turned a quarter turn counterclockwise, seen from above.
     pub fn turned_left(self) -> Orientation {
-        self.turned_by(|[along, across, up]| [-across, along, up])
+        self.turned_on_saw(Rotation::quarter_turns(UP, 1))
     }
 
     /// Turned a quarter turn clockwise, seen from above.
     pub fn turned_right(self) -> Orientation {
-        self.turned_by(|[along, across, up]| [across, -along, up])
+        self.turned_on_saw(Rotation::quarter_turns(UP, -1))
     }
 
     /// Turned over, about the direction along the table. A board turned and then flipped lies
     /// as if it had been flipped and then turned the other way.
     pub fn flipped(self) -> Orientation {
-        self.turned_by(|[along, across, up]| [along, -across, -up])
+        self.turned_on_saw(Rotation::quarter_turns(ALONG, 2))
     }
 
     /// Rolled a quarter turn about its length: lying flat, stood up on an edge, its top face
     /// tipped toward the operator, away from the fence; or, standing on an edge, laid back down
     /// the way it was. Standing on end, rolling about its length turns it where it stands.
     pub fn tipped(self) -> Orientation {
-        let [l, w, t] = self.columns;
-        let negative = |v: [i8; 3]| v.map(|x| -x);
-        let columns = if self.on_edge() {
-            [l, negative(t), w]
-        } else {
-            [l, t, negative(w)]
-        };
-        Orientation { columns }
+        let roll = if self.on_edge() { -1 } else { 1 };
+        self.turned_on_board(Rotation::quarter_turns(0, roll))
     }
 
     /// Turned a quarter turn about its thickness, so the edge it stood on becomes an end: stood
@@ -114,17 +117,16 @@ impl Orientation {
     /// an end, laid back down onto an edge the same way. Lying flat, it's tipped onto its edge
     /// first.
     pub fn stood(self) -> Orientation {
-        let [l, w, t] = self.columns;
-        let negative = |v: [i8; 3]| v.map(|x| -x);
         match self.up().0 {
-            Axis::Width => Orientation {
-                columns: [w, negative(l), t],
-            },
-            Axis::Length => Orientation {
-                columns: [negative(w), l, t],
-            },
+            Axis::Width => self.turned_on_board(Rotation::quarter_turns(2, 1)),
+            Axis::Length => self.turned_on_board(Rotation::quarter_turns(2, -1)),
             Axis::Thickness => self.tipped().stood(),
         }
+    }
+
+    /// Whether it lies one of the 24 square ways, each of its axes along one of the saw's.
+    pub fn is_square(self) -> bool {
+        self.rotation.is_square()
     }
 
     /// Whether the board stands on an edge rather than lying on a face or standing on an end.
@@ -138,7 +140,8 @@ impl Orientation {
     }
 
     /// The board's axis that lies across the table, and whether the board's coordinates run
-    /// backward along it: from the fence side rather than toward it.
+    /// backward along it: from the fence side rather than toward it. Turned out of square, the
+    /// axis that lies most nearly across.
     pub fn across(self) -> (Axis, bool) {
         self.axis_on(ACROSS)
     }
@@ -159,18 +162,20 @@ impl Orientation {
     /// along the table, across it toward the fence, and up. The same turn lays a glue-up on a
     /// saw the way this lays a board.
     pub fn rotation(self) -> Rotation {
-        Rotation::square(self.columns)
+        self.rotation
     }
 
-    /// The board's axis on the saw's direction `table`, and whether it runs backward.
+    /// The board's axis most nearly along the saw's direction `table`, and whether it runs
+    /// backward.
     fn axis_on(self, table: usize) -> (Axis, bool) {
-        [(Axis::Length, L), (Axis::Width, W), (Axis::Thickness, T)]
+        let columns = self.rotation.columns();
+        [Axis::Length, Axis::Width, Axis::Thickness]
             .into_iter()
-            .find_map(|(axis, column)| {
-                let on = self.columns[column][table];
-                (on != 0).then_some((axis, on < 0))
-            })
-            .expect("each of the saw's directions has one of the board's axes")
+            .zip(columns)
+            .map(|(axis, column)| (axis, column[table]))
+            .max_by(|a, b| a.1.abs().total_cmp(&b.1.abs()))
+            .map(|(axis, on)| (axis, on < 0.0))
+            .expect("three axes")
     }
 }
 
@@ -256,10 +261,7 @@ mod tests {
                 let mut lie = Orientation::default();
                 for _ in 0..rolls {
                     // Each roll tips the top face toward the operator.
-                    let [l, w, t] = lie.columns;
-                    lie = Orientation {
-                        columns: [l, t, w.map(|x| -x)],
-                    };
+                    lie = lie.turned_on_board(Rotation::quarter_turns(0, 1));
                 }
                 for _ in 0..turns {
                     lie = lie.turned_left();

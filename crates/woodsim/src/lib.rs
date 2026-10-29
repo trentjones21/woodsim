@@ -19,8 +19,8 @@ mod wide;
 
 pub use angle::Angle;
 pub use assembly::{
-    Assembly, Contact, Extent, Fastener, Joint, Mating, Member, Motion, Rotation, Surface, outline,
-    surfaces,
+    Assembly, Contact, Extent, Fastener, Joint, Mating, Member, Motion, Rotation, Surface,
+    Unsteady, outline, surfaces,
 };
 pub use board::{Board, Piece, Run, SlotSize};
 pub use face::{Direction, Edge, Region, Vector};
