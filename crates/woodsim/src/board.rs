@@ -659,23 +659,27 @@ impl Board {
             .or_else(|| faces.iter().max_by(facing))
             .expect("a board has surfaces");
         // Square to the surface it came in through, as far as the slot goes into the wood:
-        // where it's deepest on the plane midway between its faces, as far as they're in the
-        // wood (a jointer's reach on past the fence), either as far as the blade reached, or
-        // where the slot meets the board's outside.
+        // where it's deepest on planes across it, between its faces as far as they're in the
+        // wood (a jointer's reach on past its fence, the wood under it only toward one face if a
+        // bevel takes the rest), either as far as the blade reached, or where the slot meets
+        // the board's outside.
         let into = entry.1.map(|c| -c);
         let along = |point: [f64; 3]| dot(point, into);
-        let middle = (near.max(least) + far.min(most)) / 2.0;
+        let (low, high) = (near.max(least), far.min(most));
+        const ACROSS: usize = 8;
+        let planes = (0..=ACROSS).map(|k| low + (high - low) * k as f64 / ACROSS as f64);
         let furthest = kerf.furthest(into);
-        let reached = self
-            .outside()
-            .filter_map(|(plane, at)| {
-                let (point, direction) = kerf.line(plane, at, middle)?;
-                let (first, last) = self.wood_along(point, direction)?;
-                let (from, to) = kerf.reached(point, direction)?;
-                let (from, to) = (from.max(first), to.min(last));
-                (from <= to).then(|| {
-                    let at = |s: f64| along([0, 1, 2].map(|k| point[k] + s * direction[k]));
-                    at(from).max(at(to))
+        let reached = planes
+            .flat_map(|across| {
+                self.outside().filter_map(move |(plane, at)| {
+                    let (point, direction) = kerf.line(plane, at, across)?;
+                    let (first, last) = self.wood_along(point, direction)?;
+                    let (from, to) = kerf.reached(point, direction)?;
+                    let (from, to) = (from.max(first), to.min(last));
+                    (from <= to).then(|| {
+                        let at = |s: f64| along([0, 1, 2].map(|k| point[k] + s * direction[k]));
+                        at(from).max(at(to))
+                    })
                 })
             })
             .chain(self.holds(furthest).then(|| along(furthest)))

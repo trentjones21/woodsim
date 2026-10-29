@@ -169,6 +169,23 @@ fn stopped_partway_it_leaves_a_step_curved_as_the_cutterhead() {
     assert_eq!((slot.width, slot.depth), (fraction(3, 4), fraction(1, 16)));
 }
 
+/// A 1x6 beveled 45° along an edge, jointed on what's left of that edge, the last pass stopped
+/// partway: copied from the game, where its face's highlight showed hairline gaps.
+const HALF_JOINTED: &str = include_str!("pasted/half-jointed.txt");
+
+#[test]
+fn a_step_left_on_a_beveled_edge_is_as_deep_as_the_pass_took() {
+    let Wood::GlueUp(glue_up) = Recipe::read(HALF_JOINTED).unwrap().wood else {
+        panic!("a glue-up of one");
+    };
+    let board = &glue_up.members()[0].board;
+    assert_eq!(board.bevels().len(), 1);
+    // The bevel leaves wood under only the top of the slot, which reaches across the board's
+    // whole thickness; the step's still 1/32" deep there.
+    let slot = board.slot(&board.kerfs()[0]);
+    assert_eq!(slot.depth, fraction(1, 32));
+}
+
 #[test]
 fn set_to_nothing_or_with_no_knife_showing_it_misses() {
     let board = one_by_six();

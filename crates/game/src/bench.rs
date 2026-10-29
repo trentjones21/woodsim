@@ -11,6 +11,7 @@ use bevy::{
         mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll, MouseScrollUnit},
     },
     light::NotShadowCaster,
+    math::DVec3,
     mesh::Indices,
     picking::{backend::HitData, pointer::PointerButton},
     prelude::*,
@@ -650,35 +651,54 @@ fn mark_surfaces(
 }
 
 /// A thin sheet over a surface, given as `woodsim::outline` gives it, in the board's mesh axes
-/// (`w`, `t`, `l` along x, y, z), standing just off the surface so it shows over the wood.
+/// (`w`, `t`, `l` along x, y, z), standing just off the surface so it shows over the wood. It
+/// stops short of the surface's own edges, but not of edges where one of its polygons meets
+/// another, and each polygon takes in the corners of the others its edges run through, so a
+/// surface cut into pieces around a slot is covered with no gaps between them, not even the
+/// pinholes the GPU leaves along an edge one triangle has a corner partway along.
 pub(crate) fn sheet(polygons: &[Vec<[woodsim::Length; 3]>]) -> Mesh {
     let mut positions: Vec<[f32; 3]> = Vec::new();
     let mut normals: Vec<[f32; 3]> = Vec::new();
     let mut indices: Vec<u32> = Vec::new();
-    for polygon in polygons {
-        let points: Vec<Vec3> = polygon
-            .iter()
-            .map(|&[l, w, t]| Vec3::new(w.as_meters_f32(), t.as_meters_f32(), l.as_meters_f32()))
-            .collect();
-        if points.len() < 3 {
+    // Corners in nanometers, to find where polygons meet before they're rounded to meters.
+    let corners: Vec<Vec<DVec3>> = polygons
+        .iter()
+        .map(|polygon| {
+            polygon
+                .iter()
+                .map(|p| DVec3::from_array(p.map(|x| x.as_nm() as f64)))
+                .collect()
+        })
+        .collect();
+    let meters = |p: DVec3| Vec3::new(p.y as f32, p.z as f32, p.x as f32) * 1e-9;
+    for (index, polygon) in corners.iter().enumerate() {
+        if polygon.len() < 3 {
             continue;
         }
         // The outline goes counterclockwise seen from outside, so this faces out, and the
         // inside is to the left of each edge.
-        let normal = (points[1] - points[0])
-            .cross(points[2] - points[0])
+        let normal = (meters(polygon[1]) - meters(polygon[0]))
+            .cross(meters(polygon[2]) - meters(polygon[0]))
             .normalize_or_zero();
+        let around = with_corners_along(&corners, index);
+        let points: Vec<Vec3> = around.iter().map(|&p| meters(p)).collect();
         let n = points.len();
+        // In from an edge of the surface, or not at all from one another polygon runs along.
+        let inward = |from: usize| {
+            let to = (from + 1) % n;
+            if meets_another(&corners, index, around[from], around[to]) {
+                return Vec3::ZERO;
+            }
+            normal.cross(points[to] - points[from]).normalize_or_zero()
+        };
         let first = positions.len() as u32;
         for (i, &point) in points.iter().enumerate() {
-            let inward = |edge: Vec3| normal.cross(edge).normalize_or_zero();
-            let before = inward(point - points[(i + n - 1) % n]);
-            let after = inward(points[(i + 1) % n] - point);
+            let (before, after) = (inward((i + n - 1) % n), inward(i));
             let inset = (before + after) * SHEET_INSET / (1.0 + before.dot(after)).max(0.1);
             positions.push((point + inset + normal * SHEET_LIFT).to_array());
             normals.push(normal.to_array());
         }
-        for k in 1..points.len() as u32 - 1 {
+        for k in 1..n as u32 - 1 {
             indices.extend([first, first + k, first + k + 1]);
         }
     }
@@ -689,6 +709,62 @@ pub(crate) fn sheet(polygons: &[Vec<[woodsim::Length; 3]>]) -> Mesh {
     .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
     .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
     .with_inserted_indices(Indices::U32(indices))
+}
+
+/// Corners nearer than this to a line, in nanometers, are on it, as rounding leaves them.
+const ON_LINE: f64 = 4.0;
+
+/// The corners of `corners[polygon]`, with every other polygon's corner that's partway along one
+/// of its edges put in there, in order along it.
+fn with_corners_along(corners: &[Vec<DVec3>], polygon: usize) -> Vec<DVec3> {
+    let own = &corners[polygon];
+    let mut around = Vec::new();
+    for (k, &a) in own.iter().enumerate() {
+        let b = own[(k + 1) % own.len()];
+        around.push(a);
+        let length = a.distance(b);
+        if length < ON_LINE {
+            continue;
+        }
+        let along = (b - a) / length;
+        let mut between: Vec<(f64, DVec3)> = corners
+            .iter()
+            .enumerate()
+            .filter(|&(other, _)| other != polygon)
+            .flat_map(|(_, others)| others.iter().copied())
+            .filter_map(|p| {
+                let s = (p - a).dot(along);
+                let off = (p - a).cross(along).length();
+                (off < ON_LINE && s > ON_LINE && s < length - ON_LINE).then_some((s, p))
+            })
+            .collect();
+        between.sort_by(|x, y| x.0.total_cmp(&y.0));
+        between.dedup_by(|x, y| (x.0 - y.0).abs() < ON_LINE);
+        around.extend(between.into_iter().map(|(_, p)| p));
+    }
+    around
+}
+
+/// Whether the edge from `a` to `b` of `corners[polygon]` runs along an edge of another of the
+/// polygons for some of its length: inside the surface they cover together, rather than one of
+/// its edges.
+fn meets_another(corners: &[Vec<DVec3>], polygon: usize, a: DVec3, b: DVec3) -> bool {
+    let length = a.distance(b);
+    if length < ON_LINE {
+        return false;
+    }
+    let along = (b - a) / length;
+    let off = |p: DVec3| (p - a).cross(along).length();
+    corners.iter().enumerate().any(|(other, around)| {
+        other != polygon
+            && (0..around.len()).any(|k| {
+                let (c, d) = (around[k], around[(k + 1) % around.len()]);
+                let (s, t) = ((c - a).dot(along), (d - a).dot(along));
+                off(c) < ON_LINE
+                    && off(d) < ON_LINE
+                    && s.max(t).min(length) - s.min(t).max(0.0) > ON_LINE
+            })
+    })
 }
 
 /// How many parts and joints are on the bench: "3 parts, 2 joints".
@@ -732,6 +808,66 @@ mod tests {
         let slides = arrow_slides([Vec3::NEG_X, Vec3::NEG_Z], right, Vec3::Y);
         assert_eq!(slides[1], (1, true));
         assert_eq!(slides[2], (0, false));
+    }
+
+    /// A 1x6 jointed on its beveled edge, the last pass stopped partway: its top face is cut
+    /// into a few polygons around the step the cutterhead's curve left.
+    const HALF_JOINTED: &str = include_str!("../../woodsim/tests/pasted/half-jointed.txt");
+
+    /// How much of the plane a sheet's triangles cover, in square meters.
+    fn covered(mesh: &Mesh) -> f32 {
+        let Some(bevy::mesh::VertexAttributeValues::Float32x3(positions)) =
+            mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+        else {
+            panic!("expected positions");
+        };
+        let Some(Indices::U32(indices)) = mesh.indices() else {
+            panic!("expected indices");
+        };
+        indices
+            .chunks(3)
+            .map(|k| {
+                let [a, b, c] = [k[0], k[1], k[2]].map(|i| Vec3::from_array(positions[i as usize]));
+                (b - a).cross(c - a).length() / 2.0
+            })
+            .sum()
+    }
+
+    #[test]
+    fn a_sheet_over_a_surface_cut_into_pieces_leaves_no_gaps_between_them() {
+        let woodsim::Wood::GlueUp(glue_up) = woodsim::Recipe::read(HALF_JOINTED).unwrap().wood
+        else {
+            panic!("a glue-up of one");
+        };
+        let board = &glue_up.members()[0].board;
+        let face = exposed(board, Surface::Top);
+        assert!(face.len() > 1, "the step cuts the face into pieces");
+        let area: f32 = face
+            .iter()
+            .map(|polygon| {
+                let points: Vec<Vec3> = polygon
+                    .iter()
+                    .map(|p| Vec3::from_array(p.map(|x| x.as_meters_f32())))
+                    .collect();
+                (1..points.len() - 1)
+                    .map(|k| {
+                        (points[k] - points[0])
+                            .cross(points[k + 1] - points[0])
+                            .length()
+                            / 2.0
+                    })
+                    .sum::<f32>()
+            })
+            .sum();
+        // It's in from the face's edges all the way around, and nowhere else: what it doesn't
+        // cover is no more than a strip that wide around the outside.
+        let around = 2.0 * (board.length() + board.width()).as_meters_f32();
+        let uncovered = area - covered(&sheet(&face));
+        assert!(uncovered > 0.0, "{uncovered}");
+        assert!(
+            uncovered < 1.05 * around * SHEET_INSET,
+            "{uncovered} m² uncovered"
+        );
     }
 
     #[test]
