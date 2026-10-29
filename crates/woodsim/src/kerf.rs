@@ -97,6 +97,12 @@ pub(crate) fn unit(axis: Axis) -> [f64; 3] {
     }
 }
 
+/// Wood a blade leaves bridging its slot thinner than this, in nanometers, is sawdust: a
+/// thousandth of an inch. Nothing that thin holds the pieces either side together, and a real
+/// blade's teeth tear it out, so a cut whose blade reached all but that much of the wood
+/// between its faces cuts through.
+const SAWDUST: f64 = 25_400.0;
+
 /// Points on each round end of a slot, when it's outlined in its plane.
 const ARC_STEPS: usize = 32;
 
@@ -524,7 +530,8 @@ impl Kerf {
 
     /// Where the slot goes all the way through `region` of a board `thickness` thick, as the
     /// planes around it: the wood inside all of them is gone. It goes through between its faces
-    /// wherever the blade reached all the wood between them, up its plane.
+    /// wherever the blade reached all the wood between them, up its plane, or all but a sliver
+    /// thinner than `SAWDUST`, which goes with it.
     pub(crate) fn hole(&self, region: &Region, thickness: Length) -> Option<Vec<Edge>> {
         if self.parallel_to_faces() && !region.leans() {
             // Only one wider than the board is thick takes all of it.
@@ -555,9 +562,10 @@ impl Kerf {
             .map(|corner| self.in_plane(corner.position()).1.abs())
             .fold(0.0, f64::max);
         let radius = self.radius.as_nm() as f64;
-        if reach >= radius {
+        if reach >= radius + SAWDUST {
             return None;
         }
+        let reach = reach.min(radius);
         let half = ((radius * radius - reach * reach).sqrt() * self.along.scale()).floor() - 1.0;
         let half = Length::from_nm(half.max(0.0) as i64);
         let [end, start] = ends((self.start - half, self.end + half));

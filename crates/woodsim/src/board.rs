@@ -868,6 +868,29 @@ mod tests {
     use super::*;
     use crate::{Blade, kerf::Across};
 
+    /// Wood the user copied out of the game, where the cut misbehaved: a beveled 1x8 offcut
+    /// with a 1x3 glued to its 15° bevel, cut in half with the blade tilted 15° and all the way
+    /// up. The 1x3's top corner sat 2.8 microns beyond the blade's reach.
+    const MICRONS_BRIDGE: &str = include_str!("../tests/pasted/microns-bridge.txt");
+
+    #[test]
+    fn microns_of_wood_left_bridging_a_slot_are_sawdust_and_it_comes_apart() {
+        let crate::Wood::GlueUp(glue_up) = crate::Recipe::read(MICRONS_BRIDGE).unwrap().wood else {
+            panic!("a glue-up");
+        };
+        // The 1x3, with the slot the pass cut in it.
+        let one_by_three = &glue_up.members()[2].board;
+        assert_eq!(one_by_three.kerfs().len(), 1);
+        let pieces = one_by_three.pieces();
+        assert_eq!(pieces.len(), 2, "{pieces:?}");
+        // Each a little under 12" long, the kerf and the sliver of sawdust between them.
+        let volume: f64 = pieces.iter().map(|piece| piece.board.volume()).sum();
+        let kerf = one_by_three.kerfs()[0];
+        let lost = (one_by_three.volume() - volume) / (kerf.width().as_nm() as f64);
+        let face = 2.5 * 0.75 * 25_400_000f64.powi(2);
+        assert!(lost > 0.99 * face && lost < 1.3 * face, "{lost} vs {face}");
+    }
+
     fn inches(n: i64) -> Length {
         Length::from_inches(n)
     }
