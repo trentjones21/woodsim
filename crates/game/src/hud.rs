@@ -64,8 +64,17 @@ impl OnHud {
 
 pub struct HudPlugin;
 
+/// The game's font, Nunito, under the SIL Open Font License (`fonts/OFL.txt`): round and
+/// friendly, easy to read small, with a degree sign.
+const FONT: &[u8] = include_bytes!("../fonts/Nunito.ttf");
+
 impl Plugin for HudPlugin {
     fn build(&self, app: &mut App) {
+        // In place of Bevy's own font, so every piece of text is set in it.
+        app.world_mut()
+            .resource_mut::<Assets<Font>>()
+            .insert(AssetId::default(), Font::from_bytes(FONT.to_vec()))
+            .expect("the default font's place");
         app.add_plugins(FrameTimeDiagnosticsPlugin::default())
             .init_resource::<Icons>()
             .init_resource::<Showing>()
@@ -347,7 +356,7 @@ impl Shop<'_> {
             Push => "Hold to push the board through".to_string(),
             BringBack => "Bring the board back around".to_string(),
             Stop(s) => step(s, "Stop in", "Stop out", "1/16\"", "1\""),
-            Miter(s) => step(s, "Swing left", "Swing right", "1 deg", "to the next stop"),
+            Miter(s) => step(s, "Swing left", "Swing right", "1°", "to the next stop"),
             Depth(s) => step(s, "Depth stop down", "Depth stop up", "1/16\"", "1/4\""),
             Lower => "Hold to lower the blade".to_string(),
             Use(Fastener::Glue) => "Glue".to_string(),
@@ -493,7 +502,7 @@ fn setting_help(setting: Setting) -> Option<&'static str> {
         }
         Setting::Blade => "Up/Down arrows: raise or lower the blade 1/16\" (Shift: 1/4\")",
         Setting::Stop => "Left/Right arrows: move the stop 1/16\" (Shift: 1\")",
-        Setting::Miter => "[ and ]: swing the miter 1 deg (Shift: to the next stop)",
+        Setting::Miter => "[ and ]: swing the miter 1° (Shift: to the next stop)",
         Setting::Depth => {
             "Up/Down arrows: raise or lower the depth stop 1/16\" (Shift: 1/4\"); below the \
              table, it's off"
@@ -544,10 +553,25 @@ fn help(shop: &Shop) -> String {
 }
 
 fn text(content: impl Into<String>, size: f32, color: Color) -> impl Bundle {
+    weighted(content, size, color, FontWeight::NORMAL)
+}
+
+/// Text set bold, for what's read at a glance: a setting, a button's name or key.
+fn bold(content: impl Into<String>, size: f32, color: Color) -> impl Bundle {
+    weighted(content, size, color, FontWeight::BOLD)
+}
+
+fn weighted(
+    content: impl Into<String>,
+    size: f32,
+    color: Color,
+    weight: FontWeight,
+) -> impl Bundle {
     (
         Text::new(content),
         TextFont {
             font_size: FontSize::Px(size),
+            weight,
             ..default()
         },
         TextColor(color),
@@ -630,7 +654,7 @@ fn spawn_hud(mut commands: Commands, icons: Res<Icons>) {
                 ..default()
             }),
             PanelOf(Readout::Hand),
-            children![(text("", 17.0, ACCENT), Readout::Hand)],
+            children![(bold("", 17.0, ACCENT), Readout::Hand)],
         ));
     let top_right = commands
         .spawn(strip(Node {
@@ -794,7 +818,7 @@ fn spawn_button(
     ));
     if tab {
         commands.spawn((
-            text("", 16.0, INK),
+            bold("", 17.0, INK),
             ControlIcon,
             Pickable::IGNORE,
             ChildOf(button),
@@ -815,7 +839,7 @@ fn spawn_button(
         Badge,
         Pickable::IGNORE,
         ChildOf(button),
-        children![(text("", 11.0, Color::WHITE), Pickable::IGNORE)],
+        children![(bold("", 11.0, Color::WHITE), Pickable::IGNORE)],
     ));
     // Above or below the button, centered on it, or lined up with its side where it's near
     // the edge of the screen.
@@ -1032,14 +1056,16 @@ fn build_for_view(
         commands.spawn((
             Node {
                 flex_direction: FlexDirection::Column,
-                min_width: px(if across.is_some() { 118.0 } else { 0.0 }),
+                // Wide enough for the longest reading, "22.5° right", so the buttons don't
+                // shift as it changes.
+                min_width: px(if across.is_some() { 150.0 } else { 0.0 }),
                 align_items: AlignItems::Center,
                 ..default()
             },
             ChildOf(card),
             children![
-                (text("", 13.0, INK.with_alpha(0.65)), SettingName(setting)),
-                (text("", 24.0, ACCENT), Readout::Setting(setting)),
+                (bold("", 13.0, INK.with_alpha(0.6)), SettingName(setting)),
+                (bold("", 25.0, ACCENT), Readout::Setting(setting)),
             ],
         ));
         if across.is_some() {

@@ -455,7 +455,7 @@ fn notes(board: &Board) -> String {
         .strip_prefix(&describe_size(board))
         .unwrap_or(&described)
         .trim_start_matches(", ")
-        .replace(" deg", "&deg;")
+        .to_string()
 }
 
 /// What a surface is called in a plan's steps: a face, an edge, an end, or a miter.
@@ -1362,7 +1362,7 @@ mod tests {
         let page = Plan::of(ring(4, Length::from_inches(10))).page();
         assert!(page.starts_with("<!doctype html>"));
         assert!(page.contains("<title>Plans for a glue-up of 4 parts</title>"));
-        assert!(page.contains("mitered 45&deg; at both ends"), "{page}");
+        assert!(page.contains("mitered 45° at both ends"), "{page}");
         assert_eq!(page.matches("<figure class=\"part\">").count(), 1);
         assert_eq!(page.matches("<h3>Step").count(), 3);
         // One drawing of it all, one of the part, one for each step.

@@ -16,7 +16,7 @@ use woodsim::{Angle, CutError, Length, MiterSaw, Orientation};
 
 use crate::{
     hand::{Workpiece, describe_glue_up},
-    shop::{Block, Part, Placed, SawBoards, degrees, describe_board, describe_kerf, inches},
+    shop::{Block, Part, Placed, SawBoards, describe_board, describe_kerf, inches},
     work::{self, Parted, Passed},
 };
 
@@ -470,7 +470,7 @@ impl MiterSawStation {
         }
         let angle = match self.saw.miter.abs() {
             square if square == Angle::ZERO => String::new(),
-            miter => format!(" at {}", degrees(miter)),
+            miter => format!(" at {miter}"),
         };
         format!(
             " The blade reaches only {widest} across{angle}, so it can't cut all the way \
@@ -1096,7 +1096,7 @@ mod tests {
         assert!(
             station
                 .status()
-                .contains("The piece is mitered 30 deg at one end."),
+                .contains("The piece is mitered 30° at one end."),
             "{}",
             station.status()
         );
@@ -1107,7 +1107,7 @@ mod tests {
         let mut station = loaded();
         station.set_miter(Angle::from_degrees(45));
         assert!(station.status().ends_with(
-            "The blade reaches only 5-19/64\" across at 45 deg, so it can't cut all the way \
+            "The blade reaches only 5-19/64\" across at 45°, so it can't cut all the way \
              through this 6\" board."
         ));
 

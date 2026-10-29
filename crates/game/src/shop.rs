@@ -612,14 +612,9 @@ pub fn describe_cut(verb: &str, cut: &Cut) -> String {
 pub fn describe_miter(miter: Angle) -> String {
     match miter.hundredths().signum() {
         0 => "square".to_string(),
-        1 => format!("{} right", degrees(miter)),
-        _ => format!("{} left", degrees(miter.abs())),
+        1 => format!("{miter} right"),
+        _ => format!("{} left", miter.abs()),
     }
-}
-
-/// An angle for the readout, "45 deg": the game's font has no degree sign.
-pub fn degrees(angle: Angle) -> String {
-    angle.to_string().replace('°', " deg")
 }
 
 /// A length as a tape measure reads it, to the nearest 64th.
@@ -647,13 +642,13 @@ pub fn describe_size(board: &Board) -> String {
 pub fn describe_miters(board: &Board) -> Option<String> {
     match board.miters().as_slice() {
         [] => None,
-        [one] => Some(format!("mitered {} at one end", degrees(*one))),
-        [a, b] if a == b => Some(format!("mitered {} at both ends", degrees(*a))),
+        [one] => Some(format!("mitered {one} at one end")),
+        [a, b] if a == b => Some(format!("mitered {a} at both ends")),
         angles => Some(format!(
             "mitered {}",
             angles
                 .iter()
-                .map(|&angle| degrees(angle))
+                .map(|angle| angle.to_string())
                 .collect::<Vec<_>>()
                 .join(" and ")
         )),
@@ -777,10 +772,7 @@ fn describe_slots(board: &Board, kerf: &Kerf, count: usize) -> String {
     let described = if slant == Angle::ZERO {
         format!("{a} {width}-wide, {depth}-deep {kind}")
     } else {
-        format!(
-            "{a} {width}-wide, {depth}-deep {kind} at {},",
-            degrees(slant)
-        )
+        format!("{a} {width}-wide, {depth}-deep {kind} at {},", slant)
     };
     // How far it runs on the face the blade came through.
     let face = if kerf.from_below() {
