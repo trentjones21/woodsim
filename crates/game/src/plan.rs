@@ -1903,6 +1903,44 @@ mod tests {
     }
 
     #[test]
+    fn a_cut_resting_on_a_bevel_says_what_it_rested_on() {
+        let saw = |fence: Length, tilt: i32| woodsim::TableSaw {
+            blade: woodsim::Blade {
+                diameter: Length::from_inches(10),
+                kerf: woodsim::Blade::FULL_KERF,
+            },
+            fence,
+            height: Length::from_inches(3),
+            miter_gauge: None,
+            gauge_angle: Angle::ZERO,
+            tilt: Angle::from_degrees(tilt),
+        };
+        let stock = Board::new(
+            Length::from_inches(24),
+            Length::from_inch_fraction(5, 2),
+            Length::from_inch_fraction(3, 4),
+        );
+        let Ok(Pass::Cut(cut)) =
+            saw(Length::from_inch_fraction(3, 2), 30).rip(&stock, Orientation::default())
+        else {
+            panic!("expected a beveled rip");
+        };
+        let beveled = cut.piece.board;
+        let bevel = Surface::Side(beveled.bevels()[0].0);
+        let lie = Assembly::of(beveled.clone())
+            .resting((0, bevel), (0, Surface::Bottom))
+            .expect("it rests on its bevel");
+        let Ok(Pass::Cut(cut)) = saw(Length::from_inches(1), 0).rip(&beveled, lie) else {
+            panic!("expected it ripped resting on its bevel");
+        };
+        let page = Plan::of(Assembly::of(cut.piece.board)).page();
+        assert!(
+            page.contains("the board resting on its beveled edge, its bottom face to the fence"),
+            "{page}"
+        );
+    }
+
+    #[test]
     fn a_single_part_has_no_steps() {
         let board = Board::new(
             Length::from_inches(24),

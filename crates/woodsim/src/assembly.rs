@@ -413,6 +413,43 @@ impl Assembly {
 
     /// Every place two members' surfaces meet or nearly do, facing each other, with how far
     /// apart they are.
+    /// The way a member's surface faces, out of its wood, in the assembly's axes, as a unit
+    /// vector: `None` if the member or the surface isn't there.
+    pub fn facing(&self, (member, surface): (usize, Surface)) -> Option<[f64; 3]> {
+        Some(self.members.get(member)?.patch(surface)?.normal)
+    }
+
+    /// What it rests on, lying on a saw as `lie` says, and what faces the fence: the surface
+    /// facing straight down that's lowest, and the one facing most nearly toward the fence.
+    pub fn rests_on(&self, lie: Orientation) -> Option<((usize, Surface), (usize, Surface))> {
+        let rotation = lie.rotation();
+        let all: Vec<((usize, Surface), [f64; 3], f64)> = self
+            .members
+            .iter()
+            .enumerate()
+            .flat_map(|(index, member)| {
+                surfaces(&member.board)
+                    .into_iter()
+                    .filter_map(move |surface| {
+                        let patch = member.patch(surface)?;
+                        let low = patch
+                            .corners
+                            .iter()
+                            .map(|&p| rotation.apply(p)[2])
+                            .fold(f64::MAX, f64::min);
+                        Some(((index, surface), rotation.apply(patch.normal), low))
+                    })
+            })
+            .collect();
+        let down = all
+            .iter()
+            .filter(|(_, normal, _)| normal[2] < -1.0 + 1e-9)
+            .min_by(|a, b| a.2.total_cmp(&b.2))?
+            .0;
+        let fence = all.iter().max_by(|a, b| a.1[1].total_cmp(&b.1[1]))?.0;
+        Some((down, fence))
+    }
+
     /// How it lies on a saw resting on `down`, flat on the table, and turned so `against`
     /// faces the fence (or the miter gauge's face, or the miter saw's): as squarely as it
     /// can, so a surface square to `down` lies flat against the fence, and one that leans,

@@ -5,10 +5,13 @@
 //! board's length, width, and thickness, and an `Orientation` lays them on the saw. It can't
 //! stand on edge.
 
-use bevy::prelude::*;
+use bevy::{
+    math::{DQuat, DVec2, DVec3},
+    prelude::*,
+};
 use woodsim::{
-    Assembly, Axis, Cut, CutError, GlueUpCut, GlueUpPass, Length, MiterSaw, Motion, Orientation,
-    Pass, Surface, TableSaw, outline,
+    Assembly, Cut, CutError, GlueUpCut, GlueUpPass, Length, MiterSaw, Motion, Orientation, Pass,
+    Surface, TableSaw, Unsteady, outline, surfaces,
 };
 
 use crate::{
@@ -85,20 +88,188 @@ pub fn chop(
     }
 }
 
-/// How far `work` reaches along one of its own axes: a board's length, width, or thickness,
-/// or a glue-up's `x`, `y`, or `z`.
-pub fn extent(work: &Workpiece, axis: Axis) -> Length {
-    match work {
-        Workpiece::Board(board) => axis.of(board),
-        Workpiece::GlueUp(glue_up) => {
-            let k = match axis {
-                Axis::Length => 0,
-                Axis::Width => 1,
-                Axis::Thickness => 2,
-            };
-            let (least, most) = glue_up.bounds()[k];
-            most - least
+/// Choosing what something on a saw rests on: the surface to put down on the table, then the
+/// one to go against the fence, each picked with a click.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Rest {
+    /// What the next click picks, while choosing.
+    pub choosing: Option<Choosing>,
+    /// Why the last surface picked wouldn't do.
+    pub refused: Option<Unsteady>,
+}
+
+/// What the next click picks.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Choosing {
+    /// The surface to rest on, flat on the table.
+    Down,
+    /// The surface to go against the fence, resting on this one (a board's place in what's on
+    /// the saw, and its surface).
+    Fence((usize, Surface)),
+}
+
+impl Rest {
+    /// Starts choosing, or stops.
+    pub fn toggle(&mut self) {
+        self.choosing = match self.choosing {
+            Some(_) => None,
+            None => Some(Choosing::Down),
+        };
+        self.refused = None;
+    }
+
+    /// Picks `surface` of `work`'s `member` (0 for a board), which lies as `lie` says: how it
+    /// lies now, if that picks how it rests. Picked to rest on, it turns whichever surface it
+    /// can to the fence that leaves it most nearly as it lay; picked for the fence, that one.
+    pub fn pick(
+        &mut self,
+        work: &Workpiece,
+        lie: Orientation,
+        picked: (usize, Surface),
+    ) -> Option<Orientation> {
+        let resting = match self.choosing? {
+            Choosing::Down => rest_on(work, picked, lie),
+            Choosing::Fence(down) => glue_up_of(work).resting(down, picked),
+        };
+        match resting {
+            Ok(rest) => {
+                self.choosing = match self.choosing {
+                    Some(Choosing::Down) => Some(Choosing::Fence(picked)),
+                    _ => None,
+                };
+                self.refused = None;
+                Some(rest)
+            }
+            Err(why) => {
+                self.refused = Some(why);
+                None
+            }
         }
+    }
+
+    /// The surface it's resting on while the one for the fence is chosen.
+    pub fn down(&self) -> Option<(usize, Surface)> {
+        match self.choosing {
+            Some(Choosing::Fence(down)) => Some(down),
+            _ => None,
+        }
+    }
+
+    /// What to click next, or why the last surface picked wouldn't do, for the status.
+    pub fn status(&self) -> Option<String> {
+        let refused = self.refused.map(|why| match why {
+            Unsteady::Rocks => "It won't sit on that: other wood reaches past it. ",
+            Unsteady::FacesUp => "That faces straight up or down, not toward the fence. ",
+            Unsteady::Blocked => "Other wood reaches past that, toward the fence. ",
+            Unsteady::NoSurface => "",
+        });
+        let next = match self.choosing? {
+            Choosing::Down => "Click the surface to rest it on, flat on the table.",
+            Choosing::Fence(_) => {
+                "Click the surface to go against the fence, or carry on with it as it is."
+            }
+        };
+        Some(format!("{}{next}", refused.unwrap_or_default()))
+    }
+}
+
+/// `work` as a glue-up: a board, as a glue-up of one.
+fn glue_up_of(work: &Workpiece) -> Assembly {
+    match work {
+        Workpiece::Board(board) => Assembly::of(board.clone()),
+        Workpiece::GlueUp(glue_up) => glue_up.clone(),
+    }
+}
+
+/// How `work`, lying as `lie` says, lies resting on `down`: tipped over onto it the shortest
+/// way, as you'd tip it by hand (over about the table's length, like flipping, if it faces
+/// straight up), then turned the least it can be to bring one of its surfaces to the fence.
+fn rest_on(
+    work: &Workpiece,
+    down: (usize, Surface),
+    lie: Orientation,
+) -> Result<Orientation, Unsteady> {
+    let glue_up = glue_up_of(work);
+    let on_saw = |surface| Some(lie.rotation().apply(glue_up.facing(surface)?));
+    let facing_down = on_saw(down).ok_or(Unsteady::NoSurface)?;
+    // Tipped about the level line square to how it faces now, to face straight down.
+    let below = Vec3::NEG_Y.as_dvec3();
+    let now = DVec3::new(facing_down[1], facing_down[2], facing_down[0]);
+    let axis = now.cross(below);
+    let axis = if axis.length() < 1e-9 {
+        DVec3::Z
+    } else {
+        axis.normalize()
+    };
+    let tip = DQuat::from_axis_angle(axis, now.angle_between(below));
+    let mut refused = Unsteady::NoSurface;
+    let mut best: Option<(f64, Orientation)> = None;
+    for (index, member) in glue_up.members().iter().enumerate() {
+        for surface in surfaces(&member.board) {
+            match glue_up.resting(down, (index, surface)) {
+                Ok(rest) => {
+                    // How far it turns, once tipped, to face the fence.
+                    let Some([along, across, up]) = on_saw((index, surface)) else {
+                        continue;
+                    };
+                    let tipped = tip * DVec3::new(across, up, along);
+                    let turn = DVec2::new(tipped.x, tipped.z).angle_to(DVec2::X).abs();
+                    if best.is_none_or(|(least, _)| turn < least) {
+                        best = Some((turn, rest));
+                    }
+                }
+                // Rocking on it says the most: no surface for the fence helps that.
+                Err(why) if refused != Unsteady::Rocks => refused = why,
+                Err(_) => {}
+            }
+        }
+    }
+    best.map(|(_, rest)| rest).ok_or(refused)
+}
+
+/// How far something reaches on a saw, as it lies there.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Reach {
+    /// Along the table.
+    pub along: Length,
+    /// Across it, toward the fence.
+    pub across: Length,
+    pub up: Length,
+}
+
+/// How far `work` reaches on a saw it lies on as `lie` says: the box its wood fills, turned as
+/// it lies, which is the box the saw measures its settings from. Lying a square way, its
+/// length, width, and thickness, or a glue-up's, whichever lies each way.
+pub fn reach(work: &Workpiece, lie: Orientation) -> Reach {
+    let rotation = lie.rotation();
+    let nm = |length: Length| length.as_nm() as f64;
+    let corners: Vec<[f64; 3]> = match work {
+        Workpiece::Board(board) => board.corners().into_iter().map(|p| p.map(nm)).collect(),
+        Workpiece::GlueUp(glue_up) => glue_up
+            .members()
+            .iter()
+            .flat_map(|member| {
+                member
+                    .board
+                    .corners()
+                    .into_iter()
+                    .map(|[l, w, t]| member.point(l, w, t).map(nm))
+            })
+            .collect(),
+    };
+    let size = |k: usize| {
+        let (low, high) = corners
+            .iter()
+            .map(|&p| rotation.apply(p)[k])
+            .fold((f64::MAX, f64::MIN), |(low, high), x| {
+                (low.min(x), high.max(x))
+            });
+        Length::from_nm((high - low).round() as i64)
+    };
+    Reach {
+        along: size(0),
+        across: size(1),
+        up: size(2),
     }
 }
 

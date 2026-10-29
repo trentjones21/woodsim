@@ -11,6 +11,7 @@ use woodsim::{
 
 use crate::{
     inventory::LUMBER,
+    join::name,
     shop::{describe_kerf, describe_miter, describe_size, measured},
 };
 
@@ -414,10 +415,12 @@ impl Cutting {
     }
 }
 
-/// The saw and how it's set for a pass, the way you'd set it up.
-fn settings(tool: Tool) -> String {
+/// The saw and how it's set for a pass, and how the wood lies on it, the way you'd set it up.
+fn settings(step: &CutStep) -> String {
+    let tool = step.operation.tool;
+    let lying = lying(step);
     match tool {
-        Tool::TableSaw { saw, lie, .. } => {
+        Tool::TableSaw { saw, .. } => {
             let guide = match saw.miter_gauge {
                 Some(stop) if saw.gauge_angle != woodsim::Angle::ZERO => format!(
                     "miter gauge at {}, stop at {}",
@@ -427,26 +430,21 @@ fn settings(tool: Tool) -> String {
                 Some(stop) => format!("miter gauge, stop at {}", measured(stop)),
                 None => format!("rip fence at {}", measured(saw.fence)),
             };
-            let edge = match lie {
-                Lie::Board(lie) if lie.on_edge() => ", the board on edge",
-                Lie::Board(lie) if lie.on_end() => ", the board on end",
-                _ => "",
-            };
             let tilt = if saw.tilt == woodsim::Angle::ZERO {
                 String::new()
             } else {
                 format!(" and tilted {}", saw.tilt)
             };
             format!(
-                "Table saw, {guide}, blade {} high{tilt}{edge}",
+                "Table saw, {guide}, blade {} high{tilt}{lying}",
                 measured(saw.height)
             )
         }
         Tool::MiterSaw {
             saw,
-            lie,
             length,
             bottom,
+            ..
         } => {
             let angle = match describe_miter(saw.miter).as_str() {
                 "square" => ", square".to_string(),
@@ -457,16 +455,53 @@ fn settings(tool: Tool) -> String {
             } else {
                 String::new()
             };
-            let edge = match lie {
-                Lie::Board(lie) if lie.on_edge() => ", the board on edge",
-                Lie::Board(lie) if lie.on_end() => ", the board on end",
-                _ => "",
-            };
             format!(
-                "Miter saw{angle}, stop at {}{depth}{edge}",
+                "Miter saw{angle}, stop at {}{depth}{lying}",
                 measured(length)
             )
         }
+    }
+}
+
+/// How the wood lay on the saw, if not flat the way it came: ", the board on edge", or, rested
+/// on a surface at an angle, ", the board resting on its beveled edge, its bottom face to the
+/// fence".
+fn lying(step: &CutStep) -> String {
+    let (lie, glue_up) = match step.operation.tool {
+        Tool::TableSaw { lie, .. } | Tool::MiterSaw { lie, .. } => match lie {
+            Lie::Board(lie) if lie.is_square() && lie.on_edge() => {
+                return ", the board on edge".to_string();
+            }
+            Lie::Board(lie) if lie.is_square() && lie.on_end() => {
+                return ", the board on end".to_string();
+            }
+            Lie::Board(lie) if lie.is_square() => return String::new(),
+            Lie::Board(lie) => (lie, false),
+            Lie::GlueUp(rotation) => {
+                let lie = Orientation::from_rotation(rotation);
+                if lie.is_square() {
+                    return String::new();
+                }
+                (lie, true)
+            }
+        },
+    };
+    // What it rested on, from the wood it cut.
+    let wood = match glue_up {
+        false => step
+            .inputs
+            .first()
+            .map(|board| Assembly::of(board.replay())),
+        true => None,
+    };
+    match wood.as_ref().and_then(|wood| wood.rests_on(lie)) {
+        Some(((_, down), (_, fence))) => format!(
+            ", the board resting on its {}, its {} to the fence",
+            name(down),
+            name(fence)
+        ),
+        None if glue_up => ", the glue-up resting at an angle".to_string(),
+        None => ", the board resting at an angle".to_string(),
     }
 }
 
@@ -482,18 +517,17 @@ impl Say<'_> {
     /// One cut: "Miter saw at 45° right, stop at 4": Cut A1 off the rest of the 3/4" strip
     /// from step 2. Keep the rest of the 3/4" strip for step 4."
     fn cut(&self, cut: usize) -> String {
-        let tool = self.cutting.cuts[cut].operation.tool;
         let what = self.what(cut);
         let mut words = match self.turn(cut, &what) {
             Some(turn) => format!(
                 "{}: {}, then {}.",
-                settings(tool),
+                settings(&self.cutting.cuts[cut]),
                 capital(&turn),
                 self.action(cut, "it", false)
             ),
             None => format!(
                 "{}: {}.",
-                settings(tool),
+                settings(&self.cutting.cuts[cut]),
                 capital(&self.action(cut, &what, false))
             ),
         };
@@ -514,7 +548,7 @@ impl Say<'_> {
         };
         let mut words = format!(
             "{}: {} {} {what} off {}.",
-            settings(tool),
+            settings(&self.cutting.cuts[first]),
             verb(tool),
             count(cuts.len()),
             self.what(first)
@@ -638,12 +672,15 @@ impl Say<'_> {
             join(&parts)
         );
         for &cut in first {
-            let tool = self.cutting.cuts[cut].operation.tool;
             let line = match self.turn(cut, "it") {
                 Some(turn) => format!("{}, then {}", capital(&turn), self.action(cut, "it", true)),
                 None => capital(&self.action(cut, "it", true)),
             };
-            let _ = write!(html, "<li>{}: {line}.</li>", settings(tool));
+            let _ = write!(
+                html,
+                "<li>{}: {line}.</li>",
+                settings(&self.cutting.cuts[cut])
+            );
         }
         html.push_str("</ol>");
         html
@@ -752,7 +789,8 @@ impl Say<'_> {
             (Tool::MiterSaw { .. }, Tool::MiterSaw { .. })
                 | (Tool::TableSaw { .. }, Tool::TableSaw { .. })
         );
-        if !same_saw || was == now {
+        // Resting at an angle, the saw's settings say how it lies.
+        if !same_saw || was == now || !was.is_square() || !now.is_square() {
             return None;
         }
         let mut moves = Vec::new();

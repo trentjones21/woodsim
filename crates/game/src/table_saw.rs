@@ -10,8 +10,9 @@ use crate::{
     feed::TableSawStation,
     hand::Hand,
     meshes::{Grain, board_mesh, lumber_mesh, rounded_box},
+    rest,
     shop::{
-        Block, Part, SawPart, Shape, ShopAssets, ShopView, Stations, inches, place_parts,
+        Block, Part, SawPart, Shape, ShopAssets, ShopView, Slot, Stations, inches, place_parts,
         pointer_on_plane, rounded_block, set_material_on, snap, snap_to_sixteenth, station_part,
     },
 };
@@ -94,7 +95,7 @@ struct Fence {
 }
 
 #[derive(Component)]
-struct AtTableSaw;
+pub(crate) struct AtTableSaw;
 
 /// The miter gauge: it rides with the back of the board, and shows only while it's in use.
 #[derive(Component)]
@@ -608,6 +609,7 @@ fn turn_board(actions: Res<Actions>, mut station: ResMut<TableSawStation>) {
             Action::TurnRight => station.turn_right(),
             Action::Flip => station.flip(),
             Action::StandUp => station.tip(),
+            Action::Rest => station.choose_rest(),
             _ => continue,
         };
     }
@@ -617,7 +619,7 @@ fn turn_board(actions: Res<Actions>, mut station: ResMut<TableSawStation>) {
 /// the saw's board sets the one in hand down here instead.
 fn board_clicked(
     click: On<PointerClick>,
-    parts: Query<&Part>,
+    parts: Query<(&Part, &Slot, &Shape, &GlobalTransform)>,
     shop: Res<ShopAssets>,
     mut materials: Query<&mut MeshMaterial3d<StandardMaterial>>,
     mut stations: Stations,
@@ -625,9 +627,18 @@ fn board_clicked(
     if click.button != PointerButton::Primary || stations.gesture.dragged() {
         return;
     }
-    let Ok(part) = parts.get(click.entity) else {
+    let Ok((part, slot, shape, transform)) = parts.get(click.entity) else {
         return;
     };
+    // Choosing what it rests on, a click picks a surface rather than picking it up.
+    if stations.table_saw.choosing_rest() {
+        if *part == Part::Whole
+            && let Some(surface) = rest::surface_hit(shape, transform, &click.hit)
+        {
+            stations.table_saw.pick_rest(slot.0, surface);
+        }
+        return;
+    }
     let handled = if stations.hand.0.is_some() {
         stations.set_down(ShopView::TableSaw, None)
     } else {
@@ -651,7 +662,7 @@ fn highlight_carryable(
 ) {
     let clickable = |part: Part| match hand.0 {
         Some(_) => station.can_load(),
-        None => station.can_take(part),
+        None => !station.choosing_rest() && station.can_take(part),
     };
     if let Ok(part) = parts.get(over.entity)
         && clickable(*part)
@@ -757,6 +768,8 @@ fn draw_board(
             ))
             .observe(highlight_carryable)
             .observe(set_material_on::<PointerOut>(shop.wood.clone()))
+            .observe(rest::point_at)
+            .observe(rest::point_away)
             .observe(board_clicked)
             .observe(grab_board)
             .observe(drag_board);

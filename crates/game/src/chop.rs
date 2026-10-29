@@ -12,14 +12,14 @@
 use std::f32::consts::FRAC_PI_2;
 
 use bevy::prelude::*;
-use woodsim::{Angle, CutError, Length, MiterSaw, Orientation};
+use woodsim::{Angle, CutError, Length, MiterSaw, Orientation, Surface};
 
 use crate::{
     feed::shelf,
     hand::Workpiece,
     inventory::Shelf,
     shop::{Part, SawBoards, describe_kerf},
-    work::{self, Parted, Passed},
+    work::{self, Parted, Passed, Rest},
 };
 
 pub const STOP_MIN: Length = Length::from_inch_fraction(1, 16);
@@ -58,6 +58,8 @@ pub struct MiterSawStation {
     set_aside: Vec<(Shelf, Workpiece)>,
     /// How the board on the saw lies.
     lie: Orientation,
+    /// Choosing what the board rests on, and against the fence.
+    rest: Rest,
 }
 
 pub enum Work {
@@ -93,6 +95,7 @@ impl Default for MiterSawStation {
             depth_stop: None,
             set_aside: Vec::new(),
             lie: Orientation::default(),
+            rest: Rest::default(),
         }
     }
 }
@@ -103,6 +106,7 @@ impl MiterSawStation {
     pub fn load(&mut self, board: Workpiece) {
         self.clear_saw();
         self.lie = Orientation::default();
+        self.rest = Rest::default();
         self.work = Work::Ready {
             board,
             missed: None,
@@ -129,13 +133,7 @@ impl MiterSawStation {
     /// Stands the board up further (`work::stood_up`): on an edge, with its bottom face toward
     /// the fence, then on its end, then back down flat. A glue-up stays flat.
     pub fn tip(&mut self) -> bool {
-        if matches!(
-            &self.work,
-            Work::Ready {
-                board: Workpiece::GlueUp(_),
-                ..
-            }
-        ) {
+        if !self.can_tip() {
             return false;
         }
         self.relay(work::stood_up(self.lie))
@@ -147,9 +145,51 @@ impl MiterSawStation {
         self.blade_up() && matches!(self.work, Work::Ready { .. })
     }
 
+    /// Starts choosing what the board rests on and what goes against the fence, each with a
+    /// click on it, or stops: while it waits against the stop with the blade up.
+    pub fn choose_rest(&mut self) -> bool {
+        if !self.can_turn() {
+            return false;
+        }
+        self.rest.toggle();
+        true
+    }
+
+    /// Whether a click on the board picks what it rests on, rather than picking it up.
+    pub fn choosing_rest(&self) -> bool {
+        self.rest.choosing.is_some() && self.can_turn()
+    }
+
+    /// Picks `surface` of the board in `slot` (its place in a glue-up) to rest on, or to go
+    /// against the fence, as the choosing has got to. Returns false, saying why in the
+    /// status, if it won't rest that way.
+    pub fn pick_rest(&mut self, slot: usize, surface: Surface) -> bool {
+        if !self.choosing_rest() {
+            return false;
+        }
+        let Work::Ready { board, scarred, .. } = &self.work else {
+            return false;
+        };
+        let waiting = scarred.as_ref().unwrap_or(board).clone();
+        match self.rest.pick(&waiting, self.lie, (slot, surface)) {
+            Some(lie) => {
+                self.lie = lie;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The surface the board rests on while the one for the fence is chosen: the board's place
+    /// in a glue-up, and its surface.
+    pub fn resting_on(&self) -> Option<(usize, Surface)> {
+        self.rest.down().filter(|_| self.choosing_rest())
+    }
+
     /// Whether it can stand on an edge: it can turn, and it's a board rather than a glue-up.
     pub fn can_tip(&self) -> bool {
         self.can_turn()
+            && self.lie.is_square()
             && !matches!(
                 self.work,
                 Work::Ready {
@@ -219,6 +259,9 @@ impl MiterSawStation {
     /// through, it clears what its curve hadn't reached yet, the way a real stroke does, so a
     /// full stroke leaves clean ends.
     pub fn lower(&mut self, amount: f32) {
+        if amount > 0.0 {
+            self.rest = Rest::default();
+        }
         self.lowered = (self.lowered + amount).min(self.lowest());
         if self.lowered <= self.deepest {
             return;
@@ -421,9 +464,9 @@ impl MiterSawStation {
         // The board's far end along the fence rests against the stop block; the rest reaches
         // left past the blade. It reaches from the fence out toward the operator.
         let near = Vec3::new(
-            -work::extent(board, self.lie.across().0).as_meters_f32(),
+            -work::reach(board, self.lie).across.as_meters_f32(),
             0.0,
-            stop.as_meters_f32() - work::extent(board, self.lie.along().0).as_meters_f32(),
+            stop.as_meters_f32() - work::reach(board, self.lie).along.as_meters_f32(),
         );
         match cut {
             None => SawBoards {
@@ -442,7 +485,7 @@ impl MiterSawStation {
     /// A warning if the blade won't reach all the way across `board` as it lies, at the miter
     /// angle: it cuts as far as it reaches and leaves the board in one piece.
     fn reach_note(&self, board: &Workpiece) -> String {
-        let span = work::extent(board, self.lie.across().0);
+        let span = work::reach(board, self.lie).across;
         let what = match board {
             Workpiece::Board(_) => "board",
             Workpiece::GlueUp(_) => "glue-up",
@@ -466,7 +509,7 @@ impl MiterSawStation {
         let Some(stop) = self.depth_stop else {
             return String::new();
         };
-        let thickness = work::extent(board, self.lie.up().0);
+        let thickness = work::reach(board, self.lie).up;
         if stop >= thickness {
             " The depth stop keeps the blade above it.".to_string()
         } else {
@@ -476,6 +519,11 @@ impl MiterSawStation {
 
     /// One line describing what's on the saw.
     pub fn status(&self) -> String {
+        if self.can_turn()
+            && let Some(rest) = self.rest.status()
+        {
+            return rest;
+        }
         match &self.work {
             Work::Empty => {
                 "Nothing on the saw. Put a board against the stop from the inventory, or set down \
@@ -1047,6 +1095,43 @@ mod tests {
             "{}",
             station.status()
         );
+    }
+
+    #[test]
+    fn a_glue_up_rests_on_its_other_face_and_chops() {
+        // A 1x2 glued on top of a 1x4 along its edge: rested on the 1x2's top, the 1x4 above.
+        let one_by_four = Board::new(
+            Length::from_inches(24),
+            Length::from_inch_fraction(7, 2),
+            Length::from_inch_fraction(3, 4),
+        );
+        let mut stacked = woodsim::Assembly::of(one_by_four);
+        assert!(stacked.attach(
+            (0, Surface::Top),
+            &woodsim::Assembly::of(Board::new(
+                Length::from_inches(24),
+                Length::from_inch_fraction(3, 2),
+                Length::from_inch_fraction(3, 4),
+            )),
+            (0, Surface::Bottom),
+            woodsim::Mating::default(),
+            woodsim::Fastener::Glue,
+        ));
+        let mut station = MiterSawStation::default();
+        station.load(Workpiece::GlueUp(stacked));
+        assert!(station.choose_rest());
+        assert!(station.pick_rest(1, Surface::Top));
+        assert_eq!(station.lie.up().0, woodsim::Axis::Thickness);
+        assert!(station.lie.up().1, "upside down");
+        chop(&mut station);
+        let Work::Cut {
+            cut: Parted::GlueUp(cut),
+            ..
+        } = &station.work
+        else {
+            panic!("the blade should have cut the glue-up");
+        };
+        assert_eq!(cut.piece.members().len(), 2);
     }
 
     #[test]

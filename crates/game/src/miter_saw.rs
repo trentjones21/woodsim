@@ -10,8 +10,9 @@ use crate::{
     controls::{Action, Actions, Step},
     hand::Hand,
     meshes::{Grain, board_mesh, lumber_mesh, rounded_box},
+    rest,
     shop::{
-        Block, Part, SawPart, Shape, ShopAssets, ShopView, Stations, inches, place_parts,
+        Block, Part, SawPart, Shape, ShopAssets, ShopView, Slot, Stations, inches, place_parts,
         pointer_on_plane, rounded_block, set_material_on, snap_to_sixteenth, station_part,
     },
 };
@@ -99,7 +100,7 @@ struct Turntable;
 struct Head;
 
 #[derive(Component)]
-struct AtMiterSaw;
+pub(crate) struct AtMiterSaw;
 
 fn spawn_miter_saw(
     mut commands: Commands,
@@ -398,6 +399,7 @@ fn turn_board(actions: Res<Actions>, mut station: ResMut<MiterSawStation>) {
             Action::TurnRight => station.turn_right(),
             Action::Flip => station.flip(),
             Action::StandUp => station.tip(),
+            Action::Rest => station.choose_rest(),
             _ => continue,
         };
     }
@@ -415,7 +417,7 @@ fn highlight_takeable(
 ) {
     let clickable = |part: Part| match hand.0 {
         Some(_) => station.can_load(),
-        None => station.can_take(part),
+        None => !station.choosing_rest() && station.can_take(part),
     };
     if let Ok(part) = parts.get(over.entity)
         && clickable(*part)
@@ -429,7 +431,7 @@ fn highlight_takeable(
 /// saw's board sets the one in hand down against the stop instead.
 fn saw_part_clicked(
     click: On<PointerClick>,
-    parts: Query<&Part>,
+    parts: Query<(&Part, &Slot, &Shape, &GlobalTransform)>,
     shop: Res<ShopAssets>,
     mut materials: Query<&mut MeshMaterial3d<StandardMaterial>>,
     mut stations: Stations,
@@ -437,9 +439,18 @@ fn saw_part_clicked(
     if click.button != PointerButton::Primary || stations.gesture.dragged() {
         return;
     }
-    let Ok(&part) = parts.get(click.entity) else {
+    let Ok((&part, slot, shape, transform)) = parts.get(click.entity) else {
         return;
     };
+    // Choosing what it rests on, a click picks a surface rather than picking it up.
+    if stations.miter_saw.choosing_rest() {
+        if part == Part::Whole
+            && let Some(surface) = rest::surface_hit(shape, transform, &click.hit)
+        {
+            stations.miter_saw.pick_rest(slot.0, surface);
+        }
+        return;
+    }
     let handled = if stations.hand.0.is_some() {
         stations.set_down(ShopView::MiterSaw, None)
     } else {
@@ -610,6 +621,8 @@ fn draw_board(
             ))
             .observe(highlight_takeable)
             .observe(set_material_on::<PointerOut>(shop.wood.clone()))
+            .observe(rest::point_at)
+            .observe(rest::point_away)
             .observe(saw_part_clicked);
     }
 }

@@ -633,7 +633,7 @@ fn mark_surfaces(
 
 /// A thin sheet over a surface, given as `woodsim::outline` gives it, in the board's mesh axes
 /// (`w`, `t`, `l` along x, y, z), standing just off the surface so it shows over the wood.
-fn sheet(polygons: &[Vec<[woodsim::Length; 3]>]) -> Mesh {
+pub(crate) fn sheet(polygons: &[Vec<[woodsim::Length; 3]>]) -> Mesh {
     let mut positions: Vec<[f32; 3]> = Vec::new();
     let mut normals: Vec<[f32; 3]> = Vec::new();
     let mut indices: Vec<u32> = Vec::new();

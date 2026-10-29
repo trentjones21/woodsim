@@ -24,6 +24,8 @@ pub enum Icon {
     TurnRight,
     Flip,
     StandUp,
+    /// A beveled block coming down to rest on its slope.
+    Rest,
     SwitchGuide,
     Push,
     BringBack,
@@ -63,11 +65,12 @@ pub enum Icon {
 }
 
 impl Icon {
-    const ALL: [Icon; 34] = [
+    const ALL: [Icon; 35] = [
         Icon::TurnLeft,
         Icon::TurnRight,
         Icon::Flip,
         Icon::StandUp,
+        Icon::Rest,
         Icon::SwitchGuide,
         Icon::Push,
         Icon::BringBack,
@@ -132,6 +135,19 @@ impl Icon {
                     Line(vec![p(0.12, 0.9), p(0.88, 0.9)], 0.07),
                 ];
                 shapes.extend(arrow_arc(p(0.6, 0.84), 0.4, 182.0, 62.0, 0.09));
+                shapes
+            }
+            Icon::Rest => {
+                let mut shapes = vec![
+                    Fill(vec![
+                        p(0.18, 0.84),
+                        p(0.82, 0.84),
+                        p(0.64, 0.5),
+                        p(0.36, 0.5),
+                    ]),
+                    Line(vec![p(0.08, 0.92), p(0.92, 0.92)], 0.06),
+                ];
+                shapes.extend(arrow_line(p(0.5, 0.06), p(0.5, 0.4), 0.09));
                 shapes
             }
             Icon::SwitchGuide => {

@@ -119,22 +119,23 @@ fn board_size(board: &Board) -> Vec3 {
 }
 
 /// The rotation that lays `board` on a saw as `lie` says, and where its corner ends up from the
-/// near corner of the space it takes up: `lie`'s own turn, from the board's axes onto the
-/// saw's, with the mesh's axes (`w`, `t`, `l`) and the station's (across, up, along) in place
-/// of woodsim's.
+/// near corner of the space its wood takes up, which woodsim measures the saw's settings from:
+/// `lie`'s own turn, from the board's axes onto the saw's, with the mesh's axes (`w`, `t`, `l`)
+/// and the station's (across, up, along) in place of woodsim's.
 fn lay(board: &Board, lie: Orientation) -> (Quat, Vec3) {
     let [l, w, t] = lie
         .rotation()
         .columns()
         .map(|[along, across, up]| Vec3::new(across as f32, up as f32, along as f32));
     let rotation = Quat::from_mat3(&Mat3::from_cols(w, t, l));
-    let placed = Placed {
-        board: board.clone(),
-        corner: Vec3::ZERO,
-        rotation,
-        grain: Vec3::ZERO,
-    };
-    (rotation, -placed.bounds().0)
+    let near = board
+        .corners()
+        .into_iter()
+        .map(|[l, w, t]| {
+            rotation * Vec3::new(w.as_meters_f32(), t.as_meters_f32(), l.as_meters_f32())
+        })
+        .fold(Vec3::MAX, Vec3::min);
+    (rotation, -near)
 }
 
 /// What to draw on a saw: a board in one piece, or both sides of a cut that went through it.
@@ -882,6 +883,11 @@ fn describe_slots(board: &Board, kerf: &Kerf, count: usize) -> String {
 pub struct Shape(Option<(Board, Vec3)>);
 
 impl Shape {
+    /// The board the mesh was built from.
+    pub fn board(&self) -> Option<&Board> {
+        self.0.as_ref().map(|(board, _)| board)
+    }
+
     /// The shape of a mesh just built for `placed`.
     pub fn built(placed: &Placed) -> Shape {
         Shape(Some((placed.board.clone(), placed.grain)))

@@ -11,7 +11,8 @@
 
 use bevy::prelude::*;
 use woodsim::{
-    Angle, Axis, Blade, Board, CutError, Length, MAX_GAUGE, MAX_TILT, Orientation, TableSaw,
+    Angle, Axis, Blade, Board, CutError, Length, MAX_GAUGE, MAX_TILT, Orientation, Surface,
+    TableSaw,
 };
 
 use crate::{
@@ -19,7 +20,7 @@ use crate::{
     hand::Workpiece,
     inventory::Shelf,
     shop::{Part, SawBoards, describe_kerf},
-    work::{self, Passed},
+    work::{self, Passed, Rest},
 };
 
 pub const FENCE_MIN: Length = Length::from_inch_fraction(1, 16);
@@ -57,6 +58,8 @@ pub struct TableSawStation {
     /// Wood the saw has set aside, for the inventory: what a new board displaced, and what's
     /// been put away.
     set_aside: Vec<(Shelf, Workpiece)>,
+    /// Choosing what the board rests on, and against the fence.
+    rest: Rest,
 }
 
 struct Feeding {
@@ -90,6 +93,7 @@ impl Default for TableSawStation {
             taken: Vec::new(),
             gauge_stop: Length::from_inches(12),
             set_aside: Vec::new(),
+            rest: Rest::default(),
         }
     }
 }
@@ -237,7 +241,7 @@ impl TableSawStation {
         // The board's length across the table turns toward its trailing side as the blade's
         // front swings toward the stop.
         let rotation = Quat::from_rotation_y(-(saw.gauge_angle.radians() as f32));
-        let along = work::extent(&self.board, self.lie.along().0).as_meters_f32();
+        let along = work::reach(&self.board, self.lie).along.as_meters_f32();
         let across = self.span().as_meters_f32();
         let near_side = (-saw.blade.kerf - stop).as_meters_f32();
         let lead = (-self.advance).as_meters_f32();
@@ -277,7 +281,7 @@ impl TableSawStation {
     /// Stands the board up further (`work::stood_up`): on an edge, with its bottom face toward
     /// the fence, then on its end, then back down flat. A glue-up stays flat.
     pub fn tip(&mut self) -> bool {
-        if matches!(self.board, Workpiece::GlueUp(_)) {
+        if !self.can_tip() {
             return false;
         }
         self.relay(work::stood_up(self.lie))
@@ -292,6 +296,43 @@ impl TableSawStation {
         true
     }
 
+    /// Starts choosing what the board rests on and what goes against the fence, each with a
+    /// click on it, or stops: while it waits in front of the blade.
+    pub fn choose_rest(&mut self) -> bool {
+        if !self.can_turn() {
+            return false;
+        }
+        self.rest.toggle();
+        true
+    }
+
+    /// Whether a click on the board picks what it rests on, rather than picking it up.
+    pub fn choosing_rest(&self) -> bool {
+        self.rest.choosing.is_some() && self.can_turn()
+    }
+
+    /// Picks `surface` of the board in `slot` (its place in a glue-up) to rest on, or to go
+    /// against the fence, as the choosing has got to. Returns false, saying why in the
+    /// status, if it won't rest that way.
+    pub fn pick_rest(&mut self, slot: usize, surface: Surface) -> bool {
+        if !self.choosing_rest() {
+            return false;
+        }
+        match self.rest.pick(&self.board, self.lie, (slot, surface)) {
+            Some(lie) => {
+                self.lie = lie;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The surface the board rests on while the one for the fence is chosen: the board's place
+    /// in a glue-up, and its surface.
+    pub fn resting_on(&self) -> Option<(usize, Surface)> {
+        self.rest.down().filter(|_| self.choosing_rest())
+    }
+
     /// Whether the board can be turned or flipped: it's in one piece, waiting in front of the
     /// blade.
     pub fn can_turn(&self) -> bool {
@@ -300,7 +341,7 @@ impl TableSawStation {
 
     /// Whether it can stand on an edge: it can turn, and it's a board rather than a glue-up.
     pub fn can_tip(&self) -> bool {
-        self.can_turn() && !matches!(self.board, Workpiece::GlueUp(_))
+        self.can_turn() && !matches!(self.board, Workpiece::GlueUp(_)) && self.lie.is_square()
     }
 
     /// Whether there's a board to push along the fence.
@@ -333,6 +374,7 @@ impl TableSawStation {
         if self.on_saw().is_none() {
             return;
         }
+        self.rest = Rest::default();
         let back_limit = if self.cut_apart() || self.past_blade() {
             self.advance
         } else {
@@ -451,6 +493,7 @@ impl TableSawStation {
         self.advance = START;
         self.pass = None;
         self.taken.clear();
+        self.rest = Rest::default();
     }
 
     /// Puts away everything on the saw that's clear of the blade: the measured piece to the
@@ -516,13 +559,13 @@ impl TableSawStation {
     fn reach(&self) -> Length {
         match &self.board {
             Workpiece::Board(board) => self.saw.reach(board, self.lie),
-            Workpiece::GlueUp(_) => work::extent(&self.board, self.lie.along().0),
+            Workpiece::GlueUp(_) => work::reach(&self.board, self.lie).along,
         }
     }
 
     /// How far the board reaches across the table, from the fence.
     fn span(&self) -> Length {
-        work::extent(&self.board, self.lie.across().0)
+        work::reach(&self.board, self.lie).across
     }
 
     fn cut_apart(&self) -> bool {
@@ -624,6 +667,11 @@ impl TableSawStation {
             return "Nothing on the saw. Put a board on it from the inventory, or set down the one \
                     in hand."
                 .to_string();
+        }
+        if self.can_turn()
+            && let Some(rest) = self.rest.status()
+        {
+            return rest;
         }
         let verb = match self.lie.across().0 {
             Axis::Width => "Ripped",
@@ -1238,6 +1286,92 @@ mod tests {
             station.status(),
             "Cutting. So far, a 1/8\"-wide, 11/16\"-deep kerf in an edge, 11/32\" long."
         );
+    }
+
+    /// A 1x3 ripped 1-1/2" wide with the blade tilted 30°, beveled along one edge: low enough,
+    /// resting on its bevel, for the blade to cut through.
+    fn beveled() -> Board {
+        let saw = TableSaw {
+            tilt: Angle::from_degrees(30),
+            height: Length::from_inches(2),
+            fence: Length::from_inch_fraction(3, 2),
+            ..TableSawStation::default().saw
+        };
+        let Ok(woodsim::Pass::Cut(cut)) = saw.rip(
+            &Board::new(
+                Length::from_inches(24),
+                Length::from_inch_fraction(5, 2),
+                Length::from_inch_fraction(3, 4),
+            ),
+            Orientation::default(),
+        ) else {
+            panic!("expected the bevel ripped");
+        };
+        cut.piece.board
+    }
+
+    #[test]
+    fn a_board_rests_on_its_bevel_with_an_edge_to_the_fence_and_rips() {
+        let board = beveled();
+        let [(bevel, _)] = board.bevels()[..] else {
+            panic!("expected one bevel");
+        };
+        let mut station = TableSawStation::default();
+        station.load(Workpiece::Board(board.clone()));
+        assert!(station.choose_rest());
+        assert_eq!(
+            station.status(),
+            "Click the surface to rest it on, flat on the table."
+        );
+        assert!(station.pick_rest(0, Surface::Side(bevel)));
+        assert!(!station.lie.is_square());
+        assert_eq!(station.resting_on(), Some((0, Surface::Side(bevel))));
+        assert!(
+            station
+                .status()
+                .starts_with("Click the surface to go against the fence")
+        );
+        // The bottom face, 60° from the bevel, faces the fence as squarely as it can.
+        assert!(station.pick_rest(0, Surface::Bottom));
+        assert!(!station.choosing_rest());
+        assert_eq!(station.resting_on(), None);
+        station.set_height(HEIGHT_MAX);
+        station.set_fence(Length::from_inches(1));
+        station.push(30.0);
+        let Some(Ok(Passed::Cut(crate::work::Parted::Board(cut)))) = station.result() else {
+            panic!("expected the board ripped, got {:?}", station.result());
+        };
+        assert_eq!(cut.piece.board.origin().replay(), cut.piece.board);
+    }
+
+    #[test]
+    fn it_wont_rest_where_other_wood_reaches_past_and_says_so() {
+        let mut stacked = woodsim::Assembly::of(beveled());
+        assert!(stacked.attach(
+            (0, Surface::Top),
+            &woodsim::Assembly::of(Board::new(
+                Length::from_inches(24),
+                Length::from_inch_fraction(3, 2),
+                Length::from_inch_fraction(3, 4),
+            )),
+            (0, Surface::Bottom),
+            woodsim::Mating::default(),
+            woodsim::Fastener::Glue,
+        ));
+        let mut station = TableSawStation::default();
+        station.load(Workpiece::GlueUp(stacked));
+        assert!(station.choose_rest());
+        let before = station.lie;
+        assert!(!station.pick_rest(0, Surface::Top));
+        assert_eq!(station.lie, before);
+        assert_eq!(
+            station.status(),
+            "It won't sit on that: other wood reaches past it. Click the surface to rest it on, \
+             flat on the table."
+        );
+        // Pressed again, it stops choosing.
+        assert!(station.choose_rest());
+        assert!(!station.choosing_rest());
     }
 
     #[test]

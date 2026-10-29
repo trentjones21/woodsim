@@ -27,6 +27,9 @@ pub enum Action {
     TurnRight,
     Flip,
     StandUp,
+    /// At a saw: choosing what the board rests on, and what goes against the fence, by
+    /// clicking them.
+    Rest,
     /// The table saw's guide: the rip fence or the miter gauge, and moving it.
     SwitchGuide,
     Guide(Step),
@@ -128,6 +131,7 @@ pub fn bound(view: ShopView, key: KeyCode, shift: bool) -> Option<Action> {
         (_, KeyE) => TurnRight,
         (_, KeyF) => Flip,
         (TableSaw | MiterSaw, KeyV) => StandUp,
+        (TableSaw | MiterSaw, KeyR) => Rest,
         (TableSaw, KeyG) => SwitchGuide,
         (TableSaw, ArrowLeft | ArrowRight) => Guide(step(key == ArrowRight)),
         (TableSaw, ArrowUp | ArrowDown) => Blade(step(key == ArrowUp)),
@@ -152,11 +156,12 @@ pub fn bound(view: ShopView, key: KeyCode, shift: bool) -> Option<Action> {
 }
 
 /// Every key some action is bound to, in the order they're named on buttons.
-const KEYS: [KeyCode; 35] = [
+const KEYS: [KeyCode; 36] = [
     KeyCode::KeyQ,
     KeyCode::KeyE,
     KeyCode::KeyF,
     KeyCode::KeyV,
+    KeyCode::KeyR,
     KeyCode::KeyG,
     KeyCode::KeyB,
     KeyCode::KeyU,
@@ -222,6 +227,7 @@ fn key_name(key: KeyCode) -> (&'static str, Option<&'static str>) {
         KeyCode::KeyE => ("E", Some("E")),
         KeyCode::KeyF => ("F", Some("F")),
         KeyCode::KeyV => ("V", Some("V")),
+        KeyCode::KeyR => ("R", Some("R")),
         KeyCode::KeyG => ("G", Some("G")),
         KeyCode::KeyB => ("B", Some("B")),
         KeyCode::KeyU => ("U", Some("U")),
