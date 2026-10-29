@@ -14,6 +14,8 @@ mod kerf;
 mod length;
 mod orientation;
 mod saw;
+mod solid;
+mod wide;
 
 pub use angle::Angle;
 pub use assembly::{

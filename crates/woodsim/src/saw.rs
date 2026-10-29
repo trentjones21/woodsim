@@ -273,7 +273,7 @@ impl TableSaw {
         // Each piece is wholly on one side of the slot, so any corner of it says which.
         let slot_middle = 2 * face.as_nm() as i128 - kerf_width.as_nm() as i128;
         let measured = |piece: &Piece| {
-            let (l, w) = piece.board.face()[0].corners()[0];
+            let [l, w, _] = piece.board.corners()[0];
             2 * toward_stop.dot(piece.l + l, piece.w + w) > slot_middle
         };
         Ok(Pass::Cut(sort_out(pieces, measured, toward_fence, waste)))
@@ -543,7 +543,7 @@ impl MiterSaw {
         // Each piece is wholly on one side of the slot, so any corner of it says which.
         let slot_middle = 2 * face.as_nm() as i128 - kerf_width.as_nm() as i128;
         let measured = |piece: &Piece| {
-            let (l, w) = piece.board.face()[0].corners()[0];
+            let [l, w, _] = piece.board.corners()[0];
             2 * toward_stop.dot(piece.l + l, piece.w + w) > slot_middle
         };
         Ok(Pass::Cut(sort_out(pieces, measured, toward_fence, waste)))
@@ -723,7 +723,7 @@ fn reaches_blade<'a>(
         let furthest = board
             .face()
             .iter()
-            .map(|region| region.extent(toward_stop).0)
+            .map(|region| region.solid(board.thickness()).extent(toward_stop).0)
             .fold(f64::INFINITY, f64::min);
         nearest = nearest.min((furthest - face.as_nm() as f64) / toward_stop.scale());
     }

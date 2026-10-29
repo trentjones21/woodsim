@@ -1,6 +1,7 @@
 use crate::{
     Angle, Length,
     face::{Direction, Edge, Region},
+    wide::Wide,
 };
 
 /// A slot a round saw blade cut into a board without cutting it apart: everything within the
@@ -22,12 +23,20 @@ use crate::{
 /// these are plain positions on them; for a slanted one, they're nanometers times the
 /// direction's `scale`, which keeps them whole numbers wherever the slot ends up.
 ///
+/// A blade tilted from square to the face leaves a slot whose faces lean (`lean`): they're
+/// where `across · (l, w) + lean * t` is `near` and `far`, `(across, lean)` with no common
+/// factor. The blade turned in the plane halfway between them, about a center moving along the
+/// slot `center` up, and `across` is square to `along`.
+///
 /// The slot is stored as the saw left it, not trimmed to the board, so it stays exact when the
 /// board is cut into pieces. It can reach past the board's edges and ends.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Kerf {
     /// What the slot's faces are square to.
     pub across: Across,
+    /// How far the faces of a slot in the face lean, for each nanometer up, times the length of
+    /// `across`: zero for a blade square to the face.
+    pub lean: i64,
     /// The way the slot runs across the board's face, which the blade's center traveled.
     pub along: Direction,
     /// The slot's two faces, `near` < `far`: positions on `across`, or `t` for a slot square to
@@ -63,6 +72,46 @@ impl Kerf {
     /// compare equal.
     pub(crate) fn new(
         across: Across,
+        faces: (Length, Length),
+        along: Direction,
+        travel: (Length, Length),
+        radius: Length,
+        center: Length,
+    ) -> Kerf {
+        Kerf::make(across, 0, faces, along, travel, radius, center)
+    }
+
+    /// A slot cut by a blade tilted from square to the face, whose faces lean `lean` (see
+    /// `Kerf`): `across` is square to `along`, and with `lean` has no common factor.
+    #[cfg_attr(not(test), expect(dead_code, reason = "no saw tilts its blade yet"))]
+    pub(crate) fn tilted(
+        across: Direction,
+        lean: i64,
+        faces: (Length, Length),
+        along: Direction,
+        travel: (Length, Length),
+        radius: Length,
+        center: Length,
+    ) -> Kerf {
+        assert_eq!(
+            across.l as i128 * along.l as i128 + across.w as i128 * along.w as i128,
+            0,
+            "a tilted blade's faces run along its path"
+        );
+        Kerf::make(
+            Across::Face(across),
+            lean,
+            faces,
+            along,
+            travel,
+            radius,
+            center,
+        )
+    }
+
+    fn make(
+        across: Across,
+        lean: i64,
         (near, far): (Length, Length),
         along: Direction,
         (start, end): (Length, Length),
@@ -74,21 +123,24 @@ impl Kerf {
         };
         let (along, along_reversed) = along.canonical();
         let (start, end) = turned((start, end), along_reversed);
-        let (across, (near, far), center) = match across {
+        let (across, lean, (near, far), center) = match across {
             Across::Face(direction) => {
                 let (direction, reversed) = direction.canonical();
+                let lean = if reversed { -lean } else { lean };
                 (
                     Across::Face(direction),
+                    lean,
                     turned((near, far), reversed),
                     center,
                 )
             }
             // Turning `along` around turns the direction square to it around too.
-            Across::Thickness if along_reversed => (Across::Thickness, (near, far), -center),
-            Across::Thickness => (Across::Thickness, (near, far), center),
+            Across::Thickness if along_reversed => (Across::Thickness, 0, (near, far), -center),
+            Across::Thickness => (Across::Thickness, 0, (near, far), center),
         };
         Kerf {
             across,
+            lean,
             along,
             near,
             far,
@@ -109,22 +161,42 @@ impl Kerf {
     /// The slot's width, square to its faces.
     pub fn width(&self) -> Length {
         let scale = match self.across {
-            Across::Face(direction) => direction.scale(),
+            Across::Face(direction) => face_scale(direction, self.lean),
             Across::Thickness => 1.0,
         };
         let scaled = (self.far - self.near).as_nm() as f64;
         Length::from_nm((scaled / scale).round() as i64)
     }
 
+    /// How far the blade was tilted from square to the board's face.
+    pub fn tilt(&self) -> Angle {
+        match self.across {
+            Across::Face(direction) => {
+                Angle::nearest((self.lean.abs() as f64).atan2(direction.scale()))
+            }
+            Across::Thickness => Angle::ZERO,
+        }
+    }
+
     /// Whether any of the slot is inside `region` of a board `thickness` thick. A blade that
-    /// only grazes a face takes no wood.
+    /// only grazes a face takes no wood. Where the slot or the wood leans, it's worked out
+    /// to within floating point of a nanometer.
     pub(crate) fn touches(&self, region: &Region, thickness: Length) -> bool {
         if let Across::Thickness = self.across {
             return self.near < thickness
                 && self.far > Length::ZERO
-                && self
-                    .outline()
-                    .is_some_and(|outline| outline.overlaps(region));
+                && self.outline().is_some_and(|outline| {
+                    let layer = region
+                        .solid(thickness)
+                        .layer(self.near.max(Length::ZERO), self.far.min(thickness));
+                    layer.is_some_and(|layer| {
+                        let depth = self.far.min(thickness) - self.near.max(Length::ZERO);
+                        layer.solid(depth).overlaps(outline.edges())
+                    })
+                });
+        }
+        if self.lean != 0 || region.leans() {
+            return self.touches_solid(region, thickness);
         }
         let up = gap(self.center, self.center, Length::ZERO, thickness);
         if up >= self.radius {
@@ -156,6 +228,28 @@ impl Kerf {
             && within((nm(self.start) * over_high - high, over_high))
     }
 
+    /// Whether any of the slot is inside `region`, worked out in the plane the blade turned
+    /// in: where the wood between the slot's faces lies in that plane, against where the
+    /// blade swept.
+    fn touches_solid(&self, region: &Region, thickness: Length) -> bool {
+        let Some(inside) = region.solid(thickness).clip_all(self.faces()) else {
+            return false;
+        };
+        let disc = self.disc();
+        let points: Vec<(f64, f64)> = inside
+            .solid(thickness)
+            .corners()
+            .into_iter()
+            .map(|corner| disc.at(corner.position()))
+            .collect();
+        let scale = self.along.scale();
+        let path = (
+            self.start.as_nm() as f64 / scale,
+            self.end.as_nm() as f64 / scale,
+        );
+        near_path(&hull(points), path, self.radius.as_nm() as f64)
+    }
+
     /// For a slot in the face, where along the slot it goes all the way through a board
     /// `thickness` thick, or `None` if it doesn't anywhere. The blade swept a convex region, so
     /// it goes through wherever it reached both faces.
@@ -166,23 +260,27 @@ impl Kerf {
         (start <= end).then_some((start, end))
     }
 
-    /// Where on the board's face the slot goes all the way through a board `thickness` thick.
-    pub(crate) fn through_hole(&self, thickness: Length) -> Option<Region> {
+    /// Where the slot goes all the way through a board `thickness` thick, as the planes around
+    /// it: the wood inside all of them is gone.
+    pub(crate) fn through_hole(&self, thickness: Length) -> Option<Vec<Edge>> {
         if let Across::Thickness = self.across {
             // Only one wider than the board is thick takes all of it.
             return (self.near <= Length::ZERO && self.far >= thickness)
                 .then(|| self.outline())
-                .flatten();
+                .flatten()
+                .map(|outline| outline.edges().to_vec());
         }
         let (start, end) = self.through_span(thickness)?;
         let nm = |length: Length| length.as_nm() as i128;
         let [face_near, face_far] = self.faces();
-        Region::within([
-            face_near,
-            face_far,
+        let ends = [
             Edge::new(self.along, nm(end)),
             Edge::new(self.along.reversed(), -nm(start)),
-        ])
+        ];
+        if self.lean != 0 {
+            return Some([face_near, face_far, ends[0], ends[1]].to_vec());
+        }
+        Region::within([face_near, face_far, ends[0], ends[1]]).map(|hole| hole.edges().to_vec())
     }
 
     /// The faces of a slot in the face, as edges with the slot inside them. Panics for a slot
@@ -192,10 +290,40 @@ impl Kerf {
             panic!("a slot square to the thickness has no faces across the board's face");
         };
         let nm = |length: Length| length.as_nm() as i128;
+        if self.lean != 0 {
+            return [
+                Edge::leaning(across.reversed(), -self.lean, -nm(self.near)),
+                Edge::leaning(across, self.lean, nm(self.far)),
+            ];
+        }
         [
             Edge::new(across.reversed(), -nm(self.near)),
             Edge::new(across, nm(self.far)),
         ]
+    }
+
+    /// The plane the blade of a slot in the face turned in, in whole numbers.
+    fn disc(&self) -> Disc {
+        let Across::Face(across) = self.across else {
+            panic!("a slot square to the thickness turned square to the face");
+        };
+        let square = self.along.square();
+        let a2 = self.along.scale_squared();
+        let k = across.l as i128 * square.l as i128 + across.w as i128 * square.w as i128;
+        debug_assert_eq!(k % a2, 0, "a slot's faces run exactly along its path");
+        let k = k / a2;
+        let lean = i128::from(self.lean);
+        let n2 = k * k * a2 + lean * lean;
+        let nm = |length: Length| length.as_nm() as i128;
+        Disc {
+            along: self.along,
+            square,
+            k,
+            lean,
+            a2,
+            n2,
+            center: 2 * n2 * nm(self.center) - lean * (nm(self.near) + nm(self.far)),
+        }
     }
 
     /// Where a slot square to the thickness reaches on the board's face, as a region just
@@ -242,9 +370,27 @@ impl Kerf {
     /// For a slot in the face, how far it runs along the board at height `t`, or `None` if the
     /// blade didn't reach it. The round blade cuts a stopped slot longer on the face it came
     /// through than on the other. Rounded in to the nanometer, times the scale of `along`.
+    /// Tilted, the blade reaches further on one face of the slot than the other; this is as far
+    /// as it reached on both, to within a nanometer short.
     pub fn span_at(&self, t: Length) -> Option<(Length, Length)> {
         if let Across::Thickness = self.across {
             return None;
+        }
+        if self.lean != 0 {
+            let disc = self.disc();
+            let radius = self.radius.as_nm() as f64;
+            let half = [self.near, self.far]
+                .into_iter()
+                .map(|face| {
+                    let off = disc.off_center(t, face);
+                    (off.abs() <= radius).then(|| (radius * radius - off * off).sqrt())
+                })
+                .collect::<Option<Vec<f64>>>()?
+                .into_iter()
+                .fold(f64::MAX, f64::min);
+            let half = (half * self.along.scale()).floor() as i64 - 1;
+            let half = Length::from_nm(half.max(0));
+            return Some((self.start - half, self.end + half));
         }
         let up = (t - self.center).squared();
         let reach = self.radius.squared();
@@ -263,6 +409,11 @@ impl Kerf {
         let reach = self.radius.squared() * self.along.scale_squared();
         let along = off(self.along.dot(l, w), self.start, self.end);
         match self.across {
+            Across::Face(across) if self.lean != 0 => {
+                let face = across.dot(l, w) + i128::from(self.lean) * nm(t);
+                between(face, self.near, self.far)
+                    && self.disc().reaches(along, l, w, t, self.radius)
+            }
             Across::Face(across) => {
                 let up = (t - self.center).squared() * self.along.scale_squared();
                 between(across.dot(l, w), self.near, self.far) && along * along + up < reach
@@ -281,12 +432,20 @@ impl Kerf {
     }
 
     /// For a slot in the face, how deep it goes into a board `thickness` thick, from the face
-    /// the blade came through. At the thickness or more, it goes through.
+    /// the blade came through. At the thickness or more, it goes through. A tilted blade
+    /// reaches less high.
     pub fn depth(&self, thickness: Length) -> Length {
+        let reach = match self.across {
+            Across::Face(across) if self.lean != 0 => {
+                let cos = across.scale() / face_scale(across, self.lean);
+                Length::from_nm((self.radius.as_nm() as f64 * cos).round() as i64)
+            }
+            _ => self.radius,
+        };
         if self.from_below() {
-            self.center + self.radius
+            self.center + reach
         } else {
-            thickness - (self.center - self.radius)
+            thickness - (self.center - reach)
         }
     }
 
@@ -320,10 +479,15 @@ impl Kerf {
     /// board split off by a resaw.
     pub(crate) fn moved_up(self, t: Length) -> Kerf {
         match self.across {
-            Across::Face(_) => Kerf {
-                center: self.center - t,
-                ..self
-            },
+            Across::Face(_) => {
+                let shift = Length::from_nm(self.lean * t.as_nm());
+                Kerf {
+                    center: self.center - t,
+                    near: self.near - shift,
+                    far: self.far - shift,
+                    ..self
+                }
+            }
             Across::Thickness => Kerf {
                 near: self.near - t,
                 far: self.far - t,
@@ -331,6 +495,165 @@ impl Kerf {
             },
         }
     }
+}
+
+/// How long the normal of a face facing `across` and leaning `lean` is.
+fn face_scale(across: Direction, lean: i64) -> f64 {
+    let l = across.l as f64;
+    let w = across.w as f64;
+    let lean = lean as f64;
+    (l * l + w * w + lean * lean).sqrt()
+}
+
+/// The plane a blade turned in, halfway between a slot's faces, as whole numbers. Along it,
+/// the slot runs `along`; up it, square to that, the way the blade leans. With the faces'
+/// normal `n` (`across` and `lean`), `across` is `k` times `along.square()`, and up the plane
+/// is `(-lean along.square(), k |along|^2)`, which is `|along| |n|` long, turned around for
+/// `k` below zero.
+struct Disc {
+    along: Direction,
+    square: Direction,
+    k: i128,
+    lean: i128,
+    /// `|along|^2` and `|n|^2`.
+    a2: i128,
+    n2: i128,
+    /// Where the blade's center is up the plane, as `up` measures it, for a point on the plane
+    /// halfway between the faces at the center's height.
+    center: i128,
+}
+
+impl Disc {
+    /// How far `(l, w, t)` is up the plane from the blade's center, times
+    /// `2 |k| |along| |n|`.
+    fn up(&self, l: Length, w: Length, t: Length) -> i128 {
+        let across = self.square.dot(l, w);
+        let height = t.as_nm() as i128;
+        2 * self.k * (self.k * self.a2 * height - self.lean * across) - self.center
+    }
+
+    /// Whether the point `(l, w, t)`, `along` past the ends of the blade's center's path
+    /// (times `|along|`), is strictly within `radius` of it in the blade's plane.
+    fn reaches(&self, along: i128, l: Length, w: Length, t: Length, radius: Length) -> bool {
+        let up = self.up(l, w, t);
+        // Squared, both over `4 k^2 |along|^2 |n|^2`.
+        let r = radius.as_nm() as i128;
+        Wide::product(4 * self.k * self.k * self.n2, along * along) + Wide::product(up, up)
+            < Wide::product(4 * self.k * self.k * self.a2 * self.n2, r * r)
+    }
+
+    /// Where `p` is in the plane, in nanometers: along the slot, and up from the blade's
+    /// center.
+    fn at(&self, p: [f64; 3]) -> (f64, f64) {
+        let a = (self.a2 as f64).sqrt();
+        let u = (self.along.l as f64 * p[0] + self.along.w as f64 * p[1]) / a;
+        let across = self.square.l as f64 * p[0] + self.square.w as f64 * p[1];
+        let (k, lean) = (self.k as f64, self.lean as f64);
+        let up = 2.0 * k * (k * self.a2 as f64 * p[2] - lean * across) - self.center as f64;
+        (u, up / self.up_scale())
+    }
+
+    /// How far up the plane from the blade's center the slot's face at `face` is at height
+    /// `t`, in nanometers.
+    fn off_center(&self, t: Length, face: Length) -> f64 {
+        // On the face, `k along.square() · (l, w)` is `face - lean t`.
+        let (t, face) = (t.as_nm() as f64, face.as_nm() as f64);
+        let (k, lean) = (self.k as f64, self.lean as f64);
+        let up = 2.0 * (k * k * self.a2 as f64 * t - lean * (face - lean * t)) - self.center as f64;
+        up / self.up_scale()
+    }
+
+    /// `2 |k| |along| |n|`, what `up` measures in.
+    fn up_scale(&self) -> f64 {
+        2.0 * (self.k as f64).abs() * (self.a2 as f64).sqrt() * (self.n2 as f64).sqrt()
+    }
+}
+
+/// The convex hull of `points`, counterclockwise.
+fn hull(mut points: Vec<(f64, f64)>) -> Vec<(f64, f64)> {
+    points.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
+    points.dedup();
+    if points.len() < 3 {
+        return points;
+    }
+    let turn = |o: (f64, f64), a: (f64, f64), b: (f64, f64)| {
+        (a.0 - o.0) * (b.1 - o.1) - (a.1 - o.1) * (b.0 - o.0)
+    };
+    let mut around: Vec<(f64, f64)> = Vec::new();
+    for pass in [false, true] {
+        let start = around.len();
+        let ordered: Box<dyn Iterator<Item = &(f64, f64)>> = if pass {
+            Box::new(points.iter().rev())
+        } else {
+            Box::new(points.iter())
+        };
+        for &p in ordered {
+            while around.len() >= start + 2
+                && turn(around[around.len() - 2], around[around.len() - 1], p) <= 0.0
+            {
+                around.pop();
+            }
+            around.push(p);
+        }
+        around.pop();
+    }
+    around
+}
+
+/// Whether the convex polygon `around` comes strictly within `radius` of the path from
+/// `(start, 0)` to `(end, 0)`.
+fn near_path(around: &[(f64, f64)], (start, end): (f64, f64), radius: f64) -> bool {
+    let n = around.len();
+    if n == 0 {
+        return false;
+    }
+    let inside = n >= 3
+        && (0..n).all(|i| {
+            let (a, b) = (around[i], around[(i + 1) % n]);
+            (b.0 - a.0) * (0.0 - a.1) - (b.1 - a.1) * (start - a.0) >= 0.0
+        });
+    if inside {
+        return true;
+    }
+    let path = ((start, 0.0), (end, 0.0));
+    let edges = (0..n).map(|i| (around[i], around[(i + 1) % n]));
+    edges
+        .map(|edge| segment_gap(path, edge))
+        .fold(f64::MAX, f64::min)
+        < radius
+}
+
+/// The distance between two segments.
+fn segment_gap((p0, p1): ((f64, f64), (f64, f64)), (q0, q1): ((f64, f64), (f64, f64))) -> f64 {
+    let cross = |o: (f64, f64), a: (f64, f64), b: (f64, f64)| {
+        (a.0 - o.0) * (b.1 - o.1) - (a.1 - o.1) * (b.0 - o.0)
+    };
+    let (d1, d2) = (cross(q0, q1, p0), cross(q0, q1, p1));
+    let (d3, d4) = (cross(p0, p1, q0), cross(p0, p1, q1));
+    if d1 * d2 < 0.0 && d3 * d4 < 0.0 {
+        return 0.0;
+    }
+    [
+        point_gap(p0, (q0, q1)),
+        point_gap(p1, (q0, q1)),
+        point_gap(q0, (p0, p1)),
+        point_gap(q1, (p0, p1)),
+    ]
+    .into_iter()
+    .fold(f64::MAX, f64::min)
+}
+
+/// The distance from `p` to the segment from `a` to `b`.
+fn point_gap(p: (f64, f64), (a, b): ((f64, f64), (f64, f64))) -> f64 {
+    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+    let length = dx * dx + dy * dy;
+    let s = if length == 0.0 {
+        0.0
+    } else {
+        (((p.0 - a.0) * dx + (p.1 - a.1) * dy) / length).clamp(0.0, 1.0)
+    };
+    let (x, y) = (a.0 + s * dx - p.0, a.1 + s * dy - p.1);
+    (x * x + y * y).sqrt()
 }
 
 /// The distance between the spans `a_low..a_high` and `b_low..b_high`, or zero if they overlap.
@@ -521,5 +844,60 @@ mod tests {
         let thickness = Length::from_inch_fraction(3, 4);
         assert!(resaw.touches(&board(24, 6), thickness));
         assert!(!resaw.touches(&board(24, 6), Length::from_inch_fraction(1, 4)));
+    }
+
+    /// A 1/8" slot along the board by a 10" blade tilted 45° and raised 1", its faces crossing
+    /// the bottom face 2" across, its center moving from 6" before the board's end to 10"
+    /// along it.
+    fn tilted_cut() -> Kerf {
+        let (across, lean) = Direction::WIDTH.tilted(Angle::from_degrees(45));
+        let kerf = Length::from_inch_fraction(1, 8);
+        let width = Length::from_nm((kerf.as_nm() as f64 * 2f64.sqrt()).round() as i64);
+        let reach = Length::from_nm((inches(5).as_nm() as f64 / 2f64.sqrt()).round() as i64);
+        Kerf::tilted(
+            across,
+            lean,
+            (inches(2), inches(2) + width),
+            Direction::LENGTH,
+            (-inches(6), inches(10)),
+            inches(5),
+            inches(1) - reach,
+        )
+    }
+
+    #[test]
+    fn a_tilted_slot_is_as_wide_as_the_blade_and_reaches_less_high() {
+        let kerf = tilted_cut();
+        assert_eq!(kerf.width(), Length::from_inch_fraction(1, 8));
+        assert_eq!(kerf.tilt(), Angle::from_degrees(45));
+        let depth = kerf.depth(Length::from_inch_fraction(3, 4));
+        assert!((depth - inches(1)).as_nm().abs() <= 1, "{depth}");
+        // Moved up a layer, its faces lean the same and stay where they were.
+        let up = kerf.moved_up(Length::from_inch_fraction(1, 4));
+        assert_eq!(up.far - up.near, kerf.far - kerf.near);
+        assert_eq!(up.near, kerf.near - Length::from_inch_fraction(1, 4));
+    }
+
+    #[test]
+    fn a_tilted_slot_holds_what_its_blade_swept_between_its_faces() {
+        let kerf = tilted_cut();
+        let t = Length::from_inch_fraction(3, 8);
+        // Halfway between the faces at that height, `w + t` is 2" and a half kerf.
+        let middle = |l: Length, t: Length| {
+            let w = inches(2) + Length::from_nm((kerf.far - kerf.near).as_nm() / 2) - t;
+            kerf.contains(l, w, t)
+        };
+        assert!(middle(inches(5), t));
+        assert!(!kerf.contains(inches(5), inches(2) - t, t));
+        assert!(!kerf.contains(inches(5), inches(2) + inches(1) - t, t));
+        // Past the end of its path, the blade reached further along low down than high up:
+        // 3.4" past at 1/32" up, 2.8" at 3/8".
+        assert!(middle(inches(13), Length::from_inch_fraction(1, 32)));
+        assert!(!middle(inches(13), t));
+        assert!(middle(inches(12), t));
+        assert!(!middle(inches(20), Length::from_inch_fraction(1, 32)));
+        let (_, bottom) = kerf.span_at(Length::ZERO).unwrap();
+        let (_, top) = kerf.span_at(Length::from_inch_fraction(3, 4)).unwrap();
+        assert!(inches(10) < top && top < bottom, "{top} {bottom}");
     }
 }

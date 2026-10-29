@@ -6,7 +6,7 @@
 //! number too, so whether a point is on one side of an edge or the other, or whether two
 //! pieces still hold together, always has an exact answer.
 
-use crate::{Axis, Length};
+use crate::{Angle, Axis, Length};
 
 /// A direction in a board's face, as whole numbers with no common factor: `l` along its length
 /// and `w` across its width.
@@ -84,6 +84,28 @@ impl Direction {
         self.l as i128 * other.l as i128 + self.w as i128 * other.w as i128
     }
 
+    /// A face facing this way and tilted `tilt` from square to the board's face, leaning back
+    /// from this way going up: as `out` and `lean` for an `Edge` or a `Kerf`, whole numbers
+    /// with no common factor, within about 1/16,000,000 of a radian of the angle.
+    #[cfg_attr(not(test), expect(dead_code, reason = "no saw tilts its blade yet"))]
+    pub(crate) fn tilted(self, tilt: Angle) -> (Direction, i64) {
+        if tilt == Angle::ZERO {
+            return (self, 0);
+        }
+        // Long enough across the face for the lean to come out close as a whole number.
+        let times = ((1u64 << 24) as f64 / self.scale()).ceil().max(1.0) as i64;
+        let (l, w) = (self.l * times, self.w * times);
+        let lean = ((l as f64).hypot(w as f64) * tilt.radians().tan()).round() as i64;
+        let divisor = gcd(gcd(l.unsigned_abs(), w.unsigned_abs()), lean.unsigned_abs()) as i64;
+        (
+            Direction {
+                l: l / divisor,
+                w: w / divisor,
+            },
+            lean / divisor,
+        )
+    }
+
     /// Written so its bigger component is positive (the length's, if they're the same size),
     /// and whether that took turning it around.
     pub(crate) fn canonical(self) -> (Direction, bool) {
@@ -110,31 +132,53 @@ fn gcd(mut a: u64, mut b: u64) -> u64 {
 /// A straight line across a board's face, and the side of it the wood is on: the points
 /// `(l, w)` where `out · (l, w) <= at`, with `out` pointing away from the wood. `at` is in
 /// nanometers times `out`'s scale, a whole number wherever the line is moved to.
+///
+/// That's a side square to the board's faces, the same all the way through. A side a tilted
+/// blade left leans (`lean`): the wood is where `out · (l, w) + lean * t <= at`, so the side
+/// comes in `lean / |out|` for each nanometer up. Then `(out, lean)` together have no common
+/// factor, and `at` is in nanometers times their length.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Edge {
     pub out: Direction,
+    pub lean: i64,
     pub at: i128,
 }
 
 impl Edge {
     pub(crate) fn new(out: Direction, at: i128) -> Edge {
-        Edge { out, at }
+        Edge { out, lean: 0, at }
+    }
+
+    /// A side facing `out` and leaning `lean`, which together have no common factor.
+    pub(crate) fn leaning(out: Direction, lean: i64, at: i128) -> Edge {
+        Edge { out, lean, at }
+    }
+
+    /// Whether the side leans, rather than standing square to the faces.
+    pub fn leans(self) -> bool {
+        self.lean != 0
     }
 
     /// The same line with the wood on its other side.
     pub(crate) fn flipped(self) -> Edge {
         Edge {
             out: self.out.reversed(),
+            lean: -self.lean,
             at: -self.at,
         }
     }
 
-    /// The same line, measured from a new corner at `(l, w)`.
-    pub(crate) fn moved(self, l: Length, w: Length) -> Edge {
+    /// The same side, measured from a new corner at `(l, w, t)`.
+    pub(crate) fn moved_by(self, l: Length, w: Length, t: Length) -> Edge {
         Edge {
-            at: self.at - self.out.dot(l, w),
+            at: self.at - self.out.dot(l, w) - i128::from(self.lean) * t.as_nm() as i128,
             ..self
         }
+    }
+
+    /// Whether `(l, w, t)` is strictly on the wood's side.
+    pub(crate) fn inside(self, l: Length, w: Length, t: Length) -> bool {
+        self.out.dot(l, w) + i128::from(self.lean) * (t.as_nm() as i128) < self.at
     }
 
     /// Positive for a point beyond the line, away from the wood; zero on it; negative inside.
@@ -163,9 +207,9 @@ impl Edge {
 /// across the width, in nanometers, with `z` positive.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Point {
-    x: i128,
-    y: i128,
-    z: i128,
+    pub(crate) x: i128,
+    pub(crate) y: i128,
+    pub(crate) z: i128,
 }
 
 impl Point {
@@ -202,6 +246,11 @@ fn ceil_div(n: i128, z: i128) -> i128 {
 
 /// A convex region of a board's face, through the whole board: everything inside all of its
 /// edges, which go counterclockwise around it (from the length toward the width).
+///
+/// With some of its sides leaning, it's a convex solid instead, narrower at one face than the
+/// other: everything inside its sides between the board's bottom face and its top, which can
+/// meet anywhere through the thickness. Its edges are then just the sides it has a face on, in
+/// order by `Edge`'s ordering, and working with it takes the board's thickness (`solid.rs`).
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Region {
     edges: Vec<Edge>,
@@ -246,6 +295,17 @@ impl Region {
         Region::within(edges)
     }
 
+    /// A region with some sides leaning, from just the sides it has a face on.
+    pub(crate) fn leaning(mut edges: Vec<Edge>) -> Region {
+        edges.sort();
+        Region { edges }
+    }
+
+    /// Whether any of its sides lean, so it's narrower at one face than the other.
+    pub fn leans(&self) -> bool {
+        self.edges.iter().any(|edge| edge.leans())
+    }
+
     /// Starts the edges at the same one however the region was made, so equal regions compare
     /// equal.
     fn canonical(mut edges: Vec<Edge>) -> Region {
@@ -260,8 +320,13 @@ impl Region {
         &self.edges
     }
 
-    /// Where each edge starts: the corner it shares with the edge before it.
+    /// Where each edge starts: the corner it shares with the edge before it. Only for a region
+    /// whose sides are square to the faces: with leaning sides, see `solid.rs`.
     pub(crate) fn points(&self) -> Vec<Point> {
+        debug_assert!(
+            !self.leans(),
+            "a leaning region's corners depend on the thickness"
+        );
         let n = self.edges.len();
         (0..n)
             .map(|i| {
@@ -273,8 +338,12 @@ impl Region {
     }
 
     /// The region's corners in order around it, to the nearest nanometer: where each edge
-    /// starts.
+    /// starts. With leaning sides, where they cross the bottom face (`t = 0`), if they do.
     pub fn corners(&self) -> Vec<(Length, Length)> {
+        if self.leans() {
+            let bottom = self.edges.iter().map(|edge| Edge::new(edge.out, edge.at));
+            return Region::within(bottom).map_or(Vec::new(), |region| region.corners());
+        }
         let nearest = |n: i128, z: i128| Length::from_nm(floor_div(2 * n + z, 2 * z) as i64);
         self.points()
             .into_iter()
@@ -314,32 +383,14 @@ impl Region {
             .try_fold(self.clone(), |region, cut| region.clip(cut))
     }
 
-    /// Whether the two regions overlap with some area.
-    pub(crate) fn overlaps(&self, other: &Region) -> bool {
-        self.clip_all(other.edges.iter().copied()).is_some()
-    }
-
-    /// The region less `hole`, as convex regions.
-    pub(crate) fn minus(&self, hole: &Region) -> Vec<Region> {
-        if !self.overlaps(hole) {
-            return vec![self.clone()];
-        }
-        let mut rest = self.clone();
-        let mut outside = Vec::new();
-        for &edge in &hole.edges {
-            outside.extend(rest.clip(edge.flipped()));
-            match rest.clip(edge) {
-                Some(inside) => rest = inside,
-                None => break,
-            }
-        }
-        outside
-    }
-
-    /// The same region, measured from a new corner at `(l, w)`.
-    pub(crate) fn moved(&self, l: Length, w: Length) -> Region {
+    /// The same region, measured from a new corner at `(l, w, t)`.
+    pub(crate) fn moved_by(&self, l: Length, w: Length, t: Length) -> Region {
         Region {
-            edges: self.edges.iter().map(|edge| edge.moved(l, w)).collect(),
+            edges: self
+                .edges
+                .iter()
+                .map(|edge| edge.moved_by(l, w, t))
+                .collect(),
         }
     }
 
@@ -434,12 +485,13 @@ impl Region {
     }
 }
 
-/// Joins regions that together are convex, until no more will join.
-pub(crate) fn merge_all(mut regions: Vec<Region>) -> Vec<Region> {
+/// Joins regions of a board `thickness` thick that together are convex, until no more will
+/// join.
+pub(crate) fn merge_all(mut regions: Vec<Region>, thickness: Length) -> Vec<Region> {
     'again: loop {
         for i in 0..regions.len() {
             for j in i + 1..regions.len() {
-                if let Some(merged) = regions[i].merged(&regions[j]) {
+                if let Some(merged) = regions[i].solid(thickness).merged(&regions[j]) {
                     regions[i] = merged;
                     regions.swap_remove(j);
                     continue 'again;
@@ -520,8 +572,9 @@ mod tests {
     #[test]
     fn a_hole_through_the_middle_leaves_two_sides_that_do_not_join() {
         let slab = Region::rectangle((inches(1), inches(2)), (-inches(1), inches(4)));
-        let sides =
-            Region::rectangle((Length::ZERO, inches(3)), (Length::ZERO, inches(3))).minus(&slab);
+        let sides = Region::rectangle((Length::ZERO, inches(3)), (Length::ZERO, inches(3)))
+            .solid(inches(1))
+            .minus(slab.edges());
         assert_eq!(sides.len(), 2);
         assert!(!sides[0].joins(&sides[1]));
     }
@@ -529,12 +582,12 @@ mod tests {
     #[test]
     fn a_notch_leaves_regions_that_hold_together() {
         let notch = Region::rectangle((-inches(1), inches(1)), (inches(1), inches(2)));
-        let rest = square(3).minus(&notch);
+        let rest = square(3).solid(inches(1)).minus(notch.edges());
         assert!(rest.len() > 1);
         let joined = (1..rest.len()).all(|i| (0..i).any(|j| rest[i].joins(&rest[j])));
         assert!(joined, "{rest:?}");
         // Together they're not convex, so they can't all merge back into one.
-        assert!(merge_all(rest).len() > 1);
+        assert!(merge_all(rest, inches(1)).len() > 1);
     }
 
     #[test]
@@ -554,7 +607,7 @@ mod tests {
             square(2).clip(cut.flipped()).unwrap(),
         ];
         assert!(halves[0].joins(&halves[1]));
-        assert_eq!(merge_all(halves.to_vec()), [square(2)]);
+        assert_eq!(merge_all(halves.to_vec(), inches(1)), [square(2)]);
     }
 
     #[test]
@@ -575,7 +628,7 @@ mod tests {
     fn moving_keeps_the_shape() {
         let triangle = square(2).clip(diagonal(1)).unwrap();
         // Measured from (1", 1"), the triangle's corner at (0, 0) is at (-1", -1").
-        let moved = triangle.moved(inches(1), inches(1));
+        let moved = triangle.moved_by(inches(1), inches(1), Length::ZERO);
         let nudge = Length::from_nm(1_000);
         assert!(moved.contains(nudge - inches(1), nudge - inches(1)));
         assert!(!moved.contains(-nudge, -nudge));

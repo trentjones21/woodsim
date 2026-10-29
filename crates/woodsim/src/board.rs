@@ -9,6 +9,7 @@ use crate::{
     face::{Direction, Edge, Region, merge_all},
     history::{Operation, Origin, Part, Side},
     kerf::Across,
+    solid::line_crosses,
 };
 
 /// A board: stock of some length, width, and thickness, less any slots saws have cut into it
@@ -154,10 +155,28 @@ impl Board {
 
     /// Whether any of the face lies short of `at` along `direction` (times its scale), exactly.
     pub(crate) fn reaches_below(&self, direction: Direction, at: Length) -> bool {
-        self.face.iter().flat_map(Region::points).any(|point| {
-            let (along, z) = point.along_exactly(direction);
-            along < at.as_nm() as i128 * z
-        })
+        self.face
+            .iter()
+            .any(|region| region.solid(self.thickness).reaches_below(direction, at))
+    }
+
+    /// The corners of the board's wood, `[l, w, t]` to the nearest nanometer: its face's on the
+    /// bottom and the top, and wherever leaning sides meet between.
+    pub fn corners(&self) -> Vec<[Length; 3]> {
+        self.face
+            .iter()
+            .flat_map(|region| region.solid(self.thickness).corners())
+            .map(|corner| corner.nearest())
+            .collect()
+    }
+
+    /// How much wood is inside the board's outline, through its thickness, in cubic
+    /// nanometers: not less the slots in it.
+    pub fn volume(&self) -> f64 {
+        self.face
+            .iter()
+            .map(|region| region.solid(self.thickness).volume())
+            .sum()
     }
 
     /// Whether any of `kerf` is inside the board's wood.
@@ -170,19 +189,21 @@ impl Board {
     /// Whether the board has wood all the way through it at `(l, w)`: inside its face and not
     /// where a slot goes through. Points on an edge don't count.
     pub fn has_wood_at(&self, l: Length, w: Length) -> bool {
-        self.face.iter().any(|region| region.contains(l, w))
+        self.face
+            .iter()
+            .any(|region| region.solid(self.thickness).contains_through(l, w))
             && !self.kerfs.iter().any(|kerf| {
                 kerf.through_hole(self.thickness)
-                    .is_some_and(|hole| hole.contains(l, w))
+                    .is_some_and(|hole| line_crosses(&hole, l, w, self.thickness))
             })
     }
 
     /// Whether the board has wood at the point `(l, w, t)`: inside its face and thickness, and
     /// not where a slot took it. Points on a surface don't count.
     pub fn has_wood_in(&self, l: Length, w: Length, t: Length) -> bool {
-        Length::ZERO < t
-            && t < self.thickness
-            && self.face.iter().any(|region| region.contains(l, w))
+        self.face
+            .iter()
+            .any(|region| region.solid(self.thickness).contains(l, w, t))
             && !self.kerfs.iter().any(|kerf| kerf.contains(l, w, t))
     }
 
@@ -212,7 +233,7 @@ impl Board {
                         board: part.board,
                         l: piece.l + part.l,
                         w: piece.w + part.w,
-                        t: layer.t + part.t,
+                        t: piece.t + layer.t + part.t,
                     });
                 }
             }
@@ -227,13 +248,17 @@ impl Board {
     /// The pieces slots through the board divide its face into, as `pieces` does but without
     /// splitting it into layers.
     fn face_pieces(&self) -> Vec<Piece> {
+        let thickness = self.thickness;
         let mut wood = self.face.clone();
         for hole in self
             .kerfs
             .iter()
-            .filter_map(|kerf| kerf.through_hole(self.thickness))
+            .filter_map(|kerf| kerf.through_hole(thickness))
         {
-            wood = wood.iter().flat_map(|region| region.minus(&hole)).collect();
+            wood = wood
+                .iter()
+                .flat_map(|region| region.solid(thickness).minus(&hole))
+                .collect();
         }
 
         // Regions of wood that share a stretch of edge hold together.
@@ -247,7 +272,7 @@ impl Board {
         }
         for i in 0..wood.len() {
             for j in i + 1..wood.len() {
-                if wood[i].joins(&wood[j]) {
+                if wood[i].solid(thickness).joins(&wood[j]) {
                     let (a, b) = (root(&mut group, i), root(&mut group, j));
                     group[a] = b;
                 }
@@ -267,17 +292,19 @@ impl Board {
         }
 
         let bounds = |regions: &[Region]| {
-            regions.iter().map(Region::bounds).fold(
-                (
-                    (Length::from_nm(i64::MAX), Length::from_nm(i64::MIN)),
-                    (Length::from_nm(i64::MAX), Length::from_nm(i64::MIN)),
-                ),
-                |((l0, l1), (w0, w1)), ((a0, a1), (b0, b1))| {
-                    ((l0.min(a0), l1.max(a1)), (w0.min(b0), w1.max(b1)))
-                },
-            )
+            let far = (Length::from_nm(i64::MAX), Length::from_nm(i64::MIN));
+            regions
+                .iter()
+                .map(|region| region.solid(thickness).bounds())
+                .fold([far; 3], |around, bounds| {
+                    [0, 1, 2].map(|k| (around[k].0.min(bounds[k].0), around[k].1.max(bounds[k].1)))
+                })
         };
-        let whole = ((Length::ZERO, self.length), (Length::ZERO, self.width));
+        let whole = [
+            (Length::ZERO, self.length),
+            (Length::ZERO, self.width),
+            (Length::ZERO, thickness),
+        ];
         if let [regions] = pieces.as_slice()
             && bounds(regions) == whole
         {
@@ -288,24 +315,30 @@ impl Board {
         let mut pieces: Vec<Piece> = pieces
             .into_iter()
             .map(|regions| {
-                let ((l0, l1), (w0, w1)) = bounds(&regions);
-                let mut board = Board::new(l1 - l0, w1 - w0, self.thickness);
-                board.face = merge_all(regions.iter().map(|r| r.moved(l0, w0)).collect());
+                let [(l0, l1), (w0, w1), (t0, t1)] = bounds(&regions);
+                let mut board = Board::new(l1 - l0, w1 - w0, t1 - t0);
+                board.face = merge_all(
+                    regions
+                        .iter()
+                        .map(|region| region.moved_by(l0, w0, t0))
+                        .collect(),
+                    t1 - t0,
+                );
                 board.kerfs = self
                     .kerfs
                     .iter()
-                    .map(|kerf| kerf.moved_to(l0, w0))
+                    .map(|kerf| kerf.moved_to(l0, w0).moved_up(t0))
                     .filter(|kerf| board.touched_by(kerf))
                     .collect();
                 Piece {
                     board,
                     l: l0,
                     w: w0,
-                    t: Length::ZERO,
+                    t: t0,
                 }
             })
             .collect();
-        pieces.sort_by_key(|piece| (piece.l, piece.w));
+        pieces.sort_by_key(|piece| (piece.l, piece.w, piece.t));
         pieces
     }
 
@@ -334,7 +367,9 @@ impl Board {
                 outlines
                     .iter()
                     .fold(vec![region.clone()], |left, outline| {
-                        left.iter().flat_map(|part| part.minus(outline)).collect()
+                        left.iter()
+                            .flat_map(|part| part.solid(self.thickness).minus(outline.edges()))
+                            .collect()
                     })
                     .is_empty()
             });
@@ -347,26 +382,35 @@ impl Board {
                 (below > Length::ZERO).then(|| self.layer(Length::ZERO, below)),
                 (above < self.thickness).then(|| self.layer(above, self.thickness)),
             ];
-            Some(layers.into_iter().flatten().collect())
+            let layers = layers.into_iter().flatten().flatten();
+            Some(layers.collect())
         })
     }
 
-    /// The part of the board from `t` = `bottom` to `top`, as a piece of it.
-    fn layer(&self, bottom: Length, top: Length) -> Piece {
+    /// The part of the board from `t` = `bottom` to `top`, as a piece of it, if any of its wood
+    /// is there: leaning sides can leave none.
+    fn layer(&self, bottom: Length, top: Length) -> Option<Piece> {
         let mut board = Board::new(self.length, self.width, top - bottom);
-        board.face = self.face.clone();
+        board.face = self
+            .face
+            .iter()
+            .filter_map(|region| region.solid(self.thickness).layer(bottom, top))
+            .collect();
+        if board.face.is_empty() {
+            return None;
+        }
         board.kerfs = self
             .kerfs
             .iter()
             .map(|kerf| kerf.moved_up(bottom))
             .filter(|kerf| board.touched_by(kerf))
             .collect();
-        Piece {
+        Some(Piece {
             board,
             l: Length::ZERO,
             w: Length::ZERO,
             t: bottom,
-        }
+        })
     }
 
     /// How `kerf`, one of this board's slots, measures in it.
@@ -378,16 +422,17 @@ impl Board {
     }
 
     fn slot_in_face(&self, kerf: &Kerf, across: Direction) -> SlotSize {
+        let thickness = self.thickness;
         let in_slot: Vec<Region> = self
             .face
             .iter()
-            .filter_map(|region| region.clip_all(kerf.faces()))
+            .filter_map(|region| region.solid(thickness).clip_all(kerf.faces()))
             .collect();
         let [near_face, far_face] = kerf.faces();
         let wood_beyond = |face: Edge| {
             self.face
                 .iter()
-                .any(|region| region.clip(face.flipped()).is_some())
+                .any(|region| region.solid(thickness).clip(face.flipped()).is_some())
         };
         let run = |t: Length| {
             let (start, end) = kerf.span_at(t)?;
@@ -398,15 +443,15 @@ impl Board {
             ];
             let reached: Vec<Region> = in_slot
                 .iter()
-                .filter_map(|region| region.clip_all(band))
+                .filter_map(|region| region.solid(thickness).clip_all(band))
                 .collect();
             Some(Run {
-                length: measured(range(&reached, kerf.along), kerf.along),
+                length: measured(range(&reached, kerf.along, thickness), kerf.along),
                 end_to_end: reached == in_slot,
             })
         };
         SlotSize {
-            width: measured(range(&in_slot, across), across),
+            width: measured(range(&in_slot, across, thickness), across),
             depth: kerf.depth(self.thickness).min(self.thickness),
             at_edge: !wood_beyond(near_face) || !wood_beyond(far_face),
             bottom: run(Length::ZERO),
@@ -421,8 +466,8 @@ impl Board {
         let scale = kerf.along.scale();
         let radius = kerf.radius.as_nm() as f64 * scale;
         let center = kerf.center.as_nm() as f64;
-        let (low, high) = range(&self.face, square);
-        let wood = range(&self.face, kerf.along);
+        let (low, high) = range(&self.face, square, self.thickness);
+        let wood = range(&self.face, kerf.along, self.thickness);
         // How far the blade reached along each edge, within the board's length there.
         let run = |side: f64| {
             let off = side - center;
@@ -473,11 +518,12 @@ impl Board {
     }
 }
 
-/// The range of `direction · (l, w)` over `regions`, times the direction's scale.
-fn range(regions: &[Region], direction: Direction) -> (f64, f64) {
+/// The range of `direction · (l, w)` over `regions` of a board `thickness` thick, times the
+/// direction's scale.
+fn range(regions: &[Region], direction: Direction, thickness: Length) -> (f64, f64) {
     regions
         .iter()
-        .map(|region| region.extent(direction))
+        .map(|region| region.solid(thickness).extent(direction))
         .fold((f64::MAX, f64::MIN), |(low, high), (a, b)| {
             (low.min(a), high.max(b))
         })
@@ -559,5 +605,332 @@ impl Piece {
 impl fmt::Display for Board {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{} x {} x {}", self.thickness, self.width, self.length)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use proptest::prelude::*;
+
+    use super::*;
+    use crate::Blade;
+
+    fn inches(n: i64) -> Length {
+        Length::from_inches(n)
+    }
+
+    fn fraction(numerator: i64, denominator: i64) -> Length {
+        Length::from_inch_fraction(numerator, denominator)
+    }
+
+    const CUBIC_INCH: f64 = 25_400_000.0 * 25_400_000.0 * 25_400_000.0;
+
+    /// A 1x6, 24" long: 3/4" x 5-1/2" x 24".
+    fn one_by_six() -> Board {
+        Board::new(inches(24), fraction(11, 2), fraction(3, 4))
+    }
+
+    fn scaled(length: Length, scale: f64) -> Length {
+        Length::from_nm((length.as_nm() as f64 * scale).round() as i64)
+    }
+
+    /// A slot all the way along a board `thickness` thick, running `along`, by a 10" blade
+    /// tilted `tilt` with a 1/8" kerf, coming up from below and reaching 1/2" past the top.
+    /// Its face toward less of `along.square()` crosses the bottom face `at` across.
+    fn tilted_slot(along: Direction, tilt: Angle, at: Length, thickness: Length) -> Kerf {
+        let (across, lean) = along.square().tilted(tilt);
+        let normal = (across.scale().powi(2) + (lean as f64).powi(2)).sqrt();
+        let near = scaled(at, across.scale());
+        slot(
+            along,
+            (across, lean),
+            (near, near + scaled(Blade::FULL_KERF, normal)),
+            thickness,
+        )
+    }
+
+    /// A slot all the way along, facing `across` and leaning `lean`, with its faces at `faces`.
+    fn slot(
+        along: Direction,
+        (across, lean): (Direction, i64),
+        faces: (Length, Length),
+        thickness: Length,
+    ) -> Kerf {
+        let radius = inches(5);
+        let cos = across.scale() / (across.scale().powi(2) + (lean as f64).powi(2)).sqrt();
+        let center = thickness + fraction(1, 2) - scaled(radius, cos);
+        let reach = scaled(inches(100), along.scale());
+        Kerf::tilted(across, lean, faces, along, (-reach, reach), radius, center)
+    }
+
+    /// Checks on a grid through `board` that wherever it has wood after `cuts`, exactly one of
+    /// `pieces` has that wood, and nowhere else does any.
+    fn pieces_hold_its_wood(board: &Board, pieces: &[Piece], steps: i64) {
+        // Off from any whole fraction differently on each axis, so no point lands on a 45° face.
+        let at = |size: Length, i: i64, off: i64| {
+            Length::from_nm(size.as_nm() * (2 * i + 1) / (2 * steps) + off)
+        };
+        for i in 0..steps {
+            for j in 0..steps {
+                for k in 0..steps {
+                    let (l, w, t) = (
+                        at(board.length(), i, 7),
+                        at(board.width(), j, 13),
+                        at(board.thickness(), k, 3),
+                    );
+                    let holding = pieces
+                        .iter()
+                        .filter(|piece| {
+                            piece
+                                .board
+                                .has_wood_in(l - piece.l, w - piece.w, t - piece.t)
+                        })
+                        .count();
+                    assert_eq!(
+                        holding,
+                        usize::from(board.has_wood_in(l, w, t)),
+                        "at {l}, {w}, {t}"
+                    );
+                }
+            }
+        }
+    }
+
+    fn cubic_inches(volume: f64) -> f64 {
+        volume / CUBIC_INCH
+    }
+
+    #[test]
+    fn a_tilted_rip_leaves_pieces_beveled_along_their_edges() {
+        let board = one_by_six();
+        let thickness = board.thickness();
+        // Tilted 45°, the slot comes in going up: 2" across on the bottom face.
+        let kerf = tilted_slot(
+            Direction::LENGTH,
+            Angle::from_degrees(45),
+            inches(2),
+            thickness,
+        );
+        assert_eq!(kerf.tilt(), Angle::from_degrees(45));
+        assert_eq!(kerf.width(), Blade::FULL_KERF);
+        let cut = board.with_kerf(kerf);
+        let pieces = cut.pieces();
+        assert_eq!(pieces.len(), 2);
+        let (narrow, wide) = (&pieces[0].board, &pieces[1].board);
+
+        // The narrow piece is 2" wide on the bottom face and 3/4" less on the top.
+        assert_eq!(
+            (pieces[0].l, pieces[0].w, pieces[0].t),
+            (Length::ZERO, Length::ZERO, Length::ZERO)
+        );
+        assert_eq!(
+            (narrow.length(), narrow.width(), narrow.thickness()),
+            (inches(24), inches(2), thickness)
+        );
+        assert!(narrow.face().iter().all(|region| region.leans()));
+        assert!((cubic_inches(narrow.volume()) - 24.0 * 1.625 * 0.75).abs() < 1e-6);
+        // Its bevel takes 3/4" off the top: wood under it low down, none high up.
+        assert!(narrow.has_wood_in(inches(12), fraction(15, 8), fraction(1, 16)));
+        assert!(!narrow.has_wood_in(inches(12), fraction(15, 8), fraction(11, 16)));
+        // Neither keeps the slot: it took no wood from either.
+        assert!(narrow.kerfs().is_empty() && wide.kerfs().is_empty());
+
+        // The slot is 1/8" square to its faces, so wider across the board.
+        let across = 2.0 + 0.125 * 2f64.sqrt();
+        assert_eq!(
+            pieces[1].w,
+            Length::from_nm(((across - 0.75) * 25_400_000.0).floor() as i64)
+        );
+        assert_eq!(wide.width() + pieces[1].w, fraction(11, 2));
+        let slot = board
+            .face()
+            .iter()
+            .filter_map(|region| region.solid(thickness).clip_all(kerf.faces()))
+            .map(|region| region.solid(thickness).volume())
+            .sum::<f64>();
+        let total = narrow.volume() + wide.volume() + slot;
+        assert!((total / board.volume() - 1.0).abs() < 1e-12);
+        pieces_hold_its_wood(&cut, &pieces, 9);
+    }
+
+    #[test]
+    fn a_tilted_cut_stopped_short_leaves_the_board_whole_with_its_slot() {
+        let board = one_by_six();
+        let thickness = board.thickness();
+        let full = tilted_slot(
+            Direction::LENGTH,
+            Angle::from_degrees(30),
+            inches(2),
+            thickness,
+        );
+        // The blade's center stopped 6" along.
+        let stopped = Kerf {
+            end: inches(6),
+            ..full
+        };
+        let cut = board.with_kerf(stopped);
+        assert_eq!(cut.pieces(), [Piece::whole(cut.clone())]);
+        let in_slot = |l: Length| cut.has_wood_in(l, inches(2) + fraction(1, 32), fraction(1, 32));
+        assert!(!in_slot(inches(3)));
+        assert!(in_slot(inches(20)));
+        assert!(cut.touched_by(&stopped));
+    }
+
+    #[test]
+    fn crosscutting_a_beveled_piece_square_keeps_its_bevel() {
+        let board = one_by_six();
+        let thickness = board.thickness();
+        let rip = tilted_slot(
+            Direction::LENGTH,
+            Angle::from_degrees(45),
+            inches(2),
+            thickness,
+        );
+        let narrow = board.with_kerf(rip).pieces().remove(0).board;
+        let reach = inches(100);
+        let crosscut = Kerf::new(
+            Across::Face(Direction::LENGTH),
+            (inches(10), inches(10) + Blade::FULL_KERF),
+            Direction::WIDTH,
+            (-reach, reach),
+            inches(5),
+            inches(1) - inches(5),
+        );
+        let cut = narrow.with_kerf(crosscut);
+        let pieces = cut.pieces();
+        assert_eq!(pieces.len(), 2);
+        let lengths: Vec<Length> = pieces.iter().map(|piece| piece.board.length()).collect();
+        assert_eq!(lengths, [inches(10), inches(14) - Blade::FULL_KERF]);
+        for piece in &pieces {
+            assert_eq!(piece.board.width(), inches(2));
+            assert!(piece.board.face().iter().all(|region| region.leans()));
+            let length = piece.board.length().as_nm() as f64 / 25_400_000.0;
+            assert!((cubic_inches(piece.board.volume()) - length * 1.625 * 0.75).abs() < 1e-6);
+        }
+        pieces_hold_its_wood(&cut, &pieces, 9);
+    }
+
+    #[test]
+    fn resawing_a_beveled_piece_leaves_layers_beveled_the_same() {
+        let board = one_by_six();
+        let rip = tilted_slot(
+            Direction::LENGTH,
+            Angle::from_degrees(45),
+            inches(2),
+            board.thickness(),
+        );
+        let narrow = board.with_kerf(rip).pieces().remove(0).board;
+        // On edge, a blade coming in through the edge 3" takes 3/8" to 1/2" up the thickness.
+        let reach = inches(100);
+        let resaw = Kerf::new(
+            Across::Thickness,
+            (fraction(3, 8), fraction(1, 2)),
+            Direction::LENGTH,
+            (-reach, reach),
+            inches(5),
+            inches(3) - inches(5),
+        );
+        let cut = narrow.with_kerf(resaw);
+        let pieces = cut.pieces();
+        assert_eq!(pieces.len(), 2);
+        // 2" wide on the bottom face, less 3/8" by the top of the lower layer; 1-1/2" wide on
+        // the bottom of the upper one and 1-1/4" on its top.
+        let (low, high) = (&pieces[0], &pieces[1]);
+        assert_eq!(
+            (low.t, low.board.width(), low.board.thickness()),
+            (Length::ZERO, inches(2), fraction(3, 8))
+        );
+        assert_eq!(
+            (high.t, high.board.width(), high.board.thickness()),
+            (fraction(1, 2), fraction(3, 2), fraction(1, 4))
+        );
+        let volumes = [low, high].map(|piece| cubic_inches(piece.board.volume()));
+        assert!(
+            (volumes[0] - 24.0 * 1.8125 * 0.375).abs() < 1e-6,
+            "{volumes:?}"
+        );
+        assert!(
+            (volumes[1] - 24.0 * 1.375 * 0.25).abs() < 1e-6,
+            "{volumes:?}"
+        );
+        pieces_hold_its_wood(&cut, &pieces, 9);
+    }
+
+    #[test]
+    fn two_tilted_rips_crossing_leave_a_ridge_below_and_a_sliver_above() {
+        let board = one_by_six();
+        let thickness = board.thickness();
+        // One leaning each way across the board, crossing 1/2" up.
+        let (across, lean) = (Direction::WIDTH, 1);
+        let rising = slot(
+            Direction::LENGTH,
+            (across, -lean),
+            (fraction(15, 8), inches(2)),
+            thickness,
+        );
+        let falling = slot(
+            Direction::LENGTH,
+            (across, lean),
+            (inches(3), fraction(25, 8)),
+            thickness,
+        );
+        let cut = board.with_kerf(rising).with_kerf(falling);
+        let pieces = cut.pieces();
+        assert_eq!(pieces.len(), 4, "{pieces:#?}");
+        let mut sizes: Vec<(Length, Length, Length)> = pieces
+            .iter()
+            .map(|piece| (piece.board.thickness(), piece.board.width(), piece.t))
+            .collect();
+        sizes.sort();
+        // A sliver along the top between them, and a ridge on the bottom 1" wide to its point
+        // 1/2" up, both thinner than the board.
+        assert_eq!(sizes[0], (fraction(1, 8), fraction(1, 4), fraction(5, 8)));
+        assert_eq!(sizes[1], (fraction(1, 2), inches(1), Length::ZERO));
+        pieces_hold_its_wood(&cut, &pieces, 11);
+    }
+
+    proptest! {
+        #[test]
+        fn a_tilted_cut_anywhere_loses_just_the_wood_in_its_slot(
+            tilt in (-4500..=4500i32).prop_filter("tilted", |&tilt| tilt != 0),
+            slant in -4500..=4500i32,
+            at in 1..20 * 8i64,
+        ) {
+            let board = one_by_six();
+            let thickness = board.thickness();
+            let (cos, sin) = Angle::from_hundredths(slant).unit();
+            let along = Direction::new(cos, sin);
+            // Across the board's middle, square to the slot.
+            let middle = along.square().dot(inches(12), fraction(11, 4)) as f64 / along.scale();
+            let at = Length::from_nm(middle as i64) - inches(10) + fraction(at, 8);
+            let kerf = tilted_slot(along, Angle::from_hundredths(tilt), at, thickness);
+            let cut = board.with_kerf(kerf);
+            let pieces = cut.pieces();
+            if let [whole] = pieces.as_slice()
+                && whole.board == cut
+            {
+                // Past the board, or grazing a corner, turning a sliver to sawdust and leaving
+                // a slot.
+                pieces_hold_its_wood(&cut, &pieces, 5);
+                return Ok(());
+            }
+            let slot: f64 = board
+                .face()
+                .iter()
+                .filter_map(|region| region.solid(thickness).clip_all(kerf.faces()))
+                .map(|region| region.solid(thickness).volume())
+                .sum();
+            let total: f64 = pieces.iter().map(|piece| piece.board.volume()).sum::<f64>() + slot;
+            prop_assert!((total / board.volume() - 1.0).abs() < 1e-9, "{} of {}", total, board.volume());
+            for piece in &pieces {
+                for [l, w, t] in piece.board.corners() {
+                    let (l, w, t) = (piece.l + l, piece.w + w, piece.t + t);
+                    prop_assert!(Length::ZERO <= l && l <= board.length());
+                    prop_assert!(Length::ZERO <= w && w <= board.width());
+                    prop_assert!(Length::ZERO <= t && t <= thickness);
+                }
+            }
+            pieces_hold_its_wood(&cut, &pieces, 5);
+        }
     }
 }

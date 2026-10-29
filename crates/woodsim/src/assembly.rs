@@ -491,6 +491,14 @@ pub fn surfaces(board: &Board) -> Vec<Surface> {
 /// surface.
 pub fn outline(board: &Board, surface: Surface) -> Vec<Vec<[Length; 3]>> {
     let thickness = board.thickness();
+    if board.face().iter().any(|region| region.leans()) {
+        // Leaning sides: each region's face on the surface's plane, wherever it has one.
+        return board
+            .face()
+            .iter()
+            .filter_map(|region| region.solid(thickness).outline(surface))
+            .collect();
+    }
     match surface {
         Surface::Bottom | Surface::Top => board
             .face()
@@ -558,8 +566,10 @@ fn patch(board: &Board, surface: Surface) -> Option<Patch> {
         Surface::Bottom => ([0.0, 0.0, -1.0], [1.0, 0.0, 0.0], [0.0, -1.0, 0.0]),
         Surface::Top => ([0.0, 0.0, 1.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]),
         Surface::Side(side) => {
-            let n = unit([side.out.l as f64, side.out.w as f64, 0.0]);
-            (n, [-n[1], n[0], 0.0], [0.0, 0.0, 1.0])
+            // Along the side square to the thickness, and up it, which a leaning side leans.
+            let n = unit([side.out.l as f64, side.out.w as f64, side.lean as f64]);
+            let u = unit([-side.out.w as f64, side.out.l as f64, 0.0]);
+            (n, u, cross(n, u))
         }
     };
     Some(Patch {
