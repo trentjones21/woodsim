@@ -1,0 +1,11 @@
+[package]
+name = "viewer"
+version = "0.1.0"
+description = "The marketplace's viewer: one cut from a plan, made again on its saw in the browser, the way the game makes it."
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+bevy.workspace = true
+game.workspace = true
+woodsim.workspace = true

@@ -14,8 +14,10 @@ use std::{
     env, fs, io, mem,
     path::{Path, PathBuf},
     thread::{self, JoinHandle},
-    time::Duration,
 };
+
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Duration;
 
 use bevy::{prelude::*, text::EditableText};
 use woodsim::{Assembly, Recipe, Wood};
@@ -37,6 +39,7 @@ const FOLDER: &str = "uploads";
 /// The longest a title can be, as the marketplace takes them.
 pub const MOST_TITLE: usize = 120;
 /// How long putting plans up can take before it's given up on.
+#[cfg(not(target_arch = "wasm32"))]
 const TIMEOUT: Duration = Duration::from_secs(60);
 /// How long the status says how it went, wherever you are, in seconds.
 const NOTICE_SECONDS: f64 = 8.0;
@@ -77,6 +80,7 @@ impl Marketplace {
 
     /// Puts up plans called `title` for the wood `recipe` writes out, and says where they are,
     /// or why they aren't up, in a sentence.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn put_up(&self, title: &str, recipe: &str) -> Result<PutUp, String> {
         let Some(token) = &self.token else {
             return Err(format!(
@@ -101,6 +105,12 @@ impl Marketplace {
             .map_err(|why| format!("The marketplace's answer didn't come through: {why}."))?;
         answer(status, &body)
     }
+
+    /// On the web, plans go up from the game, not from a page.
+    #[cfg(target_arch = "wasm32")]
+    pub fn put_up(&self, _title: &str, _recipe: &str) -> Result<PutUp, String> {
+        Err("Plans go up from the game.".to_string())
+    }
 }
 
 /// Plans put up: where they are, and the token that takes them down.
@@ -111,6 +121,7 @@ pub struct PutUp {
 }
 
 /// What the marketplace's answer says: where the plans are, or why they aren't up.
+#[cfg(not(target_arch = "wasm32"))]
 fn answer(status: u16, body: &str) -> Result<PutUp, String> {
     let json: Option<serde_json::Value> = serde_json::from_str(body).ok();
     let field = |name: &str| {

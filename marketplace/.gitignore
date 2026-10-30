@@ -11,3 +11,5 @@ worker-configuration.d.ts
 .upload-token
 # Plans put up on the deployed marketplace by hand: id, link, and the token that takes each down.
 .uploaded
+# The viewer's script, built from crates/viewer by `npm run viewer`; its module goes in R2.
+public/viewer/viewer.js

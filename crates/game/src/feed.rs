@@ -14,8 +14,8 @@ use std::sync::Arc;
 use bevy::prelude::*;
 use plans::describe_kerf;
 use woodsim::{
-    Angle, Axis, Blade, Board, CutError, Length, MAX_GAUGE, MAX_TILT, Orientation, Recipe, Refusal,
-    Remake, Surface, TableSaw, Tool,
+    Angle, Axis, Blade, Board, CutError, Length, Lie, MAX_GAUGE, MAX_TILT, Orientation, Recipe,
+    Refusal, Remake, Surface, TableSaw, Tool, Wood,
 };
 
 use crate::{
@@ -328,6 +328,27 @@ impl TableSawStation {
                 travel,
             }),
         })
+    }
+
+    /// Sets the saw up as `recipe` says, for its pass to be made again: the wood as it was before
+    /// the pass, lying as it lay, the saw set as it was, and the board waiting in front of the
+    /// blade. Returns how far along the board the blade's center is to go, to make the pass as it
+    /// went (`move_to` it), or nothing if the recipe isn't for the table saw.
+    pub fn set_up(&mut self, recipe: &Recipe) -> Option<Length> {
+        let Some(Tool::TableSaw { saw, lie, travel }) = recipe.saw else {
+            return None;
+        };
+        self.load(match &recipe.wood {
+            Wood::Board(board) => Workpiece::Board(board.clone()),
+            Wood::GlueUp(glue_up) => Workpiece::GlueUp(glue_up.clone()),
+        });
+        self.saw = saw;
+        self.lie = match lie {
+            Lie::Board(lie) => lie,
+            Lie::GlueUp(turn) => Orientation::from_rotation(turn),
+        };
+        self.advance = travel.0.min(START);
+        Some(travel.1)
     }
 
     /// Starts choosing what the board rests on and what goes against the fence, each with a
@@ -883,6 +904,35 @@ mod tests {
     /// Pushes the board until the blade's center is `inches` along it.
     fn push_to(station: &mut TableSawStation, inches: i64) {
         station.move_to(Length::from_inches(inches));
+    }
+
+    #[test]
+    fn a_pass_made_again_from_its_recipe_leaves_the_same_wood() {
+        let mut cut = TableSawStation::default();
+        cut.set_tilt(Angle::from_degrees(45));
+        cut.turn_left();
+        push_to(&mut cut, 7);
+        let recipe = cut.recipe().expect("wood on the saw");
+
+        let mut again = TableSawStation::default();
+        let to = again.set_up(&recipe).expect("a table saw pass");
+        assert_eq!(to, Length::from_inches(7));
+        assert!(!again.at_blade(), "it waits in front of the blade");
+        again.move_to(to);
+        assert_eq!(again.recipe(), Some(recipe));
+        assert_eq!(again.wood(), cut.wood());
+        assert_eq!(again.status(), cut.status());
+
+        let miter_saw = Recipe {
+            saw: Some(Tool::MiterSaw {
+                saw: woodsim::MiterSaw::twelve_inch(),
+                lie: Lie::Board(Orientation::default()),
+                length: Length::from_inches(12),
+                bottom: Length::from_inches(-1),
+            }),
+            ..again.recipe().unwrap()
+        };
+        assert_eq!(TableSawStation::default().set_up(&miter_saw), None);
     }
 
     /// Pushes the board all the way past the blade.

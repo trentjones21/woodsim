@@ -9,6 +9,8 @@
 //                           token that takes it down
 //   GET    /p/<id>          a plan's page
 //   DELETE /api/plans/<id>  take a plan down, with its token as a bearer token
+//   GET    /viewer/         the 3D viewer, one cut made again on its saw (public/viewer), whose
+//                           module, too big to be one of the Worker's files, comes from R2
 
 import { drawUp } from "./plans";
 import { type Listed, listPage, notFound, planPage } from "./pages";
@@ -40,6 +42,9 @@ export default {
       if (first === "p" && ID.test(second) && third === undefined) {
         return reading(request) ? await show(env, second) : notAllowed("GET, HEAD");
       }
+      if (url.pathname === "/viewer/viewer_bg.wasm") {
+        return reading(request) ? await viewerModule(env) : notAllowed("GET, HEAD");
+      }
       return notFound();
     } catch (error) {
       console.error(
@@ -64,6 +69,24 @@ async function show(env: Env, id: string): Promise<Response> {
   // A plan still going up has its row but not yet its page.
   const page = plan && (await env.PLANS.get(`plans/${id}/plan.html`));
   return page ? planPage(page.body, plan.title) : notFound();
+}
+
+/** The viewer's module, kept in R2 compressed with brotli, and sent as it is. */
+async function viewerModule(env: Env): Promise<Response> {
+  const module = await env.PLANS.get("viewer/viewer_bg.wasm.br");
+  if (!module) {
+    return notFound();
+  }
+  return new Response(module.body, {
+    encodeBody: "manual",
+    headers: {
+      "content-type": "application/wasm",
+      "content-encoding": "br",
+      // Short, since the page's script has to match it and isn't named for its version yet.
+      "cache-control": "public, max-age=300",
+      etag: module.httpEtag,
+    },
+  });
 }
 
 async function putUp(request: Request, env: Env, url: URL): Promise<Response> {

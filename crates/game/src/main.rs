@@ -1,41 +1,5 @@
 //! Woodshop Simulator. Bevy draws the shop; `woodsim` owns every board's real dimensions.
 
-mod bench;
-mod blades;
-mod chop;
-mod controls;
-mod copy;
-mod dress;
-mod edit;
-mod feed;
-mod flights;
-mod gpu;
-mod grain;
-mod hand;
-mod hud;
-mod icons;
-mod infeed;
-mod inventory;
-mod join;
-mod jointer;
-mod meshes;
-mod miter_saw;
-mod parts;
-mod planer;
-mod rest;
-mod saved;
-mod scenery;
-mod shoot;
-mod shop;
-mod studio;
-mod table_saw;
-mod textures;
-mod thickness;
-mod trace;
-mod turning;
-mod upload;
-mod work;
-
 use std::{path::PathBuf, time::Duration};
 
 use bevy::{
@@ -52,27 +16,14 @@ use bevy::{
     winit::WinitPlugin,
 };
 
-use bench::BenchPlugin;
-use blades::BladesPlugin;
-use controls::ControlsPlugin;
-use copy::CopyPlugin;
-use edit::EditPlugin;
-use flights::FlightsPlugin;
-use hand::HandPlugin;
-use hud::HudPlugin;
-use inventory::InventoryPlugin;
-use jointer::JointerPlugin;
-use miter_saw::MiterSawPlugin;
-use parts::PartsPlugin;
-use planer::PlanerPlugin;
-use rest::RestPlugin;
-use saved::SavedPlugin;
-use scenery::ScenePlugin;
-use shop::ShopPlugin;
-use studio::StudioPlugin;
-use table_saw::TableSawPlugin;
-use turning::TurningPlugin;
-use upload::UploadPlugin;
+use game::{
+    bench::BenchPlugin, blades::BladesPlugin, controls::ControlsPlugin, copy::CopyPlugin,
+    edit::EditPlugin, flights::FlightsPlugin, hand::HandPlugin, hud::HudPlugin,
+    inventory::InventoryPlugin, jointer::JointerPlugin, miter_saw::MiterSawPlugin,
+    parts::PartsPlugin, planer::PlanerPlugin, rest::RestPlugin, saved::SavedPlugin,
+    scenery::ScenePlugin, shop::ShopPlugin, studio::StudioPlugin, table_saw::TableSawPlugin,
+    turning::TurningPlugin, upload::UploadPlugin,
+};
 
 fn main() {
     let screenshot = std::env::var_os("WOODSHOP_SCREENSHOT").map(PathBuf::from);
