@@ -36,6 +36,7 @@ use crate::{
     studio, table_saw,
     textures::{self, FLOOR_TILE, MAPLE, PINE},
     thickness::PlanerStation,
+    turning::{Turn, Turning},
 };
 
 /// Converts inches to meters, for laying out the scene.
@@ -169,6 +170,7 @@ pub type SawPart = (
     &'static mut Transform,
     &'static mut Visibility,
     &'static mut Shape,
+    &'static mut Turning,
 );
 
 /// Which of a part's boards an entity on a saw draws: a board, or one board of a glue-up.
@@ -784,6 +786,7 @@ fn outline_hovered_station(
 /// The board and grain a mesh was last built from, so it's only rebuilt when they change and
 /// not every frame the blade moves.
 #[derive(Component, Default)]
+#[require(Turning)]
 pub struct Shape(Option<(Board, Vec3)>);
 
 impl Shape {
@@ -797,26 +800,44 @@ impl Shape {
         Shape(Some((placed.board.clone(), placed.grain)))
     }
 
+    /// Whether the mesh was built for `placed`.
+    pub fn is(&self, placed: &Placed) -> bool {
+        self.0
+            .as_ref()
+            .is_some_and(|(board, grain)| *board == placed.board && *grain == placed.grain)
+    }
+
     /// Rebuilds `mesh` for `placed` unless it was built for it already.
     pub fn update(&mut self, placed: &Placed, mesh: &Mesh3d, meshes: &mut Assets<Mesh>) {
-        let shape = Shape::built(placed);
-        if self.0 != shape.0
+        if !self.is(placed)
             && let Some(mut mesh) = meshes.get_mut(&mesh.0)
         {
             *mesh = lumber_mesh(&placed.board, placed.grain);
-            *self = shape;
+            *self = Shape::built(placed);
         }
     }
 }
 
+/// The corners of `board`'s wood, in the coordinates its mesh is built in.
+fn corners(board: &Board) -> Vec<Vec3> {
+    board
+        .corners()
+        .into_iter()
+        .map(|[l, w, t]| Vec3::new(w.as_meters_f32(), t.as_meters_f32(), l.as_meters_f32()))
+        .collect()
+}
+
 /// Places each board of each part on a saw, rebuilding its mesh to match the board and hiding
 /// the entities with no board to draw. Each board needs its own mesh. `frame` turns the saw's own
-/// frame (across, up, along) into the station's coordinates, which start at `origin`. Returns
-/// the boards no entity draws yet, with where each goes, for the station to spawn.
+/// frame (across, up, along) into the station's coordinates, which start at `origin`. When the
+/// station has just laid its wood another way (`turned`), a part whose boards are just as they
+/// were turns there as one (`Turning`), rather than jumping. Returns the boards no entity draws
+/// yet, with where each goes, for the station to spawn.
 pub fn place_parts<'a>(
     boards: &SawBoards,
     origin: Vec3,
     frame: Quat,
+    turned: bool,
     meshes: &mut Assets<Mesh>,
     parts: impl IntoIterator<
         Item = (
@@ -826,6 +847,7 @@ pub fn place_parts<'a>(
             Mut<'a, Transform>,
             Mut<'a, Visibility>,
             Mut<'a, Shape>,
+            Mut<'a, Turning>,
         ),
     >,
 ) -> Vec<(Part, Slot, Transform, Placed)> {
@@ -834,18 +856,31 @@ pub fn place_parts<'a>(
             .with_rotation(frame * placed.rotation)
     };
     let mut drawn = Vec::new();
-    for (part, slot, mesh, mut transform, mut visibility, mut shape) in parts {
-        match boards.get(*part).get(slot.0) {
-            Some(placed) => {
-                *transform = pose(placed);
-                shape.update(placed, mesh, meshes);
-                *visibility = Visibility::Inherited;
-                drawn.push((*part, *slot));
+    // Boards that can turn to where they go, and the parts with a board that can't.
+    let mut turnable = Vec::new();
+    let mut changed = Vec::new();
+    for (part, slot, mesh, mut transform, mut visibility, mut shape, mut turning) in parts {
+        let Some(placed) = boards.get(*part).get(slot.0) else {
+            *visibility = Visibility::Hidden;
+            turning.stop();
+            continue;
+        };
+        let to = pose(placed);
+        if turned && *visibility != Visibility::Hidden && shape.is(placed) {
+            turnable.push((*part, to, corners(&placed.board), transform, turning));
+        } else {
+            changed.push(*part);
+            shape.update(placed, mesh, meshes);
+            // One turning there already keeps going.
+            if turning.toward() != Some(to) {
+                *transform = to;
+                turning.stop();
             }
-            None => *visibility = Visibility::Hidden,
         }
+        *visibility = Visibility::Inherited;
+        drawn.push((*part, *slot));
     }
-    [Part::Whole, Part::Piece, Part::Offcut]
+    let missing: Vec<_> = [Part::Whole, Part::Piece, Part::Offcut]
         .into_iter()
         .flat_map(|part| {
             boards
@@ -856,7 +891,32 @@ pub fn place_parts<'a>(
         })
         .filter(|(part, slot, _)| !drawn.contains(&(*part, *slot)))
         .map(|(part, slot, placed)| (part, slot, pose(placed), placed.clone()))
-        .collect()
+        .collect();
+    changed.extend(missing.iter().map(|(part, ..)| *part));
+    for part in [Part::Whole, Part::Piece, Part::Offcut] {
+        let (mut these, rest): (Vec<_>, Vec<_>) =
+            turnable.into_iter().partition(|(of, ..)| *of == part);
+        turnable = rest;
+        let moves: Vec<_> = these
+            .iter_mut()
+            .map(|(_, to, corners, from, _)| (**from, *to, std::mem::take(corners)))
+            .collect();
+        let turn = if changed.contains(&part) {
+            None
+        } else {
+            Turn::between(&moves)
+        };
+        for (_, to, _, mut transform, mut turning) in these {
+            match turn {
+                Some(turn) => turning.start(turn, *transform, to),
+                None => {
+                    *transform = to;
+                    turning.stop();
+                }
+            }
+        }
+    }
+    missing
 }
 
 /// A rounded box filling `block`, given in the coordinates of a station at `origin`.

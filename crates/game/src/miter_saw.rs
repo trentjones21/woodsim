@@ -643,12 +643,22 @@ fn draw_board(
     shop: Res<ShopAssets>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut parts: Query<SawPart, With<AtMiterSaw>>,
+    mut turns: Local<u32>,
 ) {
     if !station.is_changed() {
         return;
     }
     let boards = station.boards();
-    let missing = place_parts(&boards, ORIGIN, board_turn(), &mut meshes, &mut parts);
+    let turned = station.turns() != *turns;
+    *turns = station.turns();
+    let missing = place_parts(
+        &boards,
+        ORIGIN,
+        board_turn(),
+        turned,
+        &mut meshes,
+        &mut parts,
+    );
     for (part, slot, pose, placed) in missing {
         commands
             .spawn((

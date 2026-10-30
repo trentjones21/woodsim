@@ -86,6 +86,9 @@ pub struct Infeed<M: Machine> {
     rest: Rest,
     /// How many times the board has moved and the knives have taken more wood, for chips.
     bites: u32,
+    /// How many times it's been laid another way, turned or rested on something else, for
+    /// drawing it turning.
+    turns: u32,
 }
 
 struct Feeding<M> {
@@ -112,6 +115,7 @@ impl<M: Machine> Default for Infeed<M> {
             set_aside: Vec::new(),
             rest: Rest::default(),
             bites: 0,
+            turns: 0,
         }
     }
 }
@@ -174,6 +178,7 @@ impl<M: Machine> Infeed<M> {
             return false;
         }
         self.lie = lie;
+        self.turns += 1;
         true
     }
 
@@ -216,6 +221,7 @@ impl<M: Machine> Infeed<M> {
         match self.rest.pick(&self.board, self.lie, (slot, surface)) {
             Some(lie) => {
                 self.lie = lie;
+                self.turns += 1;
                 true
             }
             None => false,
@@ -521,6 +527,11 @@ impl<M: Machine> Infeed<M> {
     /// whenever this goes up.
     pub fn bites(&self) -> u32 {
         self.bites
+    }
+
+    /// How many times the board's been laid another way: it's turning whenever this goes up.
+    pub fn turns(&self) -> u32 {
+        self.turns
     }
 
     /// Whether the whole board is past the cutterhead, on the outfeed side.

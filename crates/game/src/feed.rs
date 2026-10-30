@@ -70,6 +70,9 @@ pub struct TableSawStation {
     rest: Rest,
     /// How many times the board has moved and the blade's taken more wood, for sawdust.
     bites: u32,
+    /// How many times it's been laid another way, turned or rested on something else, for
+    /// drawing it turning.
+    turns: u32,
 }
 
 struct Feeding {
@@ -105,6 +108,7 @@ impl Default for TableSawStation {
             set_aside: Vec::new(),
             rest: Rest::default(),
             bites: 0,
+            turns: 0,
         }
     }
 }
@@ -304,6 +308,7 @@ impl TableSawStation {
             return false;
         }
         self.lie = lie;
+        self.turns += 1;
         true
     }
 
@@ -350,6 +355,7 @@ impl TableSawStation {
         match self.rest.pick(&self.board, self.lie, (slot, surface)) {
             Some(lie) => {
                 self.lie = lie;
+                self.turns += 1;
                 true
             }
             None => false,
@@ -635,6 +641,11 @@ impl TableSawStation {
     /// whenever this goes up.
     pub fn bites(&self) -> u32 {
         self.bites
+    }
+
+    /// How many times the board's been laid another way: it's turning whenever this goes up.
+    pub fn turns(&self) -> u32 {
+        self.turns
     }
 
     /// Where the blade throws up sawdust, in table space, and which way: the highest place its
@@ -1183,6 +1194,19 @@ mod tests {
         assert_eq!(station.saw.miter_gauge, Some(GAUGE_STOP_MAX));
         station.set_fence(Length::from_inches(3));
         assert_eq!(station.saw.fence, Length::from_inches(6));
+    }
+
+    #[test]
+    fn laying_the_board_another_way_counts_a_turn_to_draw_it_turning() {
+        let mut station = TableSawStation::default();
+        assert!(station.turn_left() && station.flip() && station.tip());
+        assert_eq!(station.turns(), 3);
+        assert!(station.choose_rest() && station.pick_rest(0, Surface::Top));
+        assert_eq!(station.turns(), 4);
+        // At the blade, it doesn't turn.
+        push_to(&mut station, 2);
+        assert!(!station.turn_right());
+        assert_eq!(station.turns(), 4);
     }
 
     #[test]

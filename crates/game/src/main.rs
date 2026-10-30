@@ -32,6 +32,7 @@ mod table_saw;
 mod textures;
 mod thickness;
 mod trace;
+mod turning;
 mod upload;
 mod work;
 
@@ -70,6 +71,7 @@ use scenery::ScenePlugin;
 use shop::ShopPlugin;
 use studio::StudioPlugin;
 use table_saw::TableSawPlugin;
+use turning::TurningPlugin;
 use upload::UploadPlugin;
 
 fn main() {
@@ -137,7 +139,7 @@ fn main() {
         InventoryPlugin,
         (PartsPlugin, EditPlugin),
         HudPlugin,
-        FlightsPlugin,
+        (FlightsPlugin, TurningPlugin),
         RestPlugin,
         (CopyPlugin, UploadPlugin),
         SavedPlugin,

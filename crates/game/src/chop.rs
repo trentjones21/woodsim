@@ -66,6 +66,9 @@ pub struct MiterSawStation {
     rest: Rest,
     /// How many times the blade's gone deeper and taken more wood, for sawdust.
     bites: u32,
+    /// How many times the board's been laid another way, turned or rested on something else,
+    /// for drawing it turning.
+    turns: u32,
 }
 
 pub enum Work {
@@ -103,6 +106,7 @@ impl Default for MiterSawStation {
             lie: Orientation::default(),
             rest: Rest::default(),
             bites: 0,
+            turns: 0,
         }
     }
 }
@@ -206,6 +210,7 @@ impl MiterSawStation {
         match self.rest.pick(&waiting, self.lie, (slot, surface)) {
             Some(lie) => {
                 self.lie = lie;
+                self.turns += 1;
                 true
             }
             None => false,
@@ -245,6 +250,7 @@ impl MiterSawStation {
         };
         *missed = None;
         self.lie = lie;
+        self.turns += 1;
         true
     }
 
@@ -578,6 +584,11 @@ impl MiterSawStation {
     /// goes up.
     pub fn bites(&self) -> u32 {
         self.bites
+    }
+
+    /// How many times the board's been laid another way: it's turning whenever this goes up.
+    pub fn turns(&self) -> u32 {
+        self.turns
     }
 
     /// Where the blade throws up sawdust, in station space, and which way: the highest place
@@ -1197,6 +1208,17 @@ mod tests {
         station.lower(1.0);
         assert_eq!(station.bottom(), station.saw.stroke.1);
         assert!(station.bottom() < Length::ZERO);
+    }
+
+    #[test]
+    fn laying_the_board_another_way_counts_a_turn_to_draw_it_turning() {
+        let mut station = loaded();
+        assert!(station.turn_left() && station.flip());
+        assert_eq!(station.turns(), 2);
+        // With the blade down, it doesn't turn.
+        station.lower(0.5);
+        assert!(!station.turn_right());
+        assert_eq!(station.turns(), 2);
     }
 
     #[test]

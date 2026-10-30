@@ -18,6 +18,7 @@ use crate::{
     shop::{Part, Shape, ShopView, Slot},
     table_saw::AtTableSaw,
     thickness::PlanerStation,
+    turning::turn_wood,
 };
 
 pub struct RestPlugin;
@@ -26,7 +27,7 @@ impl Plugin for RestPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<SawPointing>()
             .add_systems(Startup, spawn_marks)
-            .add_systems(Update, mark_surfaces);
+            .add_systems(Update, mark_surfaces.after(turn_wood));
     }
 }
 
@@ -117,7 +118,8 @@ fn spawn_marks(
 }
 
 /// Lays the sheets over the surface under the pointer and the one the wood rests on, at the
-/// saw you're at, while choosing what it rests on.
+/// saw you're at, while choosing what it rests on: where the boards are drawn this frame, even
+/// turning, so a sheet turns with its surface.
 #[allow(clippy::type_complexity)]
 fn mark_surfaces(
     view: Res<ShopView>,
@@ -133,7 +135,7 @@ fn mark_surfaces(
         &Part,
         &Slot,
         &Shape,
-        &GlobalTransform,
+        &Transform,
         (
             Has<AtTableSaw>,
             Has<AtMiterSaw>,
@@ -141,13 +143,16 @@ fn mark_surfaces(
             Has<AtPlaner>,
         ),
     )>,
-    mut marks: Query<(
-        &Mark,
-        &Mesh3d,
-        &mut Transform,
-        &mut Visibility,
-        &mut MarkShape,
-    )>,
+    mut marks: Query<
+        (
+            &Mark,
+            &Mesh3d,
+            &mut Transform,
+            &mut Visibility,
+            &mut MarkShape,
+        ),
+        Without<Shape>,
+    >,
     mut meshes: ResMut<Assets<Mesh>>,
 ) {
     let (choosing, down) = match *view {
@@ -195,9 +200,8 @@ fn mark_surfaces(
             }
             continue;
         };
-        let at = Transform::from_matrix(placed.to_matrix());
-        if *transform != at {
-            *transform = at;
+        if *transform != *placed {
+            *transform = *placed;
         }
         let built = shape
             .0

@@ -468,6 +468,19 @@ mod tests {
     }
 
     #[test]
+    fn laying_the_board_another_way_counts_a_turn_to_draw_it_turning() {
+        let mut station = one_by_six();
+        assert!(station.flip() && station.choose_rest());
+        assert!(station.pick_rest(0, Surface::Bottom));
+        assert_eq!(station.turns(), 2);
+        // Fed across, it doesn't turn, and brought back around it isn't turned either.
+        push_across(&mut station);
+        assert!(!station.turn_left());
+        assert!(station.bring_back());
+        assert_eq!(station.turns(), 2);
+    }
+
+    #[test]
     fn choosing_the_face_for_the_fence_stands_it_on_the_edge_to_joint() {
         let mut station = one_by_six();
         assert!(station.choose_rest());
