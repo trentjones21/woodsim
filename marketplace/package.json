@@ -5,6 +5,9 @@
   "type": "module",
   "scripts": {
     "wasm": "cargo build -p plans-wasm --release --target wasm32-unknown-unknown && mkdir -p build && cp ../target/wasm32-unknown-unknown/release/plans_wasm.wasm build/plans.wasm",
+    "viewer": "cargo build -p viewer --profile web --target wasm32-unknown-unknown && ${WASM_BINDGEN:-wasm-bindgen} --target web --no-typescript --out-dir build/viewer --out-name viewer ../target/wasm32-unknown-unknown/web/viewer.wasm && cp build/viewer/viewer.js public/viewer/ && node scripts/brotli.mjs build/viewer/viewer_bg.wasm build/viewer/viewer_bg.wasm.br",
+    "viewer:local": "wrangler r2 object put woodshop-marketplace-plans/viewer/viewer_bg.wasm.br --file build/viewer/viewer_bg.wasm.br --local",
+    "viewer:remote": "wrangler r2 object put woodshop-marketplace-plans/viewer/viewer_bg.wasm.br --file build/viewer/viewer_bg.wasm.br --remote",
     "types": "wrangler types",
     "check": "npm run wasm && wrangler types && tsc --noEmit",
     "dev": "wrangler d1 migrations apply DB --local && wrangler dev",

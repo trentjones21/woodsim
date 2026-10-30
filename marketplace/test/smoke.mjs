@@ -70,4 +70,16 @@ assert.equal((await takeDown(plan.edit_token)).status, 204, "taking it down with
 assert.equal((await fetch(plan.url)).status, 404, "its page once it's down");
 assert.equal((await takeDown(plan.edit_token)).status, 404, "taking it down again");
 
+// The viewer's page, and its module from R2, compressed, once it's been put there.
+response = await fetch(`${base}/viewer/`);
+assert.equal(response.status, 200, "the viewer's page");
+assert.match(await response.text(), /<canvas id="viewer">/);
+response = await fetch(`${base}/viewer/viewer_bg.wasm`, { method: "HEAD" });
+if (response.status === 404) {
+  console.log("The viewer's module isn't in R2 yet (npm run viewer, then viewer:local or viewer:remote).");
+} else {
+  assert.equal(response.status, 200, "the viewer's module");
+  assert.equal(response.headers.get("content-type"), "application/wasm");
+}
+
 console.log(`The marketplace at ${base} works.`);

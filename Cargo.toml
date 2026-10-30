@@ -7,11 +7,54 @@ edition = "2024"
 rust-version = "1.98"
 
 [workspace.dependencies]
-bevy = "0.20.0"
+# Only what the shop uses, so the game builds faster and the viewer is small enough for the web:
+# no audio, gamepads, 2D, glTF, scenes, animation, or post-processing.
+bevy = { version = "0.20.0", default-features = false, features = [
+  # The app and the platform: windows, input, the clipboard, threads, WebGL2 on the web.
+  "default_app",
+  "std",
+  "bevy_winit",
+  "bevy_clipboard",
+  "multi_threaded",
+  "webgl2",
+  "x11",
+  "wayland",
+  # 3D, drawn by Bevy's renderer, with its tonemapping.
+  "bevy_camera",
+  "bevy_color",
+  "bevy_curve",
+  "bevy_gizmos",
+  "bevy_gizmos_render",
+  "bevy_image",
+  "bevy_mesh",
+  "bevy_shader",
+  "bevy_material",
+  "bevy_window",
+  "bevy_light",
+  "bevy_mikktspace",
+  "bevy_render",
+  "bevy_core_pipeline",
+  "bevy_pbr",
+  "ktx2",
+  "zstd_rust",
+  "tonemapping_luts",
+  # Renders and screenshots are saved as PNGs.
+  "png",
+  # The HUD: text, UI, its widgets, and picking what's under the pointer.
+  "bevy_text",
+  "bevy_ui",
+  "bevy_ui_render",
+  "bevy_ui_widgets",
+  "bevy_input_focus",
+  "bevy_picking",
+  "mesh_picking",
+  "ui_picking",
+] }
 proptest = "1.12.0"
 serde_json = "1.0.154"
 # Putting plans up on the marketplace: HTTPS with rustls, nothing else.
 ureq = { version = "3.4.2", default-features = false, features = ["rustls"] }
+game = { path = "crates/game" }
 plans = { path = "crates/plans" }
 woodsim = { path = "crates/woodsim" }
 
@@ -22,3 +65,13 @@ opt-level = 1
 
 [profile.dev.package."*"]
 opt-level = 3
+
+# The marketplace's viewer, built for the web as small as it goes:
+# `npm --prefix marketplace run viewer`.
+[profile.web]
+inherits = "release"
+opt-level = "s"
+lto = "fat"
+codegen-units = 1
+strip = true
+panic = "abort"

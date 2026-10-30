@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Woodshop viewer</title>
+<style>
+html, body { margin: 0; height: 100%; background: #f4efe6; color: #1d2026;
+  font: 15px/1.4 -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif; }
+main { position: fixed; inset: 0; }
+canvas#viewer { width: 100%; height: 100%; display: block; outline: none; touch-action: none; }
+#loading { position: absolute; inset: 0; display: grid; place-items: center; margin: 0;
+  pointer-events: none; }
+</style>
+</head>
+<body>
+<main>
+<canvas id="viewer"></canvas>
+<p id="loading">Setting up the shop…</p>
+</main>
+<script type="module">
+// One cut, made again on its saw by the game's own code (crates/viewer). Drag to look around
+// the saw, scroll to zoom.
+import init from "./viewer.js";
+
+const loading = document.getElementById("loading");
+const began = performance.now();
+try {
+  await init();
+} catch (error) {
+  // Bevy's event loop hands control back to the browser by throwing; anything else is real.
+  if (!String(error).includes("Using exceptions for control flow")) {
+    loading.textContent = `The viewer didn't start: ${error}`;
+    throw error;
+  }
+}
+// How long it took to load and start, for measuring.
+window.viewerStarted = performance.now() - began;
+loading.remove();
+</script>
+</body>
+</html>

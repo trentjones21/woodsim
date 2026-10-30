@@ -59,7 +59,7 @@ const HEIGHT_BIG_STEP: Length = Length::from_inch_fraction(1, 4);
 const KNIFE_BELOW_BLADE: f32 = inches(1.0 / 8.0);
 const KNIFE_HEIGHT: f32 = inches(4.0);
 /// How fast the board moves while Space is held: 10" a second.
-const FEED_SPEED: f32 = inches(10.0);
+pub const FEED_SPEED: f32 = inches(10.0);
 /// Seconds the saw takes to come up to speed and to coast to a stop, and how long it runs on
 /// after the board's clear of the blade, as if switched off then.
 const SPIN_UP: f32 = 0.6;

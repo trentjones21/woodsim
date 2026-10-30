@@ -1,0 +1,6 @@
+# Woodshop Simulator, copied: at the table saw, Ripped a 3/4" x 5-1/4" x 24" piece, plus a 3/4" x 2-37/64" x 24" offcut. The blade turned 11/64" to sawdust. The piece is beveled 45° along one edge.
+# woodsim::Recipe::read reads the rest back exactly.
+version 2
+stock s0 609600000 184150000 19050000
+board s0
+saw table-saw 254000000 3175000 114300000 25400000 none 0 4500 board 1099511627776 0 0 0 1099511627776 0 0 0 1099511627776 -152400000 762000000

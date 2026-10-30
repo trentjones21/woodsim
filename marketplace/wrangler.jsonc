@@ -13,6 +13,12 @@
     "command": "npm run wasm",
     "watch_dir": ["src", "../crates/plans/src", "../crates/plans-wasm/src", "../crates/woodsim/src"]
   },
+  // Files served as they are, ahead of the Worker: the viewer's page, and its script once
+  // `npm run viewer` has built it. Its module is too big to be one of these (25 MiB at most), so
+  // it's kept in R2 (`npm run viewer:local`, `viewer:remote`) and the Worker sends it.
+  "assets": {
+    "directory": "public"
+  },
   "d1_databases": [
     {
       // One row a plan: its title, when it went up, and the hash of the token that takes it down.
@@ -24,7 +30,8 @@
   ],
   "r2_buckets": [
     {
-      // Each plan's recipe and the page drawn up from it, under plans/<id>/.
+      // Each plan's recipe and the page drawn up from it, under plans/<id>/, and the viewer's
+      // module, compressed, at viewer/viewer_bg.wasm.br.
       "binding": "PLANS",
       "bucket_name": "woodshop-marketplace-plans"
     }
